@@ -1,0 +1,33 @@
+key: wifi_monitor
+order: 20
+label: Wi-Fi Monitor
+description: On-demand monitor-mode Wi-Fi packet capture and channel hopping
+has_device_history: true
+enabled: true
+auto_start: false
+primary_validation: command -v iw >/dev/null 2>&1
+fallback_validation: none
+validation_timeout_sec: 10
+interface: auto
+interface_regex: wlan|^mon
+bands:
+- '2.4'
+- '5'
+typical_channels_24:
+- 1
+- 6
+- 11
+typical_channels_5:
+- 36
+- 40
+- 44
+- 48
+- 149
+- 153
+- 157
+- 161
+- 165
+include_seen_channels: false
+dwell_sec: 1
+retry_interval_sec: 5
+retry_timeout_sec: 30

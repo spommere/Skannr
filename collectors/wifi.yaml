@@ -1,0 +1,14 @@
+key: wifi
+order: 10
+label: Wi-Fi Scan
+description: Lightweight Wi-Fi access-point scanning
+has_device_history: true
+enabled: true
+primary_validation: test -d /sys/class/net/{preferred_interface} && (command -v iw >/dev/null 2>&1 || command -v iwlist >/dev/null 2>&1)
+fallback_validation: test -d /sys/class/net/{fallback_interface} && (command -v iw >/dev/null 2>&1 || command -v iwlist >/dev/null 2>&1)
+validation_timeout_sec: 10
+preferred_interface: wlan1
+fallback_interface: wlan0
+managed_scan_interval_sec: 2
+retry_interval_sec: 5
+retry_timeout_sec: 30

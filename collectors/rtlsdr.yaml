@@ -1,0 +1,18 @@
+key: rtlsdr
+order: 50
+label: RTL-SDR
+description: rtl_power spectrum scanning
+has_device_history: false
+enabled: true
+primary_validation: command -v rtl_power >/dev/null 2>&1 && command -v rtl_test >/dev/null 2>&1 && rtl_test -t
+fallback_validation: none
+validation_timeout_sec: 10
+device_index: 0
+scan_start_mhz: 400
+scan_end_mhz: 470
+step_khz: 50
+gain: 40
+threshold_db: 10
+baseline_period_sec: 30
+retry_interval_sec: 5
+retry_timeout_sec: 30

@@ -1,0 +1,4 @@
+-r requirements-base.txt
+
+bleak
+scapy>=2.5

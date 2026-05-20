@@ -1,0 +1,25 @@
+key: ble
+order: 30
+label: BLE Scan
+description: Bluetooth Low Energy advertisement scanning
+source_group: bluetooth
+source_group_label: Bluetooth
+has_device_history: true
+enabled: true
+primary_validation: test -d /sys/class/bluetooth/{preferred_adapter} || hciconfig {preferred_adapter} >/dev/null 2>&1
+fallback_validation: test -d /sys/class/bluetooth/{fallback_adapter} || hciconfig {fallback_adapter} >/dev/null 2>&1 || bluetoothctl list | grep -q 'Controller '
+validation_timeout_sec: 10
+preferred_adapter: hci1
+fallback_adapter: hci0
+scan_interval_sec: 2
+device_timeout_sec: 60
+active_scan: true
+callback_scan: true
+bluez_duplicate_data: true
+name_lookup_interval_sec: 60
+classic_name_lookup: false
+classic_name_timeout_sec: 2
+retry_interval_sec: 5
+retry_timeout_sec: 30
+reset_after_in_progress: 3
+wedged_warning_after_in_progress: 6

@@ -1,0 +1,5 @@
+# Optional collector dependencies for older Python 3.6 systems.
+# Prefer Python 3.10+ when possible; this file is only for legacy hosts.
+scapy<2.5
+# bleak's maintained releases no longer target Python 3.6 reliably.
+# Install BLE support on Python 3.10+ with requirements-collectors-py310.txt.

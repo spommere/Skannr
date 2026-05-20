@@ -1,0 +1,4 @@
+# Optional collector dependencies for the design-doc target runtime.
+# Use this on Python 3.10+.
+bleak
+scapy

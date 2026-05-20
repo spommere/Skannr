@@ -1,0 +1,31 @@
+# Python bytecode and local caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime output
+logs/
+*.log
+
+# Local machine configuration
+
+# Packaged archives
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Local OS/editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

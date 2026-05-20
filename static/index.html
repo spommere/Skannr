@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skannr</title>
+  <link rel="stylesheet" href="/static/style.css?v=20260519-skannr">
+</head>
+<body>
+  <header>
+    <div class="header-title">
+      <h1>Skannr</h1>
+      <div id="app-version" class="badge muted">v0.1.0</div>
+      <div id="socket-state" class="badge muted">Disconnected</div>
+    </div>
+    <div class="header-actions">
+      <label>View
+        <select id="view-window-filter">
+          <option value="default">Default</option>
+          <option value="all">All retained logs</option>
+        </select>
+      </label>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="insights">Insights</button>
+    <button class="tab" data-tab="reports">Reports</button>
+    <button class="tab" data-tab="history">Device History</button>
+    <button class="tab" data-tab="wifi">Wi-Fi Scan</button>
+    <button class="tab" data-tab="wifi_monitor">Wi-Fi Monitor</button>
+    <button class="tab" data-tab="bluetooth">Bluetooth</button>
+    <button class="tab" data-tab="rtlsdr">RTL-SDR</button>
+    <button class="tab" data-tab="system">System Status</button>
+  </nav>
+
+  <main>
+    <section id="tab-insights" class="panel active">
+      <div class="panel-head">
+        <h2>Insights</h2>
+        <button id="insights-refresh" class="action-button">Refresh</button>
+      </div>
+      <div id="insights-status" class="status-strip muted">Waiting for insights</div>
+      <div class="subtabs" data-subtab-group="insights"></div>
+      <div class="filter-bar">
+        <label>View
+          <select id="insights-activity-filter">
+            <option value="important">Important</option>
+            <option value="recent">Recent</option>
+            <option value="all">All</option>
+          </select>
+        </label>
+        <label>Severity
+          <select id="insights-severity-filter">
+            <option value="all">All</option>
+            <option value="warning">Warning only</option>
+            <option value="warning_error">Warning + Error</option>
+            <option value="error">Error only</option>
+          </select>
+        </label>
+        <label>Search
+          <input id="insights-search" type="search" placeholder="Filter visible columns">
+        </label>
+      </div>
+      <table class="system-status-table">
+        <thead id="insights-head"></thead>
+        <tbody id="insights-list"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-reports" class="panel">
+      <div class="panel-head">
+        <h2>Reports</h2>
+        <button id="reports-refresh" class="action-button">Refresh</button>
+      </div>
+      <div id="reports-status" class="status-strip muted">Waiting for reports</div>
+      <div class="subtabs" data-subtab-group="reports"></div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="reports-search" type="search" placeholder="Filter visible columns">
+        </label>
+      </div>
+      <table class="reports-table">
+        <thead id="reports-head"></thead>
+        <tbody id="reports-list"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-history" class="panel">
+      <div class="panel-head">
+        <h2>Device History</h2>
+        <button id="history-refresh" class="action-button">Refresh</button>
+      </div>
+      <div id="history-status" class="status-strip muted">Waiting for device history</div>
+      <div class="subtabs" data-subtab-group="history"></div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="history-search" type="search" placeholder="Filter visible columns">
+        </label>
+      </div>
+      <div id="history-wifi-panel" class="subpanel history-source-panel" data-source="wifi">
+        <h3>Wi-Fi Access Points</h3>
+        <table>
+          <thead><tr><th>SSID</th><th>BSSID</th><th>Vendor</th><th>First Seen</th><th>Last Seen</th><th>Channels / Freq</th><th>Encryption</th><th>Signal</th><th>Seen</th><th>Insights</th></tr></thead>
+          <tbody id="history-wifi-aps"></tbody>
+        </table>
+        <h3>Wi-Fi Clients</h3>
+        <table>
+          <thead><tr><th>Client MAC</th><th>Vendor</th><th>Probed SSIDs</th><th>First Seen</th><th>Last Seen</th><th>Signal</th><th>Probes</th><th>Assoc</th><th>Deauth</th><th>Disassoc</th><th>Insights</th></tr></thead>
+          <tbody id="history-wifi-clients"></tbody>
+        </table>
+      </div>
+      <div id="history-wifi-monitor-panel" class="subpanel history-source-panel" data-source="wifi_monitor">
+        <h3>Wi-Fi Monitor</h3>
+        <div class="status-strip muted">Monitor-mode AP, probe, association, and deauth events are folded into the Wi-Fi device history above.</div>
+      </div>
+      <div id="history-bluetooth-panel" class="subpanel history-source-panel" data-source="bluetooth">
+        <h3>Bluetooth Devices</h3>
+        <table>
+          <thead><tr><th>MAC</th><th>Transport</th><th>Names</th><th>Manufacturer</th><th>Model</th><th>Firmware</th><th>First Seen</th><th>Last Seen</th><th>Signal</th><th>BLE Seen</th><th>BLE Updates</th><th>BLE Lost</th><th>Classic Seen</th><th>Sessions</th><th>Insights</th></tr></thead>
+          <tbody id="history-bluetooth-devices"></tbody>
+        </table>
+      </div>
+      <div id="history-rtlsdr-panel" class="subpanel history-source-panel" data-source="rtlsdr">
+        <h3>RTL-SDR</h3>
+        <div class="status-strip muted">No RTL-SDR device-history summary yet</div>
+      </div>
+      <div id="history-system-panel" class="subpanel history-source-panel" data-source="system">
+        <h3>System</h3>
+        <div class="status-strip muted">No System device-history summary yet</div>
+      </div>
+    </section>
+
+    <section id="tab-wifi" class="panel">
+      <div class="panel-head">
+        <h2>Wi-Fi Scan</h2>
+        <div id="wifi-status" class="badge">Waiting</div>
+      </div>
+      <div id="wifi-banner" class="status-strip muted">Waiting for collector status</div>
+      <div class="filter-bar">
+        <label>SSID
+          <select id="wifi-ssid-filter">
+            <option value="all">All</option>
+          </select>
+        </label>
+        <label>Encryption
+          <select id="wifi-encryption-filter">
+            <option value="all">All</option>
+          </select>
+        </label>
+        <label>Signal
+          <select id="wifi-signal-filter">
+            <option value="all">All</option>
+          </select>
+        </label>
+      </div>
+      <h3>Access Points</h3>
+      <table>
+        <thead><tr><th>SSID</th><th>BSSID</th><th>Vendor</th><th>Channel / Freq</th><th>Encryption</th><th>Signal</th><th>Last Seen</th></tr></thead>
+        <tbody id="wifi-aps"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-wifi_monitor" class="panel">
+      <div class="panel-head">
+        <h2>Wi-Fi Monitor</h2>
+        <div id="wifi_monitor-status" class="badge">Waiting</div>
+      </div>
+      <div id="wifi_monitor-banner" class="status-strip muted">Waiting for collector status</div>
+      <div id="wifi-monitor-plan" class="status-strip muted">Start on demand after a monitor-mode interface exists</div>
+      <table>
+        <thead><tr><th>Type</th><th>Channel</th><th>Client</th><th>AP/BSSID</th><th>SSID</th><th>Signal</th><th>Time</th></tr></thead>
+        <tbody id="wifi-monitor-events"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-bluetooth" class="panel">
+      <div class="panel-head">
+        <h2>Bluetooth</h2>
+      </div>
+      <div class="subtabs">
+        <button class="subtab active" data-bluetooth-subtab="ble">BLE Scan</button>
+        <button class="subtab" data-bluetooth-subtab="classic">Classic Scan</button>
+        <button class="subtab" data-bluetooth-subtab="identify">BLE Identify</button>
+      </div>
+
+      <div class="subpanel bluetooth-source-panel active" data-bluetooth-source="ble">
+        <div class="panel-head">
+          <h3>BLE Scan</h3>
+          <div id="ble-status" class="badge">Waiting</div>
+        </div>
+        <div id="ble-banner" class="status-strip muted">Waiting for collector status</div>
+        <div class="filter-bar">
+          <label>MAC
+            <select id="ble-mac-filter">
+              <option value="all">All</option>
+            </select>
+          </label>
+        </div>
+        <table>
+          <thead><tr><th>MAC</th><th>Name</th><th>RSSI</th><th>Manufacturer</th><th>Services</th><th>Last Seen</th></tr></thead>
+          <tbody id="ble-devices"></tbody>
+        </table>
+      </div>
+
+      <div class="subpanel bluetooth-source-panel" data-bluetooth-source="classic">
+        <div class="panel-head">
+          <h3>Classic Scan</h3>
+          <div id="bt_classic-status" class="badge">Waiting</div>
+        </div>
+        <div id="bt_classic-banner" class="status-strip muted">Start classic Bluetooth inquiry on demand</div>
+        <div id="bt-classic-scan-state" class="status-strip muted">No classic inquiry pass has completed yet</div>
+        <div class="control-bar">
+          <button id="bt-classic-start" class="action-button">Start Classic Scan</button>
+          <button id="bt-classic-stop" class="action-button">Stop Classic Scan</button>
+        </div>
+        <table>
+          <thead><tr><th>MAC</th><th>Name</th><th>Manufacturer</th><th>Class</th><th>Clock Offset</th><th>Last Seen</th></tr></thead>
+          <tbody id="bt-classic-devices"></tbody>
+        </table>
+      </div>
+
+      <div class="subpanel bluetooth-source-panel" data-bluetooth-source="identify">
+        <div class="panel-head">
+          <h3>BLE Identify</h3>
+          <div id="ble_identify-status" class="badge">Waiting</div>
+        </div>
+        <div id="ble_identify-banner" class="status-strip muted">Enter a BLE MAC and identify on demand</div>
+        <div class="control-bar">
+          <label>BLE MAC <input id="ble-identify-mac" type="text" placeholder="AA:BB:CC:DD:EE:FF"></label>
+          <label>Timeout seconds <input id="ble-identify-timeout" type="number" value="10" min="1"></label>
+          <button id="ble-identify-button" class="action-button">Identify</button>
+        </div>
+        <h3>Known BLE Devices</h3>
+        <table>
+          <thead><tr><th>MAC</th><th>Name</th><th>Manufacturer</th><th>RSSI</th><th>Last Seen</th><th>Identity</th><th>Action</th></tr></thead>
+          <tbody id="ble-identify-devices"></tbody>
+        </table>
+        <h3>Identify Results</h3>
+        <table>
+          <thead><tr><th>Time</th><th>MAC</th><th>Result</th><th>Manufacturer</th><th>Model</th><th>Firmware</th><th>Hardware</th><th>Software</th></tr></thead>
+          <tbody id="ble-identify-results"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-rtlsdr" class="panel">
+      <div class="panel-head">
+        <h2>RTL-SDR</h2>
+        <div id="rtlsdr-status" class="badge">Waiting</div>
+      </div>
+      <div id="rtlsdr-banner" class="status-strip muted">Waiting for collector status</div>
+      <div class="control-bar">
+        <label>Start MHz <input id="rtlsdr-start" type="number"></label>
+        <label>End MHz <input id="rtlsdr-end" type="number"></label>
+        <label>Step kHz <input id="rtlsdr-step" type="number"></label>
+        <label>Gain <input id="rtlsdr-gain" type="text"></label>
+        <label>Threshold dB <input id="rtlsdr-threshold" type="number"></label>
+      </div>
+      <div id="baseline-state" class="status-strip">Baseline pending</div>
+      <h3>Active Signals</h3>
+      <table>
+        <thead><tr><th>Frequency MHz</th><th>Power dBm</th><th>Above Floor dB</th><th>First Detected</th><th>Last Seen</th></tr></thead>
+        <tbody id="rtlsdr-signals"></tbody>
+      </table>
+      <h3>Signal Event Log</h3>
+      <ul id="rtlsdr-events" class="event-list"></ul>
+    </section>
+
+    <section id="tab-system" class="panel">
+      <h2>Collector Health</h2>
+      <table class="collector-health-table">
+        <thead><tr><th>Name</th><th>State</th><th>Hardware</th><th>Software</th><th>Events</th><th>Last Event</th><th>Warning</th><th>Control</th></tr></thead>
+        <tbody id="collector-health"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="/static/app.js?v=20260519-header-connection"></script>
+</body>
+</html>

@@ -1,0 +1,3 @@
+# Default modern install path. For automatic Python-version selection, use:
+#   ./install.sh
+-r requirements-py38plus.txt
