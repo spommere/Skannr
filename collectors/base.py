@@ -1,3 +1,10 @@
+"""Base lifecycle helpers shared by all collectors.
+
+Collectors differ in how they talk to hardware, but their status reporting,
+validation commands, retry intervals, and event emission should look the same
+to the dashboard.
+"""
+
 import asyncio
 import subprocess
 from bus import utc_now
@@ -64,12 +71,14 @@ class BaseCollector:
         """Publish one collector event and update local event counters."""
         self.events_this_session += 1
         self.last_event = utc_now()
-        await self.bus.publish({
-            "collector": self.config_key,
-            "type": event_type,
-            "severity": severity,
-            "data": data or {},
-        })
+        await self.bus.publish(
+            {
+                "collector": self.config_key,
+                "type": event_type,
+                "severity": severity,
+                "data": data or {},
+            }
+        )
 
     async def retry_sleep(self):
         """Sleep for the collector-specific retry interval."""
@@ -100,6 +109,8 @@ class BaseCollector:
             return False, "{} validation is disabled".format(tier)
         timeout = float(self.config.get("validation_timeout_sec", 10))
         try:
+            # Validation commands are deliberately shell strings so users can
+            # express local checks in YAML without changing Python code.
             result = subprocess.run(
                 command,
                 shell=True,
@@ -110,10 +121,14 @@ class BaseCollector:
                 universal_newlines=True,
             )
         except subprocess.TimeoutExpired:
-            return False, "{} validation timed out after {}s: {}".format(tier, int(timeout), command)
+            return False, "{} validation timed out after {}s: {}".format(
+                tier, int(timeout), command
+            )
         except Exception as exc:
             return False, "{} validation could not run: {}".format(tier, exc)
         output = " ".join((result.stdout or "").split())[:500]
         if result.returncode == 0:
             return True, output or "{} validation passed".format(tier)
-        return False, output or "{} validation failed with exit {}".format(tier, result.returncode)
+        return False, output or "{} validation failed with exit {}".format(
+            tier, result.returncode
+        )

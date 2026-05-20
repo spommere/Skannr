@@ -1,3 +1,10 @@
+"""Process-local event plumbing shared by collectors and the web runtime.
+
+Collectors publish normalized dictionaries here instead of writing logs or
+talking to the browser directly. That keeps each collector focused on one radio
+or tool while main.py owns persistence, findings generation, and UI fan-out.
+"""
+
 import asyncio
 from datetime import datetime
 
@@ -24,6 +31,8 @@ class EventBus:
 
     async def publish(self, event):
         """Normalize an event and enqueue it for the runtime fan-out task."""
+        # Every persisted/UI event should have these fields, even if a collector
+        # only supplied the collector/type-specific data.
         event.setdefault("timestamp", utc_now())
         event.setdefault("severity", "info")
         event.setdefault("data", {})

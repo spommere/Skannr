@@ -21,7 +21,7 @@ For architecture, event flow, collector internals, and extension notes, see
 - `skannr.yaml`: local runtime configuration, created on first run
 - `collectors/*.yaml`: collector-specific configuration
 
-Current version: `0.1.0`.
+Current version: see `VERSION`.
 
 Versioning policy:
 
@@ -221,6 +221,19 @@ Important global sections:
 - `reports`: longitudinal Report thresholds
 - `ui`: table limits, stale-data warning age, Wi-Fi signal filter bands
 
+The Reports section includes Bluetooth privacy-address grouping:
+
+```yaml
+reports:
+  ble_private_address_group_min_count: 3
+  new_device_window_sec: 3600
+```
+
+Unnamed/private BLE addresses at or above this count are summarized by
+manufacturer instead of being reported as separate new physical devices.
+`new_device_window_sec` controls how recent a first sighting must be before
+Reports call a Wi-Fi AP, Wi-Fi client, or named/static Bluetooth device "new".
+
 Changing YAML settings requires restarting Skannr so the browser receives the
 new metadata and collector configuration.
 
@@ -308,7 +321,10 @@ software is missing, hardware is absent, or the validation command failed.
 
 It:
 
-- uses `iw dev <iface> scan` or `iwlist <iface> scan`
+- uses one scan source per collector run
+- prefers `iw dev <iface> scan`
+- uses `iwlist <iface> scan` only when `iw` is absent or `scan_tool: iwlist`
+  is configured
 - lists visible access points
 - records SSID, BSSID, vendor, channel/frequency, encryption, RSSI, and time
 - can run on a normal managed Wi-Fi interface

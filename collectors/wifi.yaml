@@ -10,5 +10,8 @@ validation_timeout_sec: 10
 preferred_interface: wlan1
 fallback_interface: wlan0
 managed_scan_interval_sec: 2
+# auto uses iw when available and iwlist only when iw is absent. Set iwlist
+# explicitly only for old drivers where iw cannot scan but iwlist can.
+scan_tool: auto
 retry_interval_sec: 5
 retry_timeout_sec: 30

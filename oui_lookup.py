@@ -1,3 +1,11 @@
+"""Offline vendor lookup for Wi-Fi and Bluetooth MAC addresses.
+
+Skannr never reaches out to the Internet during scans. If users place IEEE
+registry files in collectors/, these helpers resolve BSSIDs/MACs locally;
+otherwise callers still get useful fallback text such as locally administered /
+randomized.
+"""
+
 import os
 import re
 
@@ -7,14 +15,18 @@ _VENDORS = None
 
 def collectors_dir():
     """Return the local collector data directory."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "collectors")
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "collectors"
+    )
 
 
 def normalize_oui(mac_or_oui):
     """Return AA:BB:CC from a MAC/OUI string, or None when not parseable."""
     text = str(mac_or_oui or "").strip().upper().replace("-", ":")
     parts = text.split(":")
-    if len(parts) >= 3 and all(re.match(r"^[0-9A-F]{2}$", part) for part in parts[:3]):
+    if len(parts) >= 3 and all(
+        re.match(r"^[0-9A-F]{2}$", part) for part in parts[:3]
+    ):
         return ":".join(parts[:3])
     compact = re.sub(r"[^0-9A-F]", "", text)
     if len(compact) >= 6:
@@ -31,7 +43,9 @@ def format_prefix(prefix):
     """Format a compact IEEE prefix as colon-separated display text."""
     if not prefix:
         return ""
-    pairs = [prefix[index:index + 2] for index in range(0, len(prefix) - 1, 2)]
+    pairs = [
+        prefix[index : index + 2] for index in range(0, len(prefix) - 1, 2)
+    ]
     if len(prefix) % 2:
         pairs.append(prefix[-1])
     return ":".join(pairs)
@@ -56,11 +70,16 @@ def vendor_prefix(mac_or_oui):
 def vendor_match(mac_or_oui):
     """Return the longest matching vendor record for a MAC/OUI string."""
     if is_locally_administered(mac_or_oui):
+        # Locally administered addresses are intentionally not IEEE-assigned.
+        # Calling them randomized is more accurate than matching the remaining
+        # bytes against a registry prefix by accident.
         return None
     compact = compact_mac(mac_or_oui)
     if len(compact) < 6:
         return None
     data = vendors()
+    # Prefer the most specific registry first: MA-S/IAB (36-bit), then MA-M
+    # (28-bit), then the traditional MA-L/OUI 24-bit assignment.
     for length in (9, 7, 6):
         prefix = compact[:length]
         if prefix in data:
@@ -85,6 +104,8 @@ def vendors(path=None):
     if _VENDORS is not None and path is None:
         return _VENDORS
     if path is not None:
+        # Explicit paths are used by tests/manual checks and should not replace
+        # the process-wide cache for the normal collector lookup files.
         loaded = load_oui_file(path)
     else:
         loaded = load_all_registry_files()
@@ -98,9 +119,15 @@ def load_all_registry_files():
     directory = collectors_dir()
     loaded = {}
     loaded.update(load_oui_file(os.path.join(directory, "oui.txt")))
-    loaded.update(load_range_registry_file(os.path.join(directory, "mam.txt"), 7))
-    loaded.update(load_range_registry_file(os.path.join(directory, "oui36.txt"), 9))
-    loaded.update(load_range_registry_file(os.path.join(directory, "iab.txt"), 9))
+    loaded.update(
+        load_range_registry_file(os.path.join(directory, "mam.txt"), 7)
+    )
+    loaded.update(
+        load_range_registry_file(os.path.join(directory, "oui36.txt"), 9)
+    )
+    loaded.update(
+        load_range_registry_file(os.path.join(directory, "iab.txt"), 9)
+    )
     return loaded
 
 
@@ -112,10 +139,15 @@ def load_oui_file(path):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                match = re.match(r"\s*([0-9A-Fa-f]{2})-([0-9A-Fa-f]{2})-([0-9A-Fa-f]{2})\s+\(hex\)\s+(.+?)\s*$", line)
+                match = re.match(
+                    r"\s*([0-9A-Fa-f]{2})-([0-9A-Fa-f]{2})-([0-9A-Fa-f]{2})\s+\(hex\)\s+(.+?)\s*$",
+                    line,
+                )
                 if not match:
                     continue
-                prefix = "{}{}{}".format(match.group(1), match.group(2), match.group(3)).upper()
+                prefix = "{}{}{}".format(
+                    match.group(1), match.group(2), match.group(3)
+                ).upper()
                 loaded[prefix] = match.group(4).strip()
     except OSError:
         return {}
@@ -136,11 +168,21 @@ def load_range_registry_file(path, prefix_length):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                oui_match = re.match(r"\s*([0-9A-Fa-f]{2})-([0-9A-Fa-f]{2})-([0-9A-Fa-f]{2})\s+\(hex\)\s+(.+?)\s*$", line)
+                oui_match = re.match(
+                    r"\s*([0-9A-Fa-f]{2})-([0-9A-Fa-f]{2})-([0-9A-Fa-f]{2})\s+\(hex\)\s+(.+?)\s*$",
+                    line,
+                )
                 if oui_match:
-                    current_oui = "{}{}{}".format(oui_match.group(1), oui_match.group(2), oui_match.group(3)).upper()
+                    current_oui = "{}{}{}".format(
+                        oui_match.group(1),
+                        oui_match.group(2),
+                        oui_match.group(3),
+                    ).upper()
                     continue
-                range_match = re.match(r"\s*([0-9A-Fa-f]+)-[0-9A-Fa-f]+\s+\(base 16\)\s+(.+?)\s*$", line)
+                range_match = re.match(
+                    r"\s*([0-9A-Fa-f]+)-[0-9A-Fa-f]+\s+\(base 16\)\s+(.+?)\s*$",
+                    line,
+                )
                 if not range_match or not current_oui:
                     continue
                 extension = range_match.group(1).upper()

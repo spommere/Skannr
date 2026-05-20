@@ -1,3 +1,10 @@
+"""Deterministic insight rules over the materialized Device History summary.
+
+This is the short-horizon "what looks notable" layer. It uses explicit rules
+and evidence fields so results are reproducible and can be inspected without an
+LLM or a database.
+"""
+
 import json
 import os
 from datetime import datetime
@@ -39,6 +46,8 @@ class HistoryAnalyzer:
         """Return ranked observations with concrete evidence and no LLM step."""
         generated_at = utc_now()
         observations = []
+        # Device History is the only input here. That keeps analysis cheap after
+        # the summary has been materialized and avoids another raw-log scan.
         wifi = history.get("wifi") or {}
         ble = history.get("bluetooth") or history.get("ble") or {}
         aps = wifi.get("access_points") or []
@@ -50,15 +59,28 @@ class HistoryAnalyzer:
         observations.extend(self.analyze_ble_devices(ble_devices, generated_at))
         observations.extend(self.analyze_population(clients, generated_at))
 
-        observations.sort(key=lambda item: (self.severity_rank(item["severity"]), item.get("score", 0), item.get("timestamp", "")), reverse=True)
+        # Show the most urgent/recent-looking rows first while preserving the
+        # raw score as the secondary ordering inside each severity.
+        observations.sort(
+            key=lambda item: (
+                self.severity_rank(item["severity"]),
+                item.get("score", 0),
+                item.get("timestamp", ""),
+            ),
+            reverse=True,
+        )
         return {
             "generated_at": generated_at,
             "history_generated_at": history.get("generated_at"),
             "observations": observations,
             "counts": {
                 "total": len(observations),
-                "warning": sum(1 for item in observations if item["severity"] == "warning"),
-                "info": sum(1 for item in observations if item["severity"] == "info"),
+                "warning": sum(
+                    1 for item in observations if item["severity"] == "warning"
+                ),
+                "info": sum(
+                    1 for item in observations if item["severity"] == "info"
+                ),
             },
         }
 
@@ -67,6 +89,8 @@ class HistoryAnalyzer:
         observations = []
         by_ssid = {}
         for ap in aps:
+            # Analyze each BSSID first. Grouped SSID analysis below handles
+            # multi-radio/mesh/evil-twin patterns across BSSIDs.
             ssid = ap.get("ssid") or "(blank)"
             by_ssid.setdefault(ssid, []).append(ap)
             encryptions = self.list_values(ap.get("encryption"))
@@ -75,242 +99,505 @@ class HistoryAnalyzer:
             bssid = ap.get("bssid") or "unknown"
             source = self.wifi_source_for(ap)
             signal_max = self.to_number(ap.get("signal_max"))
-            duration = self.duration_seconds(ap.get("first_seen"), ap.get("last_seen"))
+            duration = self.duration_seconds(
+                ap.get("first_seen"), ap.get("last_seen")
+            )
             evidence = self.wifi_ap_evidence(ap, ssid, bssid)
             if self.has_weak_crypto(encryptions):
-                observations.append(self.observation(
-                    timestamp,
-                    "warning",
-                    source,
-                    "weak_wifi_encryption",
-                    "Weak or open Wi-Fi encryption",
-                    "{} ({}) advertises {}".format(ssid, bssid, ", ".join(encryptions)),
-                    self.with_extra_evidence(evidence, {"encryption": encryptions}),
-                    70,
-                ))
+                # Open/WEP/legacy-WPA are actionable even if the AP is old.
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "warning",
+                        source,
+                        "weak_wifi_encryption",
+                        "Weak or open Wi-Fi encryption",
+                        "{} ({}) advertises {}".format(
+                            ssid, bssid, ", ".join(encryptions)
+                        ),
+                        self.with_extra_evidence(
+                            evidence, {"encryption": encryptions}
+                        ),
+                        70,
+                    )
+                )
             if self.has_crypto_mismatch(encryptions):
-                observations.append(self.observation(
-                    timestamp,
-                    "warning",
-                    source,
-                    "wifi_bssid_security_changed",
-                    "BSSID encryption changed",
-                    "{} ({}) has mixed encryption history: {}".format(ssid, bssid, ", ".join(encryptions)),
-                    self.with_extra_evidence(evidence, {"encryption": encryptions}),
-                    82,
-                ))
+                # A single BSSID moving between weak and strong security is more
+                # suspicious than WPA2 versus WPA2/WPA3 parser detail.
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "warning",
+                        source,
+                        "wifi_bssid_security_changed",
+                        "BSSID encryption changed",
+                        "{} ({}) has mixed encryption history: {}".format(
+                            ssid, bssid, ", ".join(encryptions)
+                        ),
+                        self.with_extra_evidence(
+                            evidence, {"encryption": encryptions}
+                        ),
+                        82,
+                    )
+                )
             if len(ssid_history) > 1:
-                observations.append(self.observation(
-                    timestamp,
-                    "warning",
-                    source,
-                    "wifi_bssid_ssid_changed",
-                    "BSSID advertised multiple SSIDs",
-                    "{} has advertised SSIDs: {}".format(bssid, ", ".join(ssid_history)),
-                    self.with_extra_evidence(evidence, {"ssids": ssid_history, "current_ssid": ssid}),
-                    68,
-                ))
+                # BSSID-to-SSID changes are uncommon for normal home APs and can
+                # indicate reconfiguration or spoofing.
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "warning",
+                        source,
+                        "wifi_bssid_ssid_changed",
+                        "BSSID advertised multiple SSIDs",
+                        "{} has advertised SSIDs: {}".format(
+                            bssid, ", ".join(ssid_history)
+                        ),
+                        self.with_extra_evidence(
+                            evidence,
+                            {"ssids": ssid_history, "current_ssid": ssid},
+                        ),
+                        68,
+                    )
+                )
             if len(channels) > 1:
-                observations.append(self.observation(
-                    timestamp,
-                    "info",
-                    source,
-                    "wifi_bssid_channel_change",
-                    "BSSID seen on multiple channels",
-                    "{} ({}) was seen on channels {}".format(ssid, bssid, ", ".join(channels)),
-                    self.with_extra_evidence(evidence, {"channels": channels}),
-                    30 + min(len(channels), 5),
-                ))
-            if self.is_new(ap, timestamp) and signal_max is not None and signal_max >= float(self.config["strong_wifi_rssi"]):
-                observations.append(self.observation(
-                    timestamp,
-                    "warning",
-                    source,
-                    "new_strong_wifi_ap",
-                    "New strong Wi-Fi access point",
-                    "{} ({}) first seen recently with max RSSI {} dBm".format(ssid, bssid, ap.get("signal_max")),
-                    self.with_extra_evidence(evidence, {"signal_max": ap.get("signal_max"), "first_seen": ap.get("first_seen")}),
-                    65,
-                ))
-            if self.is_new(ap, timestamp) and signal_max is not None and signal_max >= float(self.config["strong_wifi_rssi"]) and 0 < duration <= float(self.config["wifi_short_lived_sec"]):
-                observations.append(self.observation(
-                    timestamp,
-                    "warning",
-                    source,
-                    "wifi_short_lived_strong_ap",
-                    "Short-lived strong Wi-Fi access point",
-                    "{} ({}) was strong and visible for about {} minutes".format(ssid, bssid, max(1, int(duration / 60))),
-                    self.with_extra_evidence(evidence, {"signal_max": signal_max, "duration_sec": duration}),
-                    72,
-                ))
+                # Channel changes are common enough to keep informational, but
+                # they are useful context for troubleshooting and AP identity.
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "info",
+                        source,
+                        "wifi_bssid_channel_change",
+                        "BSSID seen on multiple channels",
+                        "{} ({}) was seen on channels {}".format(
+                            ssid, bssid, ", ".join(channels)
+                        ),
+                        self.with_extra_evidence(
+                            evidence, {"channels": channels}
+                        ),
+                        30 + min(len(channels), 5),
+                    )
+                )
+            if (
+                self.is_new(ap, timestamp)
+                and signal_max is not None
+                and signal_max >= float(self.config["strong_wifi_rssi"])
+            ):
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "warning",
+                        source,
+                        "new_strong_wifi_ap",
+                        "New strong Wi-Fi access point",
+                        "{} ({}) first seen recently with max RSSI {} dBm".format(
+                            ssid, bssid, ap.get("signal_max")
+                        ),
+                        self.with_extra_evidence(
+                            evidence,
+                            {
+                                "signal_max": ap.get("signal_max"),
+                                "first_seen": ap.get("first_seen"),
+                            },
+                        ),
+                        65,
+                    )
+                )
+            if (
+                self.is_new(ap, timestamp)
+                and signal_max is not None
+                and signal_max >= float(self.config["strong_wifi_rssi"])
+                and 0 < duration <= float(self.config["wifi_short_lived_sec"])
+            ):
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "warning",
+                        source,
+                        "wifi_short_lived_strong_ap",
+                        "Short-lived strong Wi-Fi access point",
+                        "{} ({}) was strong and visible for about {} minutes".format(
+                            ssid, bssid, max(1, int(duration / 60))
+                        ),
+                        self.with_extra_evidence(
+                            evidence,
+                            {
+                                "signal_max": signal_max,
+                                "duration_sec": duration,
+                            },
+                        ),
+                        72,
+                    )
+                )
 
         for ssid, ssid_aps in by_ssid.items():
-            if ssid == "(blank)" or len(ssid_aps) < int(self.config["many_bssid_count"]):
+            # SSID-level analysis is where false positives are easiest. Normal
+            # routers often have one BSSID per band, and extenders/mesh nodes
+            # add more. The warning path therefore requires stronger evidence
+            # such as vendor mismatch, weak/strong crypto mismatch, or a strong
+            # new BSSID that does not look like the same AP family.
+            if ssid == "(blank)" or len(ssid_aps) < int(
+                self.config["many_bssid_count"]
+            ):
                 continue
             bssids = [ap.get("bssid") for ap in ssid_aps if ap.get("bssid")]
-            encryptions = sorted(set(value for ap in ssid_aps for value in self.list_values(ap.get("encryption"))))
-            channels = sorted(set(value for ap in ssid_aps for value in self.list_values(ap.get("channels"))))
+            encryptions = sorted(
+                set(
+                    value
+                    for ap in ssid_aps
+                    for value in self.list_values(ap.get("encryption"))
+                )
+            )
+            channels = sorted(
+                set(
+                    value
+                    for ap in ssid_aps
+                    for value in self.list_values(ap.get("channels"))
+                )
+            )
             new_aps = [ap for ap in ssid_aps if self.is_new(ap, timestamp)]
-            strong_new_aps = [ap for ap in new_aps if self.to_number(ap.get("signal_max")) is not None and self.to_number(ap.get("signal_max")) >= float(self.config["strong_wifi_rssi"])]
-            vendor_ouis = sorted(set(value for ap in ssid_aps for value in self.list_values(ap.get("vendor_oui"))))
-            vendor_prefixes = sorted(set(value for ap in ssid_aps for value in self.list_values(ap.get("vendor_prefix"))))
-            vendor_names = sorted(set(value for ap in ssid_aps for value in self.list_values(ap.get("vendor_name"))))
+            strong_new_aps = [
+                ap
+                for ap in new_aps
+                if self.to_number(ap.get("signal_max")) is not None
+                and self.to_number(ap.get("signal_max"))
+                >= float(self.config["strong_wifi_rssi"])
+            ]
+            vendor_ouis = sorted(
+                set(
+                    value
+                    for ap in ssid_aps
+                    for value in self.list_values(ap.get("vendor_oui"))
+                )
+            )
+            vendor_prefixes = sorted(
+                set(
+                    value
+                    for ap in ssid_aps
+                    for value in self.list_values(ap.get("vendor_prefix"))
+                )
+            )
+            vendor_names = sorted(
+                set(
+                    value
+                    for ap in ssid_aps
+                    for value in self.list_values(ap.get("vendor_name"))
+                )
+            )
             same_ap_family = self.same_ap_bssid_family(bssids)
-            same_vendor_sibling_pairs = self.same_vendor_sibling_bssid_pairs(bssids)
-            vendor_mismatch = self.vendor_mismatch(vendor_ouis, vendor_prefixes, vendor_names)
+            same_vendor_sibling_pairs = self.same_vendor_sibling_bssid_pairs(
+                bssids
+            )
+            vendor_mismatch = self.vendor_mismatch(
+                vendor_ouis, vendor_prefixes, vendor_names
+            )
             crypto_mismatch = self.has_crypto_mismatch(encryptions)
+            same_vendor_name = len(self.vendor_value_set(vendor_names)) == 1
             # Dual-band APs and mesh nodes commonly expose one SSID through
             # several neighboring BSSIDs. Multi-AP systems can have multiple
             # base radios, where each base radio still has adjacent 2.4/5 GHz
-            # BSSIDs. Treat those as normal unless security or vendor drifts.
-            likely_normal_multiband = (same_ap_family or same_vendor_sibling_pairs) and not crypto_mismatch and not vendor_mismatch
-            severity = "warning" if crypto_mismatch or vendor_mismatch or (strong_new_aps and not likely_normal_multiband) else "info"
-            title = "Possible evil twin candidate" if severity == "warning" else "SSID seen on multiple BSSIDs"
-            source = "wifi_monitor" if any("wifi_monitor" in self.list_values(ap.get("sources")) for ap in ssid_aps) else "wifi"
-            observations.append(self.observation(
-                timestamp,
-                severity,
-                source,
-                "wifi_ssid_multiple_bssids",
-                title,
-                "SSID '{}' has {} BSSIDs; encryption={}, channels={}, new={}, strong_new={}".format(ssid, len(bssids), ", ".join(encryptions) or "unknown", ", ".join(channels) or "unknown", len(new_aps), len(strong_new_aps)),
-                {"ssid": ssid, "bssids": bssids, "encryption": encryptions, "channels": channels, "vendor_ouis": vendor_ouis, "vendor_prefixes": vendor_prefixes, "vendor_names": vendor_names, "new_bssids": [ap.get("bssid") for ap in new_aps], "strong_new_bssids": [ap.get("bssid") for ap in strong_new_aps], "same_ap_bssid_family": same_ap_family, "same_vendor_sibling_bssid_pairs": same_vendor_sibling_pairs, "vendor_mismatch": vendor_mismatch},
-                88 if severity == "warning" and strong_new_aps else (80 if severity == "warning" else 45),
-            ))
+            # BSSIDs. Same-vendor, same-security sets are also common for
+            # Apple/eero/mesh deployments even when OUI blocks differ.
+            likely_normal_multiband = (
+                (
+                    same_ap_family
+                    or same_vendor_sibling_pairs
+                    or same_vendor_name
+                )
+                and not crypto_mismatch
+                and not vendor_mismatch
+            )
+            severity = (
+                "warning"
+                if crypto_mismatch
+                or vendor_mismatch
+                or (strong_new_aps and not likely_normal_multiband)
+                else "info"
+            )
+            title = (
+                "Possible evil twin candidate"
+                if severity == "warning"
+                else "SSID seen on multiple BSSIDs"
+            )
+            source = (
+                "wifi_monitor"
+                if any(
+                    "wifi_monitor" in self.list_values(ap.get("sources"))
+                    for ap in ssid_aps
+                )
+                else "wifi"
+            )
+            observations.append(
+                self.observation(
+                    timestamp,
+                    severity,
+                    source,
+                    "wifi_ssid_multiple_bssids",
+                    title,
+                    "SSID '{}' has {} BSSIDs; encryption={}, channels={}, new={}, strong_new={}".format(
+                        ssid,
+                        len(bssids),
+                        ", ".join(encryptions) or "unknown",
+                        ", ".join(channels) or "unknown",
+                        len(new_aps),
+                        len(strong_new_aps),
+                    ),
+                    {
+                        "ssid": ssid,
+                        "bssids": bssids,
+                        "encryption": encryptions,
+                        "channels": channels,
+                        "vendor_ouis": vendor_ouis,
+                        "vendor_prefixes": vendor_prefixes,
+                        "vendor_names": vendor_names,
+                        "new_bssids": [ap.get("bssid") for ap in new_aps],
+                        "strong_new_bssids": [
+                            ap.get("bssid") for ap in strong_new_aps
+                        ],
+                        "same_ap_bssid_family": same_ap_family,
+                        "same_vendor_sibling_bssid_pairs": same_vendor_sibling_pairs,
+                        "same_vendor_name": same_vendor_name,
+                        "vendor_mismatch": vendor_mismatch,
+                    },
+                    88
+                    if severity == "warning" and strong_new_aps
+                    else (80 if severity == "warning" else 45),
+                )
+            )
         return observations
 
     def analyze_wifi_clients(self, clients, timestamp):
         """Look for probe behavior that reveals unusual client activity."""
         observations = []
         for client in clients:
+            # Wi-Fi clients only exist when monitor mode has observed management
+            # frames. Managed AP scan cannot see probes or deauth/disassoc.
             mac = client.get("mac") or "unknown"
             ssids = self.list_values(client.get("ssids"))
             source = self.wifi_source_for(client)
             evidence = self.wifi_client_evidence(client, mac)
             if len(ssids) >= int(self.config["many_probe_ssid_count"]):
-                observations.append(self.observation(
-                    timestamp,
-                    "warning",
-                    source,
-                    "wifi_client_many_probed_ssids",
-                    "Wi-Fi client probed many SSIDs",
-                    "{} probed {} SSIDs".format(mac, len(ssids)),
-                    self.with_extra_evidence(evidence, {"ssids": ssids[:25], "ssid_count": len(ssids)}),
-                    70 + min(len(ssids), 20),
-                ))
-            sensitive = sorted(set(ssids) & set(self.config.get("sensitive_ssids") or []))
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "warning",
+                        source,
+                        "wifi_client_many_probed_ssids",
+                        "Wi-Fi client probed many SSIDs",
+                        "{} probed {} SSIDs".format(mac, len(ssids)),
+                        self.with_extra_evidence(
+                            evidence,
+                            {"ssids": ssids[:25], "ssid_count": len(ssids)},
+                        ),
+                        70 + min(len(ssids), 20),
+                    )
+                )
+            sensitive = sorted(
+                set(ssids) & set(self.config.get("sensitive_ssids") or [])
+            )
             if sensitive:
-                observations.append(self.observation(
-                    timestamp,
-                    "warning",
-                    source,
-                    "wifi_client_sensitive_ssid_probe",
-                    "Wi-Fi client probed watched SSID",
-                    "{} probed watched SSID(s): {}".format(mac, ", ".join(sensitive)),
-                    self.with_extra_evidence(evidence, {"ssids": sensitive}),
-                    85,
-                ))
-            if int(client.get("blank_ssid_count") or 0) >= int(self.config["blank_probe_count"]):
-                observations.append(self.observation(
-                    timestamp,
-                    "info",
-                    source,
-                    "wifi_client_blank_probe_repeated",
-                    "Repeated blank Wi-Fi probes",
-                    "{} sent {} blank probes".format(mac, client.get("blank_ssid_count")),
-                    self.with_extra_evidence(evidence, {"blank_ssid_count": client.get("blank_ssid_count")}),
-                    35,
-                ))
-            if int(client.get("deauth_count") or 0) >= int(self.config.get("deauth_count", 5)):
-                observations.append(self.observation(
-                    timestamp,
-                    "warning",
-                    source,
-                    "wifi_client_deauth_activity",
-                    "Repeated Wi-Fi deauth frames",
-                    "{} was involved in {} deauth frames".format(mac, client.get("deauth_count")),
-                    self.with_extra_evidence(evidence, {"deauth_count": client.get("deauth_count")}),
-                    75,
-                ))
+                # The watch list is user-defined in skannr.yaml; Skannr does not
+                # ship with any sensitive SSIDs by default.
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "warning",
+                        source,
+                        "wifi_client_sensitive_ssid_probe",
+                        "Wi-Fi client probed watched SSID",
+                        "{} probed watched SSID(s): {}".format(
+                            mac, ", ".join(sensitive)
+                        ),
+                        self.with_extra_evidence(
+                            evidence, {"ssids": sensitive}
+                        ),
+                        85,
+                    )
+                )
+            if int(client.get("blank_ssid_count") or 0) >= int(
+                self.config["blank_probe_count"]
+            ):
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "info",
+                        source,
+                        "wifi_client_blank_probe_repeated",
+                        "Repeated blank Wi-Fi probes",
+                        "{} sent {} blank probes".format(
+                            mac, client.get("blank_ssid_count")
+                        ),
+                        self.with_extra_evidence(
+                            evidence,
+                            {
+                                "blank_ssid_count": client.get(
+                                    "blank_ssid_count"
+                                )
+                            },
+                        ),
+                        35,
+                    )
+                )
+            if int(client.get("deauth_count") or 0) >= int(
+                self.config.get("deauth_count", 5)
+            ):
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "warning",
+                        source,
+                        "wifi_client_deauth_activity",
+                        "Repeated Wi-Fi deauth frames",
+                        "{} was involved in {} deauth frames".format(
+                            mac, client.get("deauth_count")
+                        ),
+                        self.with_extra_evidence(
+                            evidence,
+                            {"deauth_count": client.get("deauth_count")},
+                        ),
+                        75,
+                    )
+                )
         return observations
 
     def analyze_ble_devices(self, devices, timestamp):
         """Look for BLE devices that are strong, lingering, or repeatedly lost."""
         observations = []
         for device in devices:
+            # Bluetooth history merges BLE, BLE Identify, and Classic transport
+            # observations when they share an address.
             mac = device.get("mac") or "unknown"
             name = ", ".join(self.list_values(device.get("names"))) or mac
             evidence = self.ble_evidence(device, mac)
             transports = self.list_values(device.get("transports"))
             source = "bt_classic" if transports == ["classic"] else "ble"
             signal_max = self.to_number(device.get("signal_max"))
-            if signal_max is not None and signal_max >= float(self.config["strong_ble_rssi"]):
-                observations.append(self.observation(
-                    timestamp,
-                    "warning",
-                    source,
-                    "ble_device_strong",
-                    "Strong nearby BLE device",
-                    "{} max RSSI is {} dBm".format(name, signal_max),
-                    self.with_extra_evidence(evidence, {"signal_max": signal_max}),
-                    60,
-                ))
-            duration = self.duration_seconds(device.get("first_seen"), device.get("last_seen"))
+            if signal_max is not None and signal_max >= float(
+                self.config["strong_ble_rssi"]
+            ):
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "warning",
+                        source,
+                        "ble_device_strong",
+                        "Strong nearby BLE device",
+                        "{} max RSSI is {} dBm".format(name, signal_max),
+                        self.with_extra_evidence(
+                            evidence, {"signal_max": signal_max}
+                        ),
+                        60,
+                    )
+                )
+            duration = self.duration_seconds(
+                device.get("first_seen"), device.get("last_seen")
+            )
             if duration >= float(self.config["ble_linger_sec"]):
-                observations.append(self.observation(
-                    timestamp,
-                    "info",
-                    source,
-                    "ble_device_lingered",
-                    "BLE device lingered nearby",
-                    "{} was observed for at least {} minutes".format(name, int(duration / 60)),
-                    self.with_extra_evidence(evidence, {"duration_sec": duration, "first_seen": device.get("first_seen"), "last_seen": device.get("last_seen")}),
-                    40,
-                ))
-            if int(device.get("lost_count") or 0) >= int(self.config["ble_lost_count"]):
-                observations.append(self.observation(
-                    timestamp,
-                    "info",
-                    source,
-                    "ble_device_repeated_loss",
-                    "BLE device repeatedly disappeared",
-                    "{} disappeared {} times".format(name, device.get("lost_count")),
-                    self.with_extra_evidence(evidence, {"lost_count": device.get("lost_count")}),
-                    35,
-                ))
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "info",
+                        source,
+                        "ble_device_lingered",
+                        "BLE device lingered nearby",
+                        "{} was observed for at least {} minutes".format(
+                            name, int(duration / 60)
+                        ),
+                        self.with_extra_evidence(
+                            evidence,
+                            {
+                                "duration_sec": duration,
+                                "first_seen": device.get("first_seen"),
+                                "last_seen": device.get("last_seen"),
+                            },
+                        ),
+                        40,
+                    )
+                )
+            if int(device.get("lost_count") or 0) >= int(
+                self.config["ble_lost_count"]
+            ):
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "info",
+                        source,
+                        "ble_device_repeated_loss",
+                        "BLE device repeatedly disappeared",
+                        "{} disappeared {} times".format(
+                            name, device.get("lost_count")
+                        ),
+                        self.with_extra_evidence(
+                            evidence, {"lost_count": device.get("lost_count")}
+                        ),
+                        35,
+                    )
+                )
             pattern = self.ble_presence_pattern(device)
             if pattern:
-                observations.append(self.observation(
-                    timestamp,
-                    "info",
-                    source,
-                    "ble_recurring_presence_pattern",
-                    "Recurring BLE presence pattern",
-                    "{} usually appears around {} and leaves around {}".format(name, pattern["arrival"], pattern["departure"]),
-                    self.with_extra_evidence(evidence, pattern),
-                    55 + min(pattern.get("session_count", 0), 20),
-                ))
+                # This is the deterministic "comes around at about the same
+                # time" rule. It is based on closed sessions, not live sightings.
+                observations.append(
+                    self.observation(
+                        timestamp,
+                        "info",
+                        source,
+                        "ble_recurring_presence_pattern",
+                        "Recurring BLE presence pattern",
+                        "{} usually appears around {} and leaves around {}".format(
+                            name, pattern["arrival"], pattern["departure"]
+                        ),
+                        self.with_extra_evidence(evidence, pattern),
+                        55 + min(pattern.get("session_count", 0), 20),
+                    )
+                )
         return observations
 
     def analyze_population(self, clients, timestamp):
         """Look for population-level Wi-Fi patterns."""
         observations = []
-        randomized = [client.get("mac") for client in clients if client.get("randomized_mac")]
+        randomized = [
+            client.get("mac")
+            for client in clients
+            if client.get("randomized_mac")
+        ]
         if len(randomized) >= int(self.config["randomized_mac_count"]):
-            source = "wifi_monitor" if any("wifi_monitor" in self.list_values(client.get("sources")) for client in clients) else "wifi"
-            observations.append(self.observation(
-                timestamp,
-                "warning",
-                source,
-                "wifi_randomized_mac_churn",
-                "Many randomized Wi-Fi MACs observed",
-                "{} locally administered client MACs are in device history".format(len(randomized)),
-                {"mac_count": len(randomized), "sample": randomized[:25]},
-                75,
-            ))
+            source = (
+                "wifi_monitor"
+                if any(
+                    "wifi_monitor" in self.list_values(client.get("sources"))
+                    for client in clients
+                )
+                else "wifi"
+            )
+            observations.append(
+                self.observation(
+                    timestamp,
+                    "warning",
+                    source,
+                    "wifi_randomized_mac_churn",
+                    "Many randomized Wi-Fi MACs observed",
+                    "{} locally administered client MACs are in device history".format(
+                        len(randomized)
+                    ),
+                    {"mac_count": len(randomized), "sample": randomized[:25]},
+                    75,
+                )
+            )
         return observations
 
-    def observation(self, timestamp, severity, source, obs_type, title, detail, evidence, score):
+    def observation(
+        self,
+        timestamp,
+        severity,
+        source,
+        obs_type,
+        title,
+        detail,
+        evidence,
+        score,
+    ):
         """Build one normalized observation row."""
         self._counter += 1
         return {
@@ -332,7 +619,9 @@ class HistoryAnalyzer:
             "ssid": ssid,
             "bssid": bssid,
             "vendor_oui": ap.get("vendor_oui") or "",
-            "vendor_prefix": ap.get("vendor_prefix") or ap.get("vendor_oui") or "",
+            "vendor_prefix": ap.get("vendor_prefix")
+            or ap.get("vendor_oui")
+            or "",
             "vendor_name": ap.get("vendor_name") or "",
             "first_seen": ap.get("first_seen") or "",
             "last_seen": ap.get("last_seen") or "",
@@ -343,7 +632,9 @@ class HistoryAnalyzer:
         return {
             "mac": mac,
             "vendor_oui": client.get("vendor_oui") or "",
-            "vendor_prefix": client.get("vendor_prefix") or client.get("vendor_oui") or "",
+            "vendor_prefix": client.get("vendor_prefix")
+            or client.get("vendor_oui")
+            or "",
             "vendor_name": client.get("vendor_name") or "",
             "first_seen": client.get("first_seen") or "",
             "last_seen": client.get("last_seen") or "",
@@ -385,7 +676,9 @@ class HistoryAnalyzer:
         if len(normalized) < 2:
             return False
 
-        prefix_bytes = int(self.config.get("wifi_same_ap_bssid_prefix_bytes", 5))
+        prefix_bytes = int(
+            self.config.get("wifi_same_ap_bssid_prefix_bytes", 5)
+        )
         prefix_len = max(1, min(prefix_bytes, 5)) * 2
         prefixes = set(value[:prefix_len] for value in normalized)
         if len(prefixes) != 1:
@@ -404,7 +697,11 @@ class HistoryAnalyzer:
         byte. That pattern is weak evidence for normal infrastructure, not an
         evil twin by itself.
         """
-        normalized = sorted(value for value in (self.normalized_mac(item) for item in bssids) if value)
+        normalized = sorted(
+            value
+            for value in (self.normalized_mac(item) for item in bssids)
+            if value
+        )
         if len(normalized) < 2:
             return False
         oui_values = set(value[:6] for value in normalized)
@@ -428,7 +725,9 @@ class HistoryAnalyzer:
 
     def normalized_mac(self, value):
         """Return a compact lower-case MAC string or empty string."""
-        compact = "".join(ch for ch in str(value or "") if ch.lower() in "0123456789abcdef")
+        compact = "".join(
+            ch for ch in str(value or "") if ch.lower() in "0123456789abcdef"
+        )
         return compact.lower() if len(compact) == 12 else ""
 
     def vendor_mismatch(self, vendor_ouis, vendor_prefixes, vendor_names):
@@ -445,14 +744,21 @@ class HistoryAnalyzer:
             return False
         if len(name_values) > 1:
             return True
-        return len(oui_values) > 1 or len(prefix_values) > 1 or len(name_values) > 1
+        return (
+            len(oui_values) > 1
+            or len(prefix_values) > 1
+            or len(name_values) > 1
+        )
 
     def vendor_value_set(self, values):
         """Normalize vendor evidence while ignoring unknown placeholders."""
         cleaned = set()
         for value in self.list_values(values):
             text = str(value or "").strip().lower()
-            if text and text not in ("unknown", "locally administered / randomized"):
+            if text and text not in (
+                "unknown",
+                "locally administered / randomized",
+            ):
                 cleaned.add(text)
         return cleaned
 
@@ -466,7 +772,10 @@ class HistoryAnalyzer:
         cleaned = set()
         for value in self.list_values(values):
             text = str(value or "").strip()
-            if not text or text.lower() in ("unknown", "locally administered / randomized"):
+            if not text or text.lower() in (
+                "unknown",
+                "locally administered / randomized",
+            ):
                 continue
             if self.is_locally_administered_prefix(text):
                 continue
@@ -475,7 +784,9 @@ class HistoryAnalyzer:
 
     def is_locally_administered_prefix(self, value):
         """Return True when the first MAC octet has the local-admin bit set."""
-        compact = "".join(ch for ch in str(value or "") if ch.lower() in "0123456789abcdef")
+        compact = "".join(
+            ch for ch in str(value or "") if ch.lower() in "0123456789abcdef"
+        )
         if len(compact) < 2:
             return False
         try:
@@ -486,13 +797,33 @@ class HistoryAnalyzer:
     def activity_metadata(self, obs_type, evidence, timestamp):
         """Attach coarse activity state used by the Insights default view."""
         if "recurring" in str(obs_type or ""):
-            return {"activity_state": "recurring", "last_seen": (evidence or {}).get("last_seen"), "age_minutes": None}
+            return {
+                "activity_state": "recurring",
+                "last_seen": (evidence or {}).get("last_seen"),
+                "age_minutes": None,
+            }
         last_seen = (evidence or {}).get("last_seen")
         age = self.age_minutes(last_seen, timestamp)
         if age is None:
-            return {"activity_state": "unknown", "last_seen": last_seen, "age_minutes": None}
-        state = "recent" if age <= (float(self.config.get("recent_activity_window_sec", 1800)) / 60.0) else "stale"
-        return {"activity_state": state, "last_seen": last_seen, "age_minutes": int(age)}
+            return {
+                "activity_state": "unknown",
+                "last_seen": last_seen,
+                "age_minutes": None,
+            }
+        state = (
+            "recent"
+            if age
+            <= (
+                float(self.config.get("recent_activity_window_sec", 1800))
+                / 60.0
+            )
+            else "stale"
+        )
+        return {
+            "activity_state": state,
+            "last_seen": last_seen,
+            "age_minutes": int(age),
+        }
 
     def age_minutes(self, seen_at, timestamp):
         """Return age in minutes between last_seen and analysis timestamp."""
@@ -509,30 +840,47 @@ class HistoryAnalyzer:
 
     def ble_presence_pattern(self, device):
         """Return a coarse recurring arrival/departure pattern for BLE sessions."""
-        sessions = [session for session in (device.get("sessions") or []) if session.get("start") and session.get("end")]
+        # Only closed sessions have both arrival and departure timestamps. The
+        # current active session is useful in Reports, but not for recurring
+        # arrival/departure inference yet.
+        sessions = [
+            session
+            for session in (device.get("sessions") or [])
+            if session.get("start") and session.get("end")
+        ]
         min_sessions = int(self.config.get("ble_recurring_min_sessions", 3))
         if len(sessions) < min_sessions:
             return None
-        starts = [self.minute_of_day(session.get("start")) for session in sessions]
+        starts = [
+            self.minute_of_day(session.get("start")) for session in sessions
+        ]
         ends = [self.minute_of_day(session.get("end")) for session in sessions]
         starts = [value for value in starts if value is not None]
         ends = [value for value in ends if value is not None]
         if len(starts) < min_sessions or len(ends) < min_sessions:
             return None
         window = int(self.config.get("ble_recurring_window_min", 30))
+        # The cluster search treats time of day as circular, so 23:55 and 00:05
+        # can still be grouped together.
         start_center, start_count = self.cluster_minutes(starts, window)
         end_center, end_count = self.cluster_minutes(ends, window)
         if start_count < min_sessions or end_count < min_sessions:
             return None
-        durations = [self.to_number(session.get("duration_sec")) for session in sessions]
-        durations = [value for value in durations if value is not None and value > 0]
+        durations = [
+            self.to_number(session.get("duration_sec")) for session in sessions
+        ]
+        durations = [
+            value for value in durations if value is not None and value > 0
+        ]
         return {
             "arrival": self.format_minute(start_center),
             "departure": self.format_minute(end_center),
             "arrival_matches": start_count,
             "departure_matches": end_count,
             "session_count": len(sessions),
-            "typical_duration_min": int((sum(durations) / len(durations)) / 60) if durations else 0,
+            "typical_duration_min": int((sum(durations) / len(durations)) / 60)
+            if durations
+            else 0,
         }
 
     def minute_of_day(self, timestamp):
@@ -552,7 +900,11 @@ class HistoryAnalyzer:
         best_center = values[0]
         best_matches = []
         for center in values:
-            matches = [value for value in values if self.circular_minute_distance(center, value) <= window]
+            matches = [
+                value
+                for value in values
+                if self.circular_minute_distance(center, value) <= window
+            ]
             if len(matches) > len(best_matches):
                 best_center = center
                 best_matches = matches
@@ -575,12 +927,17 @@ class HistoryAnalyzer:
     def has_weak_crypto(self, encryptions):
         """Treat open/WEP as weak, and legacy WPA as weaker than WPA2/WPA3."""
         lowered = [value.lower() for value in encryptions]
-        return any(value in ("open", "wep", "wep/unknown", "wpa") for value in lowered)
+        return any(
+            value in ("open", "wep", "wep/unknown", "wpa") for value in lowered
+        )
 
     def has_crypto_mismatch(self, encryptions):
         """Flag SSIDs with both strong and weak/open encryption present."""
         lowered = [value.lower() for value in encryptions]
-        has_strong = any("wpa2" in value or "wpa3" in value or "rsn" in value for value in lowered)
+        has_strong = any(
+            "wpa2" in value or "wpa3" in value or "rsn" in value
+            for value in lowered
+        )
         return has_strong and self.has_weak_crypto(encryptions)
 
     def is_new(self, item, timestamp):

@@ -1,3 +1,9 @@
+"""Passive Bluetooth Low Energy advertisement scanner.
+
+The collector uses Bleak/BlueZ, merges advertisement and scan-response data, and
+publishes device presence updates without making active GATT connections.
+"""
+
 import asyncio
 import inspect
 import os
@@ -7,7 +13,13 @@ import time
 
 import yaml
 
-from collectors.base import BaseCollector, STATE_OFFLINE, STATE_RETRYING, STATE_RUNNING_TIER1, STATE_RUNNING_TIER2
+from collectors.base import (
+    BaseCollector,
+    STATE_OFFLINE,
+    STATE_RETRYING,
+    STATE_RUNNING_TIER1,
+    STATE_RUNNING_TIER2,
+)
 
 
 _ADAPTER_OPERATION_LOCKS = {}
@@ -60,7 +72,9 @@ class BLECollector(BaseCollector):
     tab_label = "BLE Scan"
     required_hardware = "USB Bluetooth 5.0 dongle or built-in Bluetooth adapter"
     _company_identifiers = None
-    MAC_NAME_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$|^[0-9A-Fa-f]{12}$")
+    MAC_NAME_RE = re.compile(
+        r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$|^[0-9A-Fa-f]{12}$"
+    )
 
     def adapter_exists(self, adapter):
         """Probe for an adapter without assuming one Linux tool is present."""
@@ -75,7 +89,13 @@ class BLECollector(BaseCollector):
     def command_succeeds(self, command):
         """Run a setup/probe command and collapse all failures to False."""
         try:
-            subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=5)
+            subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=5,
+            )
             return True
         except Exception:
             return False
@@ -121,30 +141,44 @@ class BLECollector(BaseCollector):
         """Pick preferred adapter first, then fallback, then mark offline."""
         preferred = self.config.get("preferred_adapter", "hci1")
         fallback = self.config.get("fallback_adapter", "hci0")
-        primary_default = "test -d /sys/class/bluetooth/{} || hciconfig {} >/dev/null 2>&1".format(preferred, preferred)
-        fallback_default = "test -d /sys/class/bluetooth/{} || hciconfig {} >/dev/null 2>&1 || bluetoothctl list | grep -q 'Controller '".format(fallback, fallback)
-        primary_ok, primary_detail = self.validate_tier("primary", primary_default)
+        primary_default = "test -d /sys/class/bluetooth/{} || hciconfig {} >/dev/null 2>&1".format(
+            preferred, preferred
+        )
+        fallback_default = "test -d /sys/class/bluetooth/{} || hciconfig {} >/dev/null 2>&1 || bluetoothctl list | grep -q 'Controller '".format(
+            fallback, fallback
+        )
+        primary_ok, primary_detail = self.validate_tier(
+            "primary", primary_default
+        )
         if primary_ok:
             self.active_hardware = preferred
             self.state = STATE_RUNNING_TIER1
             self.warning = None
             return True
-        fallback_ok, fallback_detail = self.validate_tier("fallback", fallback_default)
+        fallback_ok, fallback_detail = self.validate_tier(
+            "fallback", fallback_default
+        )
         if fallback_ok:
             self.active_hardware = fallback
             self.state = STATE_RUNNING_TIER2
-            self.warning = "Using fallback Bluetooth adapter {}; range may be reduced. Primary validation failed: {}".format(fallback, primary_detail)
+            self.warning = "Using fallback Bluetooth adapter {}; range may be reduced. Primary validation failed: {}".format(
+                fallback, primary_detail
+            )
             return True
         self.active_hardware = None
         self.state = STATE_OFFLINE
-        self.warning = "No usable Bluetooth adapter. Primary validation: {}; fallback validation: {}".format(primary_detail, fallback_detail)
+        self.warning = "No usable Bluetooth adapter. Primary validation: {}; fallback validation: {}".format(
+            primary_detail, fallback_detail
+        )
         return False
 
     async def start(self):
         """Continuously scan BLE advertisements and publish device events."""
         self._running = True
         if not self.detect():
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
+            await self.emit(
+                "collector_offline", {"reason": self.warning}, "warning"
+            )
             return
 
         try:
@@ -154,13 +188,22 @@ class BLECollector(BaseCollector):
             # instead of crashing the whole Flask process.
             self.state = STATE_OFFLINE
             self.warning = "Python package 'bleak' is not installed."
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
+            await self.emit(
+                "collector_offline", {"reason": self.warning}, "warning"
+            )
             return
 
         self.prepare_adapter()
-        await self.emit("scanner_started", {"adapter": self.active_hardware, "tier": self.state})
+        await self.emit(
+            "scanner_started",
+            {"adapter": self.active_hardware, "tier": self.state},
+        )
         if self.state == STATE_RUNNING_TIER2:
-            await self.emit("hardware_fallback", {"adapter": self.active_hardware, "warning": self.warning}, "warning")
+            await self.emit(
+                "hardware_fallback",
+                {"adapter": self.active_hardware, "warning": self.warning},
+                "warning",
+            )
         # seen tracks device state between scans so the UI can distinguish new,
         # updated, and lost devices instead of appending duplicate rows forever.
         seen = {}
@@ -176,26 +219,39 @@ class BLECollector(BaseCollector):
                 # more likely during field use.
                 async with adapter_operation_lock(self.active_hardware):
                     self.prepare_adapter()
-                    devices = await self.discover_devices(BleakScanner, interval, use_adapter=True)
+                    devices = await self.discover_devices(
+                        BleakScanner, interval, use_adapter=True
+                    )
             except TypeError:
                 # Older bleak versions did not accept newer discover keywords.
                 async with adapter_operation_lock(self.active_hardware):
                     self.prepare_adapter()
-                    devices = await self.discover_devices(BleakScanner, interval, use_adapter=False)
+                    devices = await self.discover_devices(
+                        BleakScanner, interval, use_adapter=False
+                    )
             except Exception as exc:
                 if self.is_operation_in_progress(exc):
+                    # BlueZ can report InProgress when another scan/connect is
+                    # still winding down. Serialize and attempt light recovery
+                    # before declaring the collector offline.
                     consecutive_in_progress += 1
                     async with adapter_operation_lock(self.active_hardware):
                         self.recover_in_progress(consecutive_in_progress)
                 else:
                     consecutive_in_progress = 0
                 self.state = STATE_RETRYING
-                self.warning = self.scan_retry_warning(exc, consecutive_in_progress)
-                await self.emit("collector_retrying", {"reason": self.warning}, "warning")
+                self.warning = self.scan_retry_warning(
+                    exc, consecutive_in_progress
+                )
+                await self.emit(
+                    "collector_retrying", {"reason": self.warning}, "warning"
+                )
                 await self.retry_sleep()
                 if not self.detect():
                     self.state = STATE_OFFLINE
-                    await self.emit("collector_offline", {"reason": self.warning}, "warning")
+                    await self.emit(
+                        "collector_offline", {"reason": self.warning}, "warning"
+                    )
                 continue
 
             consecutive_in_progress = 0
@@ -218,6 +274,8 @@ class BLECollector(BaseCollector):
                 previous = seen.get(mac)
                 seen[mac] = dict(payload, last_seen=current)
                 if previous is None:
+                    # first_seen is filled by Device History using the event
+                    # timestamp; the payload field is left for compatibility.
                     payload["first_seen"] = None
                     await self.emit("device_seen", payload)
                 elif self.display_payload_changed(previous, payload):
@@ -228,13 +286,22 @@ class BLECollector(BaseCollector):
 
             # Expire stale devices locally; bleak discovery returns only the
             # devices seen in the current scan window.
-            lost = [mac for mac, data in seen.items() if current - data["last_seen"] > timeout]
+            lost = [
+                mac
+                for mac, data in seen.items()
+                if current - data["last_seen"] > timeout
+            ]
             for mac in lost:
                 await self.emit("device_lost", {"mac": mac})
                 del seen[mac]
 
             if not devices:
-                await asyncio.sleep(max(0.1, interval - (asyncio.get_running_loop().time() - now)))
+                await asyncio.sleep(
+                    max(
+                        0.1,
+                        interval - (asyncio.get_running_loop().time() - now),
+                    )
+                )
 
     async def discover_devices(self, scanner, interval, use_adapter=True):
         """Return [(device, advertisement_data)] across old/new bleak APIs.
@@ -246,7 +313,9 @@ class BLECollector(BaseCollector):
         """
         if self.config.get("callback_scan", True):
             try:
-                return await self.discover_with_callback(scanner, interval, use_adapter=use_adapter)
+                return await self.discover_with_callback(
+                    scanner, interval, use_adapter=use_adapter
+                )
             except TypeError:
                 # Fall through to the discover() compatibility ladder for older
                 # bleak builds whose scanner constructor does not match the
@@ -301,6 +370,8 @@ class BLECollector(BaseCollector):
         seen = {}
 
         def remember(device, advertisement):
+            # Callback mode may see several packets for one address in a scan
+            # window. Merge them before publishing one row to the browser.
             address = getattr(device, "address", None)
             if not address:
                 return
@@ -313,7 +384,11 @@ class BLECollector(BaseCollector):
                 }
                 seen[address] = entry
 
-            name = getattr(advertisement, "local_name", None) if advertisement is not None else None
+            name = (
+                getattr(advertisement, "local_name", None)
+                if advertisement is not None
+                else None
+            )
             name = name or getattr(device, "name", None) or ""
             if name and not self.is_address_like_name(name):
                 entry["device"].name = name
@@ -324,13 +399,21 @@ class BLECollector(BaseCollector):
                 entry["device"].rssi = rssi
                 entry["advertisement"].rssi = rssi
 
-            manufacturer_data = getattr(advertisement, "manufacturer_data", None) if advertisement is not None else None
+            manufacturer_data = (
+                getattr(advertisement, "manufacturer_data", None)
+                if advertisement is not None
+                else None
+            )
             if manufacturer_data:
-                entry["advertisement"].manufacturer_data.update(manufacturer_data)
+                entry["advertisement"].manufacturer_data.update(
+                    manufacturer_data
+                )
 
             for service in getattr(advertisement, "service_uuids", None) or []:
                 entry["service_uuids"].add(service)
-            entry["advertisement"].service_uuids = sorted(entry["service_uuids"])
+            entry["advertisement"].service_uuids = sorted(
+                entry["service_uuids"]
+            )
 
         instance = self.build_callback_scanner(scanner, remember, use_adapter)
         await self.maybe_await(instance.start())
@@ -338,7 +421,9 @@ class BLECollector(BaseCollector):
             await asyncio.sleep(interval)
         finally:
             await self.maybe_await(instance.stop())
-        return [(entry["device"], entry["advertisement"]) for entry in seen.values()]
+        return [
+            (entry["device"], entry["advertisement"]) for entry in seen.values()
+        ]
 
     def build_callback_scanner(self, scanner, callback, use_adapter):
         """Create a BleakScanner while tolerating old constructor signatures."""
@@ -363,7 +448,9 @@ class BLECollector(BaseCollector):
                 return scanner(callback, **candidate)
             except TypeError as exc:
                 last_error = exc
-        raise last_error or TypeError("BleakScanner callback construction failed")
+        raise last_error or TypeError(
+            "BleakScanner callback construction failed"
+        )
 
     async def maybe_await(self, value):
         """Await modern async Bleak methods while tolerating older sync ones."""
@@ -378,7 +465,11 @@ class BLECollector(BaseCollector):
 
     def device_rssi(self, device, advertisement):
         """Extract RSSI from AdvertisementData first, then older BLEDevice."""
-        rssi = getattr(advertisement, "rssi", None) if advertisement is not None else None
+        rssi = (
+            getattr(advertisement, "rssi", None)
+            if advertisement is not None
+            else None
+        )
         if rssi is None:
             rssi = getattr(device, "rssi", None)
         return rssi
@@ -391,9 +482,17 @@ class BLECollector(BaseCollector):
         fallback for unnamed devices so Skannr can display the same resolved
         names when BlueZ knows them.
         """
-        name = getattr(advertisement, "local_name", None) if advertisement is not None else None
+        name = (
+            getattr(advertisement, "local_name", None)
+            if advertisement is not None
+            else None
+        )
         name = name or getattr(device, "name", None) or ""
-        if name and not self.is_address_like_name(name):
+        if (
+            name
+            and self.is_valid_display_name(name)
+            and not self.is_address_like_name(name)
+        ):
             return name
         mac = getattr(device, "address", None)
         return self.bluez_cached_name(mac)
@@ -404,7 +503,11 @@ class BLECollector(BaseCollector):
         if self.MAC_NAME_RE.match(value):
             return True
         compact = re.sub(r"[^0-9A-Fa-f]", "", value)
-        return len(compact) == 12 and compact.lower() == value.replace(" ", "").replace("_", "").lower()
+        return (
+            len(compact) == 12
+            and compact.lower()
+            == value.replace(" ", "").replace("_", "").lower()
+        )
 
     def bluez_cached_name(self, mac):
         """Return a cached BlueZ name for a BLE address when available."""
@@ -419,7 +522,14 @@ class BLECollector(BaseCollector):
         cached = cache.get(mac)
         if cached and now - cached["checked_at"] < ttl:
             return cached["name"]
-        name = self.bluez_info_name(mac) or self.bluez_devices_name(mac) or self.classic_name(mac)
+        # These lookups are best-effort conveniences. They are intentionally
+        # cached because repeatedly shelling out for every advertisement is too
+        # expensive on a Pi.
+        name = (
+            self.bluez_info_name(mac)
+            or self.bluez_devices_name(mac)
+            or self.classic_name(mac)
+        )
         cache[mac] = {"checked_at": now, "name": name}
         return name
 
@@ -434,16 +544,32 @@ class BLECollector(BaseCollector):
             key, value = text.split(":", 1)
             values[key.strip().lower()] = value.strip()
         name = values.get("name") or values.get("alias") or ""
-        return "" if self.same_address(name, mac) or self.is_address_like_name(name) else name
+        return (
+            ""
+            if not self.is_valid_display_name(name)
+            or self.same_address(name, mac)
+            or self.is_address_like_name(name)
+            else name
+        )
 
     def bluez_devices_name(self, mac):
         """Parse bluetoothctl devices as a broader local-cache fallback."""
         output = self.command_output(["bluetoothctl", "devices"])
         for line in output.splitlines():
             parts = line.strip().split(None, 2)
-            if len(parts) >= 3 and parts[0] == "Device" and parts[1].lower() == mac.lower():
+            if (
+                len(parts) >= 3
+                and parts[0] == "Device"
+                and parts[1].lower() == mac.lower()
+            ):
                 name = parts[2].strip()
-                return "" if self.same_address(name, mac) or self.is_address_like_name(name) else name
+                return (
+                    ""
+                    if not self.is_valid_display_name(name)
+                    or self.same_address(name, mac)
+                    or self.is_address_like_name(name)
+                    else name
+                )
         return ""
 
     def classic_name(self, mac):
@@ -468,11 +594,34 @@ class BLECollector(BaseCollector):
         if result.returncode != 0:
             return ""
         name = self.decode_output(result.stdout).strip()
-        return "" if self.same_address(name, mac) or self.is_address_like_name(name) else name
+        return (
+            ""
+            if not self.is_valid_display_name(name)
+            or self.same_address(name, mac)
+            or self.is_address_like_name(name)
+            else name
+        )
+
+    def is_valid_display_name(self, name):
+        """Reject diagnostics so command failures never become device names."""
+        text = str(name or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        bad_fragments = (
+            "command '['",
+            "timed out after",
+            "operation already in progress",
+            "failed to connect",
+            "input/output error",
+        )
+        return not any(fragment in lowered for fragment in bad_fragments)
 
     def same_address(self, left, right):
         """Compare Bluetooth addresses while ignoring separators/case."""
-        normalize = lambda value: re.sub(r"[^0-9A-Fa-f]", "", str(value or "")).lower()
+        normalize = lambda value: re.sub(
+            r"[^0-9A-Fa-f]", "", str(value or "")
+        ).lower()
         return bool(left and right and normalize(left) == normalize(right))
 
     def display_payload_changed(self, previous, current):
@@ -501,6 +650,8 @@ class BLECollector(BaseCollector):
         for key in sorted(data.keys()):
             code = "0x{:04X}".format(int(key))
             name = companies.get(code.upper())
+            # If the optional SIG file is absent or incomplete, keep the raw
+            # company ID so the user can look it up later.
             parts.append("{} ({})".format(name, code) if name else code)
         return ", ".join(parts)
 
@@ -515,8 +666,14 @@ class BLECollector(BaseCollector):
         if self._company_identifiers is not None:
             return self._company_identifiers
         self._company_identifiers = {}
-        for filename in ("company_identifiers.txt", "company_identifiers.yaml", "company_identifiers.yml"):
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+        for filename in (
+            "company_identifiers.txt",
+            "company_identifiers.yaml",
+            "company_identifiers.yml",
+        ):
+            path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), filename
+            )
             if os.path.exists(path):
                 self._company_identifiers = self.load_company_identifiers(path)
                 break
@@ -531,7 +688,9 @@ class BLECollector(BaseCollector):
             return {}
         # Some exports wrap the list under a top-level key; support both.
         if isinstance(loaded, dict):
-            loaded = loaded.get("company_identifiers") or loaded.get("values") or []
+            loaded = (
+                loaded.get("company_identifiers") or loaded.get("values") or []
+            )
         companies = {}
         for item in loaded:
             if not isinstance(item, dict):
@@ -549,7 +708,9 @@ class BLECollector(BaseCollector):
 
     def prepare_adapter(self):
         """Best-effort adapter wake-up before every scan attempt."""
-        adapter = self.active_hardware or self.config.get("fallback_adapter", "hci0")
+        adapter = self.active_hardware or self.config.get(
+            "fallback_adapter", "hci0"
+        )
         self.command_succeeds(["rfkill", "unblock", "bluetooth"])
         self.command_succeeds(["hciconfig", adapter, "up"])
         self.command_succeeds(["btmgmt", "power", "on"])
@@ -568,7 +729,9 @@ class BLECollector(BaseCollector):
         scanning. If the same error repeats several times, do a lightweight HCI
         reset so the collector can recover without restarting Skannr.
         """
-        adapter = self.active_hardware or self.config.get("fallback_adapter", "hci0")
+        adapter = self.active_hardware or self.config.get(
+            "fallback_adapter", "hci0"
+        )
         self.command_succeeds(["bluetoothctl", "scan", "off"])
         reset_after = int(self.config.get("reset_after_in_progress", 3))
         if reset_after > 0 and count >= reset_after:
@@ -577,9 +740,15 @@ class BLECollector(BaseCollector):
 
     def scan_retry_warning(self, exc, in_progress_count):
         """Build a retry warning with a clearer wedged-controller hint."""
-        detail = "BLE scan failed; retrying: {}; {}".format(exc, self.adapter_diagnostics())
+        detail = "BLE scan failed; retrying: {}; {}".format(
+            exc, self.adapter_diagnostics()
+        )
         threshold = int(self.config.get("wedged_warning_after_in_progress", 6))
-        if self.is_operation_in_progress(exc) and threshold > 0 and in_progress_count >= threshold:
+        if (
+            self.is_operation_in_progress(exc)
+            and threshold > 0
+            and in_progress_count >= threshold
+        ):
             return (
                 "{}; Bluetooth controller may be wedged. Light recovery failed after "
                 "{} consecutive BlueZ InProgress errors. Restart the OS Bluetooth "
@@ -590,11 +759,19 @@ class BLECollector(BaseCollector):
 
     def adapter_diagnostics(self):
         """Collect short adapter diagnostics for retry/offline warnings."""
-        adapter = self.active_hardware or self.config.get("fallback_adapter", "hci0")
+        adapter = self.active_hardware or self.config.get(
+            "fallback_adapter", "hci0"
+        )
         details = [
             "adapter={}".format(adapter),
-            "hciconfig={}".format(self.command_output(["hciconfig", adapter])[:300]),
-            "bluetoothctl={}".format(self.command_output(["bluetoothctl", "show"])[:300]),
-            "rfkill={}".format(self.command_output(["rfkill", "list", "bluetooth"])[:300]),
+            "hciconfig={}".format(
+                self.command_output(["hciconfig", adapter])[:300]
+            ),
+            "bluetoothctl={}".format(
+                self.command_output(["bluetoothctl", "show"])[:300]
+            ),
+            "rfkill={}".format(
+                self.command_output(["rfkill", "list", "bluetooth"])[:300]
+            ),
         ]
         return "; ".join(details)

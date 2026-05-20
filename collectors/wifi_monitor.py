@@ -1,3 +1,9 @@
+"""Monitor-mode Wi-Fi packet collector and channel hopper.
+
+The user is expected to prepare a separate monitor-mode interface. Skannr then
+sniffs management frames and retunes across supported channels on demand.
+"""
+
 import asyncio
 import os
 import re
@@ -6,7 +12,13 @@ import threading
 import time
 
 from bus import local_now
-from collectors.base import BaseCollector, STATE_OFFLINE, STATE_RETRYING, STATE_RUNNING_TIER1, STATE_STOPPED
+from collectors.base import (
+    BaseCollector,
+    STATE_OFFLINE,
+    STATE_RETRYING,
+    STATE_RUNNING_TIER1,
+    STATE_STOPPED,
+)
 from collectors.wifi import WiFiCollector
 from log_utils import read_jsonl_events
 
@@ -36,11 +48,15 @@ class WiFiMonitorCollector(WiFiCollector):
 
     def detect(self):
         """Report availability without starting sniffing or channel hopping."""
-        primary_ok, primary_detail = self.validate_tier("primary", "command -v iw >/dev/null 2>&1")
+        primary_ok, primary_detail = self.validate_tier(
+            "primary", "command -v iw >/dev/null 2>&1"
+        )
         if not primary_ok:
             self.active_hardware = None
             self.state = STATE_OFFLINE
-            self.warning = "Wi-Fi monitor validation failed: {}".format(primary_detail)
+            self.warning = "Wi-Fi monitor validation failed: {}".format(
+                primary_detail
+            )
             return False
         iface = self.select_monitor_interface()
         if not iface:
@@ -60,7 +76,9 @@ class WiFiMonitorCollector(WiFiCollector):
         if not iface:
             self.state = STATE_OFFLINE
             self.warning = "No monitor-mode Wi-Fi interface found. Put a separate Wi-Fi adapter into monitor mode, then click Start."
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
+            await self.emit(
+                "collector_offline", {"reason": self.warning}, "warning"
+            )
             self._running = False
             return
 
@@ -69,7 +87,9 @@ class WiFiMonitorCollector(WiFiCollector):
         except ImportError:
             self.state = STATE_OFFLINE
             self.warning = "Python package 'scapy' is not installed."
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
+            await self.emit(
+                "collector_offline", {"reason": self.warning}, "warning"
+            )
             self._running = False
             return
 
@@ -81,18 +101,25 @@ class WiFiMonitorCollector(WiFiCollector):
         self._channel_plan = self.build_channel_plan()
         if not self._channel_plan:
             self.state = STATE_OFFLINE
-            self.warning = "No supported 2.4 GHz or 5 GHz channels were discovered for {}.".format(iface)
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
+            self.warning = "No supported 2.4 GHz or 5 GHz channels were discovered for {}.".format(
+                iface
+            )
+            await self.emit(
+                "collector_offline", {"reason": self.warning}, "warning"
+            )
             self._running = False
             return
 
         loop = asyncio.get_event_loop()
-        await self.emit("monitor_started", {
-            "interface": iface,
-            "channels": self._channel_plan,
-            "supported_bands": sorted(self._supported_channels.keys()),
-            "dwell_sec": self.dwell_seconds(),
-        })
+        await self.emit(
+            "monitor_started",
+            {
+                "interface": iface,
+                "channels": self._channel_plan,
+                "supported_bands": sorted(self._supported_channels.keys()),
+                "dwell_sec": self.dwell_seconds(),
+            },
+        )
 
         def packet_handler(packet):
             """Convert raw 802.11 management frames into Skannr events."""
@@ -101,11 +128,15 @@ class WiFiMonitorCollector(WiFiCollector):
             timestamp = local_now()
             dot11 = packet.getlayer(Dot11)
             rssi = getattr(packet, "dBm_AntSignal", None)
-            channel = self.packet_channel(packet, Dot11Elt) or self._current_channel
+            channel = (
+                self.packet_channel(packet, Dot11Elt) or self._current_channel
+            )
 
             if dot11.type != 0:
                 return
             if dot11.subtype == 4:
+                # Probe request: a client is asking for a network name. These
+                # are the rows that make Wi-Fi clients visible in history.
                 payload = {
                     "client_mac": dot11.addr2,
                     "vendor_oui": self.vendor_for(dot11.addr2),
@@ -117,8 +148,12 @@ class WiFiMonitorCollector(WiFiCollector):
                     "timestamp": timestamp,
                     "monitor_interface": iface,
                 }
-                asyncio.run_coroutine_threadsafe(self.emit("probe_request", payload), loop)
+                asyncio.run_coroutine_threadsafe(
+                    self.emit("probe_request", payload), loop
+                )
             elif dot11.subtype == 8:
+                # Beacon: monitor mode sees the same AP identity as Wi-Fi Scan,
+                # but on whichever channel the hopper is currently sampling.
                 payload = {
                     "bssid": dot11.addr2,
                     "vendor_oui": self.vendor_for(dot11.addr2),
@@ -131,16 +166,32 @@ class WiFiMonitorCollector(WiFiCollector):
                     "timestamp": timestamp,
                     "monitor_interface": iface,
                 }
-                asyncio.run_coroutine_threadsafe(self.emit("ap_beacon", payload), loop)
+                asyncio.run_coroutine_threadsafe(
+                    self.emit("ap_beacon", payload), loop
+                )
             elif dot11.subtype in (0, 2):
-                payload = self.client_ap_payload(dot11, rssi, channel, timestamp, iface)
-                asyncio.run_coroutine_threadsafe(self.emit("association_seen", payload), loop)
+                # Association/reassociation requests show client/AP activity but
+                # usually do not include a stable SSID.
+                payload = self.client_ap_payload(
+                    dot11, rssi, channel, timestamp, iface
+                )
+                asyncio.run_coroutine_threadsafe(
+                    self.emit("association_seen", payload), loop
+                )
             elif dot11.subtype == 10:
-                payload = self.client_ap_payload(dot11, rssi, channel, timestamp, iface)
-                asyncio.run_coroutine_threadsafe(self.emit("disassoc_seen", payload), loop)
+                payload = self.client_ap_payload(
+                    dot11, rssi, channel, timestamp, iface
+                )
+                asyncio.run_coroutine_threadsafe(
+                    self.emit("disassoc_seen", payload), loop
+                )
             elif dot11.subtype == 12:
-                payload = self.client_ap_payload(dot11, rssi, channel, timestamp, iface)
-                asyncio.run_coroutine_threadsafe(self.emit("deauth_seen", payload), loop)
+                payload = self.client_ap_payload(
+                    dot11, rssi, channel, timestamp, iface
+                )
+                asyncio.run_coroutine_threadsafe(
+                    self.emit("deauth_seen", payload), loop
+                )
 
         async def report_sniff_error(error):
             self.state = STATE_RETRYING
@@ -149,15 +200,25 @@ class WiFiMonitorCollector(WiFiCollector):
                 error,
                 self.interface_diagnostics(iface),
             )
-            await self.emit("collector_retrying", {"reason": self.warning}, "warning")
+            await self.emit(
+                "collector_retrying", {"reason": self.warning}, "warning"
+            )
 
         def sniff_loop():
             """Run Scapy in a thread while the asyncio task hops channels."""
             while self._running:
                 try:
-                    sniff(iface=iface, prn=packet_handler, store=False, stop_filter=lambda _pkt: not self._running, timeout=1)
+                    sniff(
+                        iface=iface,
+                        prn=packet_handler,
+                        store=False,
+                        stop_filter=lambda _pkt: not self._running,
+                        timeout=1,
+                    )
                 except Exception as exc:
-                    asyncio.run_coroutine_threadsafe(report_sniff_error(exc), loop)
+                    asyncio.run_coroutine_threadsafe(
+                        report_sniff_error(exc), loop
+                    )
                     time.sleep(float(self.config.get("retry_interval_sec", 5)))
 
         self._hopper_task = loop.create_task(self.channel_hopper(iface))
@@ -184,11 +245,14 @@ class WiFiMonitorCollector(WiFiCollector):
                     return
                 if self.set_channel(iface, channel):
                     self._current_channel = channel
-                    await self.emit("monitor_channel_changed", {
-                        "interface": iface,
-                        "channel": channel,
-                        "band": self.channel_band(channel),
-                    })
+                    await self.emit(
+                        "monitor_channel_changed",
+                        {
+                            "interface": iface,
+                            "channel": channel,
+                            "band": self.channel_band(channel),
+                        },
+                    )
                 await asyncio.sleep(dwell)
 
     def dwell_seconds(self):
@@ -212,9 +276,13 @@ class WiFiMonitorCollector(WiFiCollector):
             )
             if result.returncode == 0:
                 return True
-            self.warning = "Could not set {} to channel {}: {}".format(iface, channel, result.stdout.strip())
+            self.warning = "Could not set {} to channel {}: {}".format(
+                iface, channel, result.stdout.strip()
+            )
         except Exception as exc:
-            self.warning = "Could not set {} to channel {}: {}".format(iface, channel, exc)
+            self.warning = "Could not set {} to channel {}: {}".format(
+                iface, channel, exc
+            )
         return False
 
     def select_monitor_interface(self):
@@ -234,7 +302,12 @@ class WiFiMonitorCollector(WiFiCollector):
     def monitor_interfaces(self):
         """Parse 'iw dev' and return interfaces whose type is monitor."""
         try:
-            output = subprocess.check_output(["iw", "dev"], stderr=subprocess.STDOUT, universal_newlines=True, timeout=5)
+            output = subprocess.check_output(
+                ["iw", "dev"],
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                timeout=5,
+            )
         except Exception:
             return []
         interfaces = []
@@ -275,18 +348,30 @@ class WiFiMonitorCollector(WiFiCollector):
                 channels["2.4"].add(channel)
             elif 5000 <= mhz < 5900:
                 channels["5"].add(channel)
-        return {band: sorted(values) for band, values in channels.items() if values}
+        return {
+            band: sorted(values) for band, values in channels.items() if values
+        }
 
     def iw_list_output(self):
         """Return frequency capabilities for the selected PHY when possible."""
         phy = self.phy_for_interface(self.active_hardware)
         if phy:
             try:
-                return subprocess.check_output(["iw", "phy", phy, "info"], stderr=subprocess.STDOUT, universal_newlines=True, timeout=10)
+                return subprocess.check_output(
+                    ["iw", "phy", phy, "info"],
+                    stderr=subprocess.STDOUT,
+                    universal_newlines=True,
+                    timeout=10,
+                )
             except Exception:
                 pass
         try:
-            return subprocess.check_output(["iw", "list"], stderr=subprocess.STDOUT, universal_newlines=True, timeout=10)
+            return subprocess.check_output(
+                ["iw", "list"],
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                timeout=10,
+            )
         except Exception:
             return ""
 
@@ -295,7 +380,12 @@ class WiFiMonitorCollector(WiFiCollector):
         if not iface:
             return None
         try:
-            output = subprocess.check_output(["iw", "dev"], stderr=subprocess.STDOUT, universal_newlines=True, timeout=5)
+            output = subprocess.check_output(
+                ["iw", "dev"],
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                timeout=5,
+            )
         except Exception:
             return None
         current_phy = None
@@ -319,14 +409,24 @@ class WiFiMonitorCollector(WiFiCollector):
         enabled_bands = self.enabled_bands()
         typical = {
             "2.4": self.config.get("typical_channels_24", [1, 6, 11]),
-            "5": self.config.get("typical_channels_5", [36, 40, 44, 48, 149, 153, 157, 161, 165]),
+            "5": self.config.get(
+                "typical_channels_5", [36, 40, 44, 48, 149, 153, 157, 161, 165]
+            ),
         }
-        seen = self.seen_channels_by_band() if self.config.get("include_seen_channels", False) else {}
+        seen = (
+            self.seen_channels_by_band()
+            if self.config.get("include_seen_channels", False)
+            else {}
+        )
         for band in enabled_bands:
+            # Typical channels come first to avoid spending startup time reading
+            # old logs and to keep resource use predictable on small Pis.
             supported = set(self._supported_channels.get(band) or [])
             if not supported:
                 continue
-            for channel in list(typical.get(band) or []) + list(seen.get(band) or []):
+            for channel in list(typical.get(band) or []) + list(
+                seen.get(band) or []
+            ):
                 try:
                     channel = int(channel)
                 except (TypeError, ValueError):
@@ -370,7 +470,9 @@ class WiFiMonitorCollector(WiFiCollector):
     def configured_log_dir(self):
         """Return the configured persistence log directory."""
         global_config = self.config.get("_global_config") or {}
-        filesystem = ((global_config.get("persistence") or {}).get("filesystem") or {})
+        filesystem = (global_config.get("persistence") or {}).get(
+            "filesystem"
+        ) or {}
         log_dir = filesystem.get("log_dir", "./logs")
         return log_dir if os.path.isabs(log_dir) else os.path.abspath(log_dir)
 

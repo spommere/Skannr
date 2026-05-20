@@ -1,22 +1,42 @@
+"""Materialized device history built from collector JSONL logs.
+
+Raw logs are the audit trail, but the dashboard should not reread hundreds of
+thousands of raw rows on every startup or Refresh click. This builder folds raw
+events into one durable summary file and then advances that summary from saved
+byte offsets on later refreshes.
+"""
+
 import copy
 import json
 import os
 from collections import defaultdict
 
 from bus import utc_now
-from log_utils import count_jsonl_files, current_jsonl_checkpoint, event_in_window, has_jsonl_checkpoint, read_incremental_jsonl_events, read_jsonl_events, utc_epoch, window_metadata
+from log_utils import (
+    count_jsonl_files,
+    current_jsonl_checkpoint,
+    event_in_window,
+    has_jsonl_checkpoint,
+    read_incremental_jsonl_events,
+    read_jsonl_events,
+    utc_epoch,
+    window_metadata,
+)
 from oui_lookup import normalize_oui, vendor_name, vendor_prefix
 
 
 class DeviceHistoryBuilder:
     """Build a windowed device-history view and maintain durable first_seen data."""
 
-    COLLECTORS = ("wifi", "wifi_monitor", "ble", "ble_identify", "bt_classic", "findings")
+    COLLECTORS = ("wifi", "wifi_monitor", "ble", "ble_identify", "bt_classic")
 
     def __init__(self, log_dir, state_path=None, window_days=None):
         self.log_dir = log_dir
-        self.state_path = state_path or os.path.join(log_dir, "device_history", "device_history.json")
+        self.state_path = state_path or os.path.join(
+            log_dir, "device_history", "device_history.json"
+        )
         self.window_days = window_days
+        self._time_cache = {}
 
     def build(self, persist=True, merge_previous=True):
         """Return materialized Device History, updating it incrementally.
@@ -29,6 +49,16 @@ class DeviceHistoryBuilder:
         """
         previous = self.load_persisted_summary() if merge_previous else None
         if previous and has_jsonl_checkpoint(previous):
+            # Normal fast path: a modern summary already knows how far each
+            # collector log file was processed, so only new bytes are scanned.
+            if (
+                not self.has_history_records(previous)
+                and self.raw_history_files_exist()
+            ):
+                summary = self.full_build()
+                if persist:
+                    self.save_summary(summary)
+                return self.display_summary(summary, self.window_days)
             summary = self.incremental_update(previous)
             if persist:
                 self.save_summary(summary)
@@ -38,7 +68,9 @@ class DeviceHistoryBuilder:
             # existed. Trust that materialized state and start tracking new log
             # bytes from the current EOF instead of rereading old logs.
             previous = copy.deepcopy(previous)
-            previous["checkpoint"] = current_jsonl_checkpoint(self.log_dir, self.COLLECTORS)
+            previous["checkpoint"] = current_jsonl_checkpoint(
+                self.log_dir, self.COLLECTORS
+            )
             previous["generated_at"] = utc_now()
             previous["cached"] = False
             previous["incremental_records_read"] = 0
@@ -55,35 +87,45 @@ class DeviceHistoryBuilder:
         wifi_aps = {}
         wifi_clients = {}
         ble_devices = {}
-        finding_counts = defaultdict(int)
-        files_read = sum(count_jsonl_files(self.log_dir, collector) for collector in self.COLLECTORS)
+        files_by_collector = {
+            collector: count_jsonl_files(self.log_dir, collector)
+            for collector in self.COLLECTORS
+        }
+        files_read = sum(files_by_collector.values())
+        records_by_collector = defaultdict(int)
         records_read = 0
 
+        # Wi-Fi scan and Wi-Fi monitor both produce AP beacons, but only monitor
+        # mode produces clients/probes/deauth. apply_wifi_event() handles both
+        # sources and records the source set on each device.
         for event in self.read_all_events("wifi"):
             records_read += 1
+            records_by_collector["wifi"] += 1
             self.apply_wifi_event(event, wifi_aps, wifi_clients)
 
         for event in self.read_all_events("wifi_monitor"):
             records_read += 1
+            records_by_collector["wifi_monitor"] += 1
             self.apply_wifi_event(event, wifi_aps, wifi_clients)
 
+        # BLE, BLE Identify, and Classic Bluetooth are merged into one
+        # Bluetooth device history because a physical device may show up through
+        # more than one Bluetooth capture method over time.
         for event in self.read_all_events("ble"):
             records_read += 1
+            records_by_collector["ble"] += 1
             self.apply_ble_event(event, ble_devices)
 
         for event in self.read_all_events("ble_identify"):
             records_read += 1
+            records_by_collector["ble_identify"] += 1
             self.apply_ble_identify_event(event, ble_devices)
 
         for event in self.read_all_events("bt_classic"):
             records_read += 1
+            records_by_collector["bt_classic"] += 1
             self.apply_bt_classic_event(event, ble_devices)
 
-        for event in self.read_all_events("findings"):
-            records_read += 1
-            self.apply_finding_event(event, finding_counts)
-
-        self.attach_finding_counts(wifi_aps, wifi_clients, ble_devices, finding_counts)
         summary = {
             "generated_at": utc_now(),
             "log_dir": self.log_dir,
@@ -91,6 +133,8 @@ class DeviceHistoryBuilder:
             "window": window_metadata(None),
             "files_read": files_read,
             "records_read": records_read,
+            "raw_log_files": files_by_collector,
+            "raw_records_read": dict(records_by_collector),
             "wifi": {
                 "access_points": self.sorted_records(wifi_aps.values()),
                 "clients": self.sorted_records(wifi_clients.values()),
@@ -101,66 +145,115 @@ class DeviceHistoryBuilder:
             "bluetooth": {
                 "devices": self.sorted_records(ble_devices.values()),
             },
-            "checkpoint": current_jsonl_checkpoint(self.log_dir, self.COLLECTORS),
+            "checkpoint": current_jsonl_checkpoint(
+                self.log_dir, self.COLLECTORS
+            ),
         }
         return summary
 
     def incremental_update(self, previous):
         """Fold only not-yet-processed JSONL bytes into a persisted summary."""
         summary = copy.deepcopy(previous)
-        wifi_aps = self.record_map(((summary.get("wifi") or {}).get("access_points") or []), "bssid", ["ssids", "channels", "encryption", "sources"])
-        wifi_clients = self.record_map(((summary.get("wifi") or {}).get("clients") or []), "mac", ["ssids", "sources"])
-        ble_devices = self.record_map(((summary.get("ble") or summary.get("bluetooth") or {}).get("devices") or []), "mac", ["names", "service_uuids", "transports"])
+        # Persisted JSON cannot store sets, but the event-folding code uses sets
+        # for values that accumulate over time. Convert records back to the
+        # mutable shape before applying incremental events.
+        wifi_aps = self.record_map(
+            ((summary.get("wifi") or {}).get("access_points") or []),
+            "bssid",
+            ["ssids", "channels", "encryption", "sources"],
+        )
+        wifi_clients = self.record_map(
+            ((summary.get("wifi") or {}).get("clients") or []),
+            "mac",
+            ["ssids", "sources"],
+        )
+        ble_devices = self.record_map(
+            (
+                (summary.get("ble") or summary.get("bluetooth") or {}).get(
+                    "devices"
+                )
+                or []
+            ),
+            "mac",
+            ["names", "service_uuids", "transports"],
+        )
+        records_by_collector = defaultdict(int)
         records_read = 0
-        checkpoint = summary.get("checkpoint") or current_jsonl_checkpoint(self.log_dir, ())
+        checkpoint = summary.get("checkpoint") or current_jsonl_checkpoint(
+            self.log_dir, ()
+        )
 
-        for event in read_incremental_jsonl_events(self.log_dir, "wifi", checkpoint):
+        for event in read_incremental_jsonl_events(
+            self.log_dir, "wifi", checkpoint
+        ):
             records_read += 1
+            records_by_collector["wifi"] += 1
             self.apply_wifi_event(event, wifi_aps, wifi_clients)
-        for event in read_incremental_jsonl_events(self.log_dir, "wifi_monitor", checkpoint):
+        for event in read_incremental_jsonl_events(
+            self.log_dir, "wifi_monitor", checkpoint
+        ):
             records_read += 1
+            records_by_collector["wifi_monitor"] += 1
             self.apply_wifi_event(event, wifi_aps, wifi_clients)
-        for event in read_incremental_jsonl_events(self.log_dir, "ble", checkpoint):
+        for event in read_incremental_jsonl_events(
+            self.log_dir, "ble", checkpoint
+        ):
             records_read += 1
+            records_by_collector["ble"] += 1
             self.apply_ble_event(event, ble_devices)
-        for event in read_incremental_jsonl_events(self.log_dir, "ble_identify", checkpoint):
+        for event in read_incremental_jsonl_events(
+            self.log_dir, "ble_identify", checkpoint
+        ):
             records_read += 1
+            records_by_collector["ble_identify"] += 1
             self.apply_ble_identify_event(event, ble_devices)
-        for event in read_incremental_jsonl_events(self.log_dir, "bt_classic", checkpoint):
+        for event in read_incremental_jsonl_events(
+            self.log_dir, "bt_classic", checkpoint
+        ):
             records_read += 1
+            records_by_collector["bt_classic"] += 1
             self.apply_bt_classic_event(event, ble_devices)
-        for event in read_incremental_jsonl_events(self.log_dir, "findings", checkpoint):
-            records_read += 1
-            self.apply_finding_event_to_records(event, wifi_aps, wifi_clients, ble_devices)
-
         bluetooth_devices = self.sorted_records(ble_devices.values())
+        files_by_collector = {
+            collector: count_jsonl_files(self.log_dir, collector)
+            for collector in self.COLLECTORS
+        }
 
-        summary.update({
-            "generated_at": utc_now(),
-            "log_dir": self.log_dir,
-            "state_path": self.state_path,
-            "window": window_metadata(None),
-            "files_read": sum(count_jsonl_files(self.log_dir, collector) for collector in self.COLLECTORS),
-            "records_read": int(summary.get("records_read") or 0) + records_read,
-            "incremental_records_read": records_read,
-            "checkpoint": checkpoint,
-            "cached": False,
-            "wifi": {
-                "access_points": self.sorted_records(wifi_aps.values()),
-                "clients": self.sorted_records(wifi_clients.values()),
-            },
-            "ble": {
-                "devices": bluetooth_devices,
-            },
-            "bluetooth": {
-                "devices": bluetooth_devices,
-            },
-        })
+        summary.update(
+            {
+                "generated_at": utc_now(),
+                "log_dir": self.log_dir,
+                "state_path": self.state_path,
+                "window": window_metadata(None),
+                "files_read": sum(files_by_collector.values()),
+                "records_read": int(summary.get("records_read") or 0)
+                + records_read,
+                "incremental_records_read": records_read,
+                "raw_log_files": files_by_collector,
+                "incremental_records_read_by_collector": dict(
+                    records_by_collector
+                ),
+                "checkpoint": checkpoint,
+                "cached": False,
+                "wifi": {
+                    "access_points": self.sorted_records(wifi_aps.values()),
+                    "clients": self.sorted_records(wifi_clients.values()),
+                },
+                "ble": {
+                    "devices": bluetooth_devices,
+                },
+                "bluetooth": {
+                    "devices": bluetooth_devices,
+                },
+            }
+        )
         return summary
 
     def read_events(self, collector):
         """Yield parsed events for one collector in the selected view window."""
-        for event in read_jsonl_events(self.log_dir, collector, self.window_days):
+        for event in read_jsonl_events(
+            self.log_dir, collector, self.window_days
+        ):
             yield event
 
     def read_all_events(self, collector):
@@ -178,31 +271,39 @@ class DeviceHistoryBuilder:
         data = event.get("data") or {}
         timestamp = event.get("timestamp") or data.get("timestamp") or ""
         if event_type == "ap_beacon":
+            # AP identity is the BSSID. The SSID can be blank or can change, so
+            # keep both the current display SSID and the all-time SSID set.
             bssid = self.clean(data.get("bssid")) or "unknown"
             ssid = self.clean(data.get("ssid"))
             key = bssid
-            item = wifi_aps.setdefault(key, {
-                "ssid": ssid,
-                "ssids": set(),
-                "bssid": bssid,
-                "vendor_oui": self.vendor_for(bssid),
-                "vendor_prefix": self.vendor_prefix_for(bssid),
-                "vendor_name": self.clean(data.get("vendor_name")),
-                "first_seen": timestamp,
-                "last_seen": timestamp,
-                "channels": set(),
-                "encryption": set(),
-                "signal_latest": None,
-                "signal_min": None,
-                "signal_max": None,
-                "observations": 0,
-                "finding_count": 0,
-                "sources": set(),
-            })
+            item = wifi_aps.setdefault(
+                key,
+                {
+                    "ssid": ssid,
+                    "ssids": set(),
+                    "bssid": bssid,
+                    "vendor_oui": self.vendor_for(bssid),
+                    "vendor_prefix": self.vendor_prefix_for(bssid),
+                    "vendor_name": self.clean(data.get("vendor_name")),
+                    "first_seen": timestamp,
+                    "last_seen": timestamp,
+                    "channels": set(),
+                    "encryption": set(),
+                    "signal_latest": None,
+                    "signal_min": None,
+                    "signal_max": None,
+                    "observations": 0,
+                    "finding_count": 0,
+                    "sources": set(),
+                },
+            )
             self.add_set_value(item["sources"], event.get("collector"))
             if ssid:
                 item["ssid"] = ssid
                 item["ssids"].add(ssid)
+            # Vendor fields were added after the first Skannr logs existed.
+            # Refill missing values from the local OUI registry as records are
+            # touched by newer events.
             if not item.get("vendor_oui"):
                 item["vendor_oui"] = self.vendor_for(bssid)
             if not item.get("vendor_prefix"):
@@ -213,10 +314,16 @@ class DeviceHistoryBuilder:
                 item["vendor_prefix"] = self.clean(data.get("vendor_prefix"))
             self.update_time_bounds(item, timestamp)
             self.add_set_value(item["channels"], data.get("channel"))
-            self.add_set_value(item["encryption"], data.get("encryption"))
+            self.add_set_value(
+                item["encryption"],
+                self.normalize_wifi_encryption(data.get("encryption")),
+            )
             self.update_signal(item, data.get("rssi"))
             item["observations"] += 1
         elif event_type == "probe_request":
+            # Probe requests identify a client, not an AP. They are generated by
+            # wifi_monitor only, but the history schema keeps clients under Wi-Fi
+            # so Reports can summarize probe activity next to AP history.
             mac = self.clean(data.get("client_mac")) or "unknown"
             ssid = self.clean(data.get("ssid_probed"))
             item = self.wifi_client_record(wifi_clients, mac, timestamp, data)
@@ -235,6 +342,9 @@ class DeviceHistoryBuilder:
             self.update_signal(item, data.get("rssi"))
             item["probe_count"] += 1
         elif event_type in ("association_seen", "deauth_seen", "disassoc_seen"):
+            # Monitor-mode management frames do not always carry an SSID, so
+            # count them against the client MAC and leave AP relationship
+            # analysis to later report/insight rules.
             mac = self.clean(data.get("client_mac")) or "unknown"
             item = self.wifi_client_record(wifi_clients, mac, timestamp, data)
             self.add_set_value(item["sources"], event.get("collector"))
@@ -249,26 +359,29 @@ class DeviceHistoryBuilder:
 
     def wifi_client_record(self, wifi_clients, mac, timestamp, data):
         """Return or create the Wi-Fi client history record for a MAC."""
-        return wifi_clients.setdefault(mac, {
-            "mac": mac,
-            "vendor_oui": self.clean(data.get("vendor_oui")),
-            "vendor_prefix": self.clean(data.get("vendor_prefix")),
-            "vendor_name": self.clean(data.get("vendor_name")),
-            "first_seen": timestamp,
-            "last_seen": timestamp,
-            "ssids": set(),
-            "blank_ssid_count": 0,
-            "signal_latest": None,
-            "signal_min": None,
-            "signal_max": None,
-            "probe_count": 0,
-            "association_count": 0,
-            "deauth_count": 0,
-            "disassoc_count": 0,
-            "randomized_mac": self.is_randomized_mac(mac),
-            "finding_count": 0,
-            "sources": set(),
-        })
+        return wifi_clients.setdefault(
+            mac,
+            {
+                "mac": mac,
+                "vendor_oui": self.clean(data.get("vendor_oui")),
+                "vendor_prefix": self.clean(data.get("vendor_prefix")),
+                "vendor_name": self.clean(data.get("vendor_name")),
+                "first_seen": timestamp,
+                "last_seen": timestamp,
+                "ssids": set(),
+                "blank_ssid_count": 0,
+                "signal_latest": None,
+                "signal_min": None,
+                "signal_max": None,
+                "probe_count": 0,
+                "association_count": 0,
+                "deauth_count": 0,
+                "disassoc_count": 0,
+                "randomized_mac": self.is_randomized_mac(mac),
+                "finding_count": 0,
+                "sources": set(),
+            },
+        )
 
     def apply_ble_event(self, event, ble_devices):
         """Fold one raw BLE event into device history."""
@@ -278,34 +391,43 @@ class DeviceHistoryBuilder:
         data = event.get("data") or {}
         timestamp = event.get("timestamp") or ""
         mac = self.clean(data.get("mac")) or "unknown"
-        item = ble_devices.setdefault(mac, {
-            "mac": mac,
-            "names": set(),
-            "first_seen": timestamp,
-            "last_seen": timestamp,
-            "signal_latest": None,
-            "signal_min": None,
-            "signal_max": None,
-            "seen_count": 0,
-            "update_count": 0,
-            "lost_count": 0,
-            "manufacturer": None,
-            "service_uuids": set(),
-            "sessions": [],
-            "active_session": None,
-            "finding_count": 0,
-            "transports": set(["ble"]),
-        })
+        item = ble_devices.setdefault(
+            mac,
+            {
+                "mac": mac,
+                "names": set(),
+                "first_seen": timestamp,
+                "last_seen": timestamp,
+                "signal_latest": None,
+                "signal_min": None,
+                "signal_max": None,
+                "seen_count": 0,
+                "update_count": 0,
+                "lost_count": 0,
+                "manufacturer": None,
+                "service_uuids": set(),
+                "sessions": [],
+                "active_session": None,
+                "finding_count": 0,
+                "transports": set(["ble"]),
+            },
+        )
         item["transports"].add("ble")
         self.update_time_bounds(item, timestamp)
-        if data.get("name"):
-            item["names"].add(self.clean(data.get("name")))
+        # Bluetooth names can arrive late through scan responses. Keep a set so
+        # a device can gain a display name without losing earlier anonymous
+        # observations.
+        name = self.clean_bluetooth_name(data.get("name"))
+        if name:
+            item["names"].add(name)
         if data.get("manufacturer"):
             item["manufacturer"] = self.clean(data.get("manufacturer"))
         for uuid in data.get("service_uuids") or []:
             self.add_set_value(item["service_uuids"], uuid)
         self.update_signal(item, data.get("rssi"))
         if event_type == "device_seen":
+            # Sessions are the basis for "comes and goes" analysis. A seen event
+            # opens a session, updates extend it, and lost closes it.
             item["seen_count"] += 1
             self.open_ble_session(item, timestamp, data)
         elif event_type == "device_updated":
@@ -322,66 +444,88 @@ class DeviceHistoryBuilder:
         data = event.get("data") or {}
         timestamp = event.get("timestamp") or ""
         mac = self.clean(data.get("mac")) or "unknown"
-        item = ble_devices.setdefault(mac, {
-            "mac": mac,
-            "names": set(),
-            "first_seen": timestamp,
-            "last_seen": timestamp,
-            "signal_latest": None,
-            "signal_min": None,
-            "signal_max": None,
-            "seen_count": 0,
-            "update_count": 0,
-            "lost_count": 0,
-            "manufacturer": None,
-            "service_uuids": set(),
-            "sessions": [],
-            "active_session": None,
-            "finding_count": 0,
-            "transports": set(["ble"]),
-        })
+        item = ble_devices.setdefault(
+            mac,
+            {
+                "mac": mac,
+                "names": set(),
+                "first_seen": timestamp,
+                "last_seen": timestamp,
+                "signal_latest": None,
+                "signal_min": None,
+                "signal_max": None,
+                "seen_count": 0,
+                "update_count": 0,
+                "lost_count": 0,
+                "manufacturer": None,
+                "service_uuids": set(),
+                "sessions": [],
+                "active_session": None,
+                "finding_count": 0,
+                "transports": set(["ble"]),
+            },
+        )
         item["transports"].add("ble")
         self.update_time_bounds(item, timestamp)
         item["identify_count"] = int(item.get("identify_count") or 0) + 1
-        for field in ("manufacturer_name", "model_number", "firmware_revision", "hardware_revision", "software_revision"):
+        # Device Information Service fields are optional. Preserve only fields
+        # that were actually read so failed reads do not erase known metadata.
+        for field in (
+            "manufacturer_name",
+            "model_number",
+            "firmware_revision",
+            "hardware_revision",
+            "software_revision",
+        ):
             if data.get(field):
                 item[field] = self.clean(data.get(field))
 
     def apply_bt_classic_event(self, event, ble_devices):
         """Fold classic Bluetooth inquiry results into Bluetooth history."""
         event_type = event.get("type")
-        if event_type not in ("classic_device_seen", "classic_device_updated", "classic_device_lost"):
+        if event_type not in (
+            "classic_device_seen",
+            "classic_device_updated",
+            "classic_device_lost",
+        ):
             return
         data = event.get("data") or {}
         timestamp = event.get("timestamp") or ""
         mac = self.clean(data.get("mac")) or "unknown"
-        item = ble_devices.setdefault(mac, {
-            "mac": mac,
-            "names": set(),
-            "first_seen": timestamp,
-            "last_seen": timestamp,
-            "signal_latest": None,
-            "signal_min": None,
-            "signal_max": None,
-            "seen_count": 0,
-            "update_count": 0,
-            "lost_count": 0,
-            "classic_seen_count": 0,
-            "classic_update_count": 0,
-            "classic_lost_count": 0,
-            "manufacturer": None,
-            "vendor_prefix": "",
-            "vendor_name": "",
-            "service_uuids": set(),
-            "sessions": [],
-            "active_session": None,
-            "finding_count": 0,
-            "transports": set(["classic"]),
-        })
+        item = ble_devices.setdefault(
+            mac,
+            {
+                "mac": mac,
+                "names": set(),
+                "first_seen": timestamp,
+                "last_seen": timestamp,
+                "signal_latest": None,
+                "signal_min": None,
+                "signal_max": None,
+                "seen_count": 0,
+                "update_count": 0,
+                "lost_count": 0,
+                "classic_seen_count": 0,
+                "classic_update_count": 0,
+                "classic_lost_count": 0,
+                "manufacturer": None,
+                "vendor_prefix": "",
+                "vendor_name": "",
+                "service_uuids": set(),
+                "sessions": [],
+                "active_session": None,
+                "finding_count": 0,
+                "transports": set(["classic"]),
+            },
+        )
         item.setdefault("transports", set()).add("classic")
         self.update_time_bounds(item, timestamp)
-        if data.get("name"):
-            item["names"].add(self.clean(data.get("name")))
+        # Classic inquiry may reveal a user-friendly name where BLE only had a
+        # rotating/randomized address. Keep it on the same Bluetooth record when
+        # the address matches.
+        name = self.clean_bluetooth_name(data.get("name"))
+        if name:
+            item["names"].add(name)
         if data.get("vendor_prefix"):
             item["vendor_prefix"] = self.clean(data.get("vendor_prefix"))
         if data.get("vendor_name"):
@@ -393,11 +537,17 @@ class DeviceHistoryBuilder:
         if data.get("clock_offset"):
             item["classic_clock_offset"] = self.clean(data.get("clock_offset"))
         if event_type == "classic_device_seen":
-            item["classic_seen_count"] = int(item.get("classic_seen_count") or 0) + 1
+            item["classic_seen_count"] = (
+                int(item.get("classic_seen_count") or 0) + 1
+            )
         elif event_type == "classic_device_updated":
-            item["classic_update_count"] = int(item.get("classic_update_count") or 0) + 1
+            item["classic_update_count"] = (
+                int(item.get("classic_update_count") or 0) + 1
+            )
         elif event_type == "classic_device_lost":
-            item["classic_lost_count"] = int(item.get("classic_lost_count") or 0) + 1
+            item["classic_lost_count"] = (
+                int(item.get("classic_lost_count") or 0) + 1
+            )
 
     def apply_finding_event(self, event, finding_counts):
         """Count related findings by stable device identity when available."""
@@ -413,7 +563,9 @@ class DeviceHistoryBuilder:
             if attributes.get("mac"):
                 finding_counts["ble:{}".format(attributes["mac"])] += 1
 
-    def apply_finding_event_to_records(self, event, wifi_aps, wifi_clients, ble_devices):
+    def apply_finding_event_to_records(
+        self, event, wifi_aps, wifi_clients, ble_devices
+    ):
         """Increment finding counters directly during an incremental refresh."""
         finding = event.get("data") or {}
         attributes = finding.get("attributes") or {}
@@ -421,21 +573,33 @@ class DeviceHistoryBuilder:
         if source in ("wifi", "wifi_monitor"):
             bssid = attributes.get("bssid")
             if bssid and bssid in wifi_aps:
-                wifi_aps[bssid]["finding_count"] = int(wifi_aps[bssid].get("finding_count") or 0) + 1
+                wifi_aps[bssid]["finding_count"] = (
+                    int(wifi_aps[bssid].get("finding_count") or 0) + 1
+                )
             mac = attributes.get("mac")
             if mac and mac in wifi_clients:
-                wifi_clients[mac]["finding_count"] = int(wifi_clients[mac].get("finding_count") or 0) + 1
+                wifi_clients[mac]["finding_count"] = (
+                    int(wifi_clients[mac].get("finding_count") or 0) + 1
+                )
         elif source in ("ble", "ble_identify", "bt_classic"):
             mac = attributes.get("mac")
             if mac and mac in ble_devices:
-                ble_devices[mac]["finding_count"] = int(ble_devices[mac].get("finding_count") or 0) + 1
+                ble_devices[mac]["finding_count"] = (
+                    int(ble_devices[mac].get("finding_count") or 0) + 1
+                )
 
-    def attach_finding_counts(self, wifi_aps, wifi_clients, ble_devices, finding_counts):
+    def attach_finding_counts(
+        self, wifi_aps, wifi_clients, ble_devices, finding_counts
+    ):
         """Copy finding counters into the records shown by the UI."""
         for bssid, item in wifi_aps.items():
-            item["finding_count"] = finding_counts.get("wifi-ap:{}".format(bssid), 0)
+            item["finding_count"] = finding_counts.get(
+                "wifi-ap:{}".format(bssid), 0
+            )
         for mac, item in wifi_clients.items():
-            item["finding_count"] = finding_counts.get("wifi-client:{}".format(mac), 0)
+            item["finding_count"] = finding_counts.get(
+                "wifi-client:{}".format(mac), 0
+            )
         for mac, item in ble_devices.items():
             item["finding_count"] = finding_counts.get("ble:{}".format(mac), 0)
 
@@ -447,7 +611,11 @@ class DeviceHistoryBuilder:
             for key, value in item.items():
                 converted[key] = self.serialize_value(value)
             output.append(converted)
-        return sorted(output, key=lambda item: self.time_key(item.get("last_seen")), reverse=True)
+        return sorted(
+            output,
+            key=lambda item: self.time_key(item.get("last_seen")),
+            reverse=True,
+        )
 
     def serialize_value(self, value):
         """Recursively convert sets inside records and open sessions to lists."""
@@ -456,16 +624,43 @@ class DeviceHistoryBuilder:
         if isinstance(value, list):
             return [self.serialize_value(item) for item in value]
         if isinstance(value, dict):
-            return {key: self.serialize_value(item) for key, item in value.items()}
+            return {
+                key: self.serialize_value(item) for key, item in value.items()
+            }
         return value
 
     def load_persisted_summary(self):
         """Load the durable device-history file if it exists."""
         try:
             with open(self.state_path, "r", encoding="utf-8") as fh:
-                return json.load(fh)
+                loaded = json.load(fh)
+                self.sanitize_bluetooth_names(loaded)
+                return loaded
         except (OSError, ValueError):
             return None
+
+    def sanitize_bluetooth_names(self, summary):
+        """Remove command diagnostics that older builds stored as names."""
+        bluetooth = (summary or {}).get("bluetooth") or {}
+        ble = (summary or {}).get("ble") or {}
+        devices = ble.get("devices") or bluetooth.get("devices") or []
+        for device in devices:
+            device["names"] = self.clean_bluetooth_name_list(
+                device.get("names")
+            )
+            active = device.get("active_session")
+            if isinstance(active, dict):
+                active["names"] = self.clean_bluetooth_name_list(
+                    active.get("names")
+                )
+            for session in device.get("sessions") or []:
+                if isinstance(session, dict):
+                    session["names"] = self.clean_bluetooth_name_list(
+                        session.get("names")
+                    )
+        if devices:
+            summary.setdefault("ble", {})["devices"] = devices
+            summary.setdefault("bluetooth", {})["devices"] = devices
 
     def save_summary(self, summary):
         """Persist the merged summary so first_seen survives restarts."""
@@ -480,31 +675,55 @@ class DeviceHistoryBuilder:
         ble = (summary or {}).get("ble") or {}
         bluetooth = (summary or {}).get("bluetooth") or {}
         return bool(
-            wifi.get("access_points") or
-            wifi.get("clients") or
-            ble.get("devices") or
-            bluetooth.get("devices")
+            wifi.get("access_points")
+            or wifi.get("clients")
+            or ble.get("devices")
+            or bluetooth.get("devices")
+        )
+
+    def raw_history_files_exist(self):
+        """Return True when retained collector JSONL files can rebuild history.
+
+        An empty materialized summary with a checkpoint can happen after manual
+        cache cleanup or path moves. If raw logs are still present, prefer a
+        full rebuild over trusting the empty checkpoint.
+        """
+        return any(
+            count_jsonl_files(self.log_dir, collector)
+            for collector in self.COLLECTORS
         )
 
     def display_summary(self, summary, window_days):
         """Return a windowed view derived from the materialized summary only."""
         output = copy.deepcopy(summary)
+        # The materialized file is all-retained history. The View selector is a
+        # display-time filter over last_seen, not a request to rebuild raw logs.
         output.setdefault("wifi", {}).setdefault("access_points", [])
         output.setdefault("wifi", {}).setdefault("clients", [])
         output.setdefault("ble", {}).setdefault("devices", [])
         output.setdefault("bluetooth", {}).setdefault("devices", [])
-        if not output["ble"].get("devices") and output["bluetooth"].get("devices"):
+        if not output["ble"].get("devices") and output["bluetooth"].get(
+            "devices"
+        ):
             output["ble"]["devices"] = output["bluetooth"]["devices"]
         output["bluetooth"]["devices"] = output["ble"].get("devices") or []
         output["window"] = window_metadata(window_days)
-        output["materialized_window"] = (summary.get("window") or window_metadata(None))
+        output["materialized_window"] = summary.get(
+            "window"
+        ) or window_metadata(None)
         output["raw_logs_incremental"] = True
         if window_days is None:
             self.enrich_wifi_vendor_names(output)
             return output
-        output["wifi"]["access_points"] = self.records_in_window(output["wifi"].get("access_points") or [], window_days)
-        output["wifi"]["clients"] = self.records_in_window(output["wifi"].get("clients") or [], window_days)
-        output["ble"]["devices"] = self.records_in_window(output["ble"].get("devices") or [], window_days)
+        output["wifi"]["access_points"] = self.records_in_window(
+            output["wifi"].get("access_points") or [], window_days
+        )
+        output["wifi"]["clients"] = self.records_in_window(
+            output["wifi"].get("clients") or [], window_days
+        )
+        output["ble"]["devices"] = self.records_in_window(
+            output["ble"].get("devices") or [], window_days
+        )
         output["bluetooth"]["devices"] = output["ble"]["devices"]
         self.enrich_wifi_vendor_names(output)
         return output
@@ -512,16 +731,24 @@ class DeviceHistoryBuilder:
     def enrich_wifi_vendor_names(self, summary):
         """Fill vendor names from OUI data for old materialized records too."""
         wifi = summary.get("wifi") or {}
-        for record in (wifi.get("access_points") or []):
+        for record in wifi.get("access_points") or []:
             if not record.get("vendor_prefix"):
-                record["vendor_prefix"] = vendor_prefix(record.get("bssid") or record.get("vendor_oui"))
+                record["vendor_prefix"] = vendor_prefix(
+                    record.get("bssid") or record.get("vendor_oui")
+                )
             if not record.get("vendor_name"):
-                record["vendor_name"] = vendor_name(record.get("bssid") or record.get("vendor_oui"))
-        for record in (wifi.get("clients") or []):
+                record["vendor_name"] = vendor_name(
+                    record.get("bssid") or record.get("vendor_oui")
+                )
+        for record in wifi.get("clients") or []:
             if not record.get("vendor_prefix"):
-                record["vendor_prefix"] = vendor_prefix(record.get("mac") or record.get("vendor_oui"))
+                record["vendor_prefix"] = vendor_prefix(
+                    record.get("mac") or record.get("vendor_oui")
+                )
             if not record.get("vendor_name"):
-                record["vendor_name"] = vendor_name(record.get("mac") or record.get("vendor_oui"))
+                record["vendor_name"] = vendor_name(
+                    record.get("mac") or record.get("vendor_oui")
+                )
 
     def records_in_window(self, records, window_days):
         """Filter materialized records by last_seen without reading raw logs."""
@@ -542,6 +769,8 @@ class DeviceHistoryBuilder:
             item = copy.deepcopy(record)
             for field in set_fields:
                 value = item.get(field)
+                # JSON stores accumulated values as lists. The folding code
+                # expects sets to avoid duplicate SSIDs/channels/names.
                 if isinstance(value, set):
                     continue
                 if isinstance(value, list):
@@ -550,6 +779,10 @@ class DeviceHistoryBuilder:
                     item[field] = {value}
                 else:
                     item[field] = set()
+            if "names" in set_fields:
+                item["names"] = set(
+                    self.clean_bluetooth_name_list(item.get("names"))
+                )
             self.restore_active_session(item)
             mapped[record_key] = item
         return mapped
@@ -563,9 +796,10 @@ class DeviceHistoryBuilder:
         if isinstance(names, set):
             return
         if isinstance(names, list):
-            session["names"] = set(names)
+            session["names"] = set(self.clean_bluetooth_name_list(names))
         elif names:
-            session["names"] = {names}
+            name = self.clean_bluetooth_name(names)
+            session["names"] = {name} if name else set()
         else:
             session["names"] = set()
 
@@ -586,7 +820,14 @@ class DeviceHistoryBuilder:
             ((previous.get("wifi") or {}).get("clients") or []),
             "mac",
             ["ssids", "sources"],
-            ["probe_count", "blank_ssid_count", "association_count", "deauth_count", "disassoc_count", "finding_count"],
+            [
+                "probe_count",
+                "blank_ssid_count",
+                "association_count",
+                "deauth_count",
+                "disassoc_count",
+                "finding_count",
+            ],
             merge_counts,
         )
         current["ble"]["devices"] = self.merge_record_lists(
@@ -594,7 +835,16 @@ class DeviceHistoryBuilder:
             ((previous.get("ble") or {}).get("devices") or []),
             "mac",
             ["names", "service_uuids", "transports"],
-            ["seen_count", "update_count", "lost_count", "identify_count", "classic_seen_count", "classic_update_count", "classic_lost_count", "finding_count"],
+            [
+                "seen_count",
+                "update_count",
+                "lost_count",
+                "identify_count",
+                "classic_seen_count",
+                "classic_update_count",
+                "classic_lost_count",
+                "finding_count",
+            ],
             merge_counts,
         )
         current["bluetooth"] = {"devices": current["ble"]["devices"]}
@@ -626,21 +876,53 @@ class DeviceHistoryBuilder:
 
     def enrich_record_list(self, current_records, previous_records, key):
         """Attach durable first_seen and stable metadata without old counts."""
-        previous_by_key = {record.get(key): record for record in previous_records if record.get(key)}
+        previous_by_key = {
+            record.get(key): record
+            for record in previous_records
+            if record.get(key)
+        }
         for record in current_records:
             old = previous_by_key.get(record.get(key))
             if not old:
                 continue
-            if old.get("first_seen") and (not record.get("first_seen") or self.is_earlier(old["first_seen"], record["first_seen"])):
+            if old.get("first_seen") and (
+                not record.get("first_seen")
+                or self.is_earlier(old["first_seen"], record["first_seen"])
+            ):
                 record["first_seen"] = old["first_seen"]
-            for field in ("ssid", "vendor_oui", "vendor_prefix", "vendor_name", "manufacturer", "manufacturer_name", "model_number", "firmware_revision", "hardware_revision", "software_revision", "classic_class", "classic_clock_offset"):
+            for field in (
+                "ssid",
+                "vendor_oui",
+                "vendor_prefix",
+                "vendor_name",
+                "manufacturer",
+                "manufacturer_name",
+                "model_number",
+                "firmware_revision",
+                "hardware_revision",
+                "software_revision",
+                "classic_class",
+                "classic_clock_offset",
+            ):
                 if not record.get(field) and old.get(field):
                     record[field] = old[field]
             if old.get("randomized_mac"):
                 record["randomized_mac"] = True
-        return sorted(current_records, key=lambda item: self.time_key(item.get("last_seen")), reverse=True)
+        return sorted(
+            current_records,
+            key=lambda item: self.time_key(item.get("last_seen")),
+            reverse=True,
+        )
 
-    def merge_record_lists(self, current_records, previous_records, key, list_fields, count_fields, merge_counts=True):
+    def merge_record_lists(
+        self,
+        current_records,
+        previous_records,
+        key,
+        list_fields,
+        count_fields,
+        merge_counts=True,
+    ):
         """Merge previous persisted records into fresh raw-log records.
 
         For normal all-log refreshes, counts use max() rather than addition
@@ -648,38 +930,70 @@ class DeviceHistoryBuilder:
         When saving a windowed refresh, callers can keep current raw-log counts
         so the selected View range does not suppress durable counters.
         """
-        merged = {record.get(key): record for record in current_records if record.get(key)}
+        merged = {
+            record.get(key): record
+            for record in current_records
+            if record.get(key)
+        }
         for old in previous_records:
             old_key = old.get(key)
             if not old_key:
                 continue
             if old_key not in merged:
+                # Device was seen only in the older durable summary. Keep it so
+                # first_seen survives even after raw logs age out or are not
+                # reread.
                 merged[old_key] = old
                 continue
             new = merged[old_key]
             self.merge_time_fields(new, old)
             self.merge_signal_fields(new, old)
             for field in list_fields:
-                new[field] = sorted(set(new.get(field) or []) | set(old.get(field) or []))
+                new[field] = sorted(
+                    set(new.get(field) or []) | set(old.get(field) or [])
+                )
             for field in count_fields:
                 if merge_counts:
-                    new[field] = max(int(new.get(field) or 0), int(old.get(field) or 0))
-            for field in ("ssid", "vendor_oui", "vendor_prefix", "vendor_name", "manufacturer", "manufacturer_name", "model_number", "firmware_revision", "hardware_revision", "software_revision", "classic_class", "classic_clock_offset"):
+                    new[field] = max(
+                        int(new.get(field) or 0), int(old.get(field) or 0)
+                    )
+            for field in (
+                "ssid",
+                "vendor_oui",
+                "vendor_prefix",
+                "vendor_name",
+                "manufacturer",
+                "manufacturer_name",
+                "model_number",
+                "firmware_revision",
+                "hardware_revision",
+                "software_revision",
+                "classic_class",
+                "classic_clock_offset",
+            ):
                 if not new.get(field) and old.get(field):
                     new[field] = old[field]
             if old.get("randomized_mac"):
                 new["randomized_mac"] = True
             if old.get("sessions"):
-                new["sessions"] = self.merge_sessions(new.get("sessions") or [], old.get("sessions") or [])
+                new["sessions"] = self.merge_sessions(
+                    new.get("sessions") or [], old.get("sessions") or []
+                )
             if old.get("active_session") and not new.get("active_session"):
                 new["active_session"] = old["active_session"]
-        return sorted(merged.values(), key=lambda item: self.time_key(item.get("last_seen")), reverse=True)
+        return sorted(
+            merged.values(),
+            key=lambda item: self.time_key(item.get("last_seen")),
+            reverse=True,
+        )
 
     def open_ble_session(self, item, timestamp, data):
         """Start a BLE presence session when a device appears."""
         if not timestamp:
             return
         if item.get("active_session"):
+            # Duplicate seen events inside one presence interval should extend
+            # the active session rather than create overlapping sessions.
             self.extend_ble_session(item, timestamp, data)
             return
         session = {
@@ -691,8 +1005,9 @@ class DeviceHistoryBuilder:
             "names": set(),
         }
         self.update_session_signal(session, data.get("rssi"))
-        if data.get("name"):
-            session["names"].add(self.clean(data.get("name")))
+        name = self.clean_bluetooth_name(data.get("name"))
+        if name:
+            session["names"].add(name)
         item["active_session"] = session
 
     def extend_ble_session(self, item, timestamp, data):
@@ -704,10 +1019,13 @@ class DeviceHistoryBuilder:
             return
         session = item["active_session"]
         session["end"] = timestamp
-        session["duration_sec"] = self.duration_seconds(session.get("start"), timestamp)
+        session["duration_sec"] = self.duration_seconds(
+            session.get("start"), timestamp
+        )
         self.update_session_signal(session, data.get("rssi"))
-        if data.get("name"):
-            session["names"].add(self.clean(data.get("name")))
+        name = self.clean_bluetooth_name(data.get("name"))
+        if name:
+            session["names"].add(name)
 
     def close_ble_session(self, item, timestamp, data):
         """Close the current BLE session and store it in session history."""
@@ -726,8 +1044,16 @@ class DeviceHistoryBuilder:
         signal = self.to_number(value)
         if signal is None:
             return
-        session["signal_min"] = signal if session["signal_min"] is None else min(session["signal_min"], signal)
-        session["signal_max"] = signal if session["signal_max"] is None else max(session["signal_max"], signal)
+        session["signal_min"] = (
+            signal
+            if session["signal_min"] is None
+            else min(session["signal_min"], signal)
+        )
+        session["signal_max"] = (
+            signal
+            if session["signal_max"] is None
+            else max(session["signal_max"], signal)
+        )
 
     def merge_sessions(self, current, previous):
         """Merge BLE sessions by start/end timestamps."""
@@ -736,7 +1062,11 @@ class DeviceHistoryBuilder:
             key = "{}|{}".format(session.get("start"), session.get("end"))
             if key.strip("|"):
                 merged[key] = session
-        return sorted(merged.values(), key=lambda item: self.time_key(item.get("start")), reverse=True)
+        return sorted(
+            merged.values(),
+            key=lambda item: self.time_key(item.get("start")),
+            reverse=True,
+        )
 
     def duration_seconds(self, first_seen, last_seen):
         """Return duration in seconds between two Skannr timestamps."""
@@ -748,9 +1078,15 @@ class DeviceHistoryBuilder:
 
     def merge_time_fields(self, new, old):
         """Preserve earliest first_seen and latest last_seen across summaries."""
-        if old.get("first_seen") and (not new.get("first_seen") or self.is_earlier(old["first_seen"], new["first_seen"])):
+        if old.get("first_seen") and (
+            not new.get("first_seen")
+            or self.is_earlier(old["first_seen"], new["first_seen"])
+        ):
             new["first_seen"] = old["first_seen"]
-        if old.get("last_seen") and (not new.get("last_seen") or self.is_later(old["last_seen"], new["last_seen"])):
+        if old.get("last_seen") and (
+            not new.get("last_seen")
+            or self.is_later(old["last_seen"], new["last_seen"])
+        ):
             new["last_seen"] = old["last_seen"]
 
     def merge_signal_fields(self, new, old):
@@ -760,43 +1096,82 @@ class DeviceHistoryBuilder:
         new_min = self.to_number(new.get("signal_min"))
         new_max = self.to_number(new.get("signal_max"))
         if old_min is not None:
-            new["signal_min"] = old_min if new_min is None else min(new_min, old_min)
+            new["signal_min"] = (
+                old_min if new_min is None else min(new_min, old_min)
+            )
         if old_max is not None:
-            new["signal_max"] = old_max if new_max is None else max(new_max, old_max)
-        if new.get("signal_latest") is None and old.get("signal_latest") is not None:
+            new["signal_max"] = (
+                old_max if new_max is None else max(new_max, old_max)
+            )
+        if (
+            new.get("signal_latest") is None
+            and old.get("signal_latest") is not None
+        ):
             new["signal_latest"] = old.get("signal_latest")
 
     def update_time_bounds(self, item, timestamp):
         """Maintain first_seen/last_seen strings using sortable timestamps."""
         if not timestamp:
             return
-        if not item.get("first_seen") or self.is_earlier(timestamp, item["first_seen"]):
+        if not item.get("first_seen") or self.is_earlier(
+            timestamp, item["first_seen"]
+        ):
             item["first_seen"] = timestamp
-        if not item.get("last_seen") or self.is_later(timestamp, item["last_seen"]):
+        if not item.get("last_seen") or self.is_later(
+            timestamp, item["last_seen"]
+        ):
             item["last_seen"] = timestamp
 
     def time_key(self, timestamp):
         """Return sortable epoch time, falling back to string ordering."""
+        if timestamp in self._time_cache:
+            return self._time_cache[timestamp]
         parsed = utc_epoch(timestamp)
-        if parsed is not None:
-            return parsed
-        return 0
+        value = parsed if parsed is not None else 0
+        if len(self._time_cache) < 100000:
+            # Device-history refreshes touch the same timestamps many times.
+            # Bound the cache so a very large log set does not grow unbounded.
+            self._time_cache[timestamp] = value
+        return value
 
     def is_earlier(self, left, right):
         """Compare timestamps across local and legacy UTC formats."""
-        left_epoch = utc_epoch(left)
-        right_epoch = utc_epoch(right)
+        if self.same_sortable_timestamp_format(left, right):
+            return str(left) < str(right)
+        left_epoch = self.time_key(left)
+        right_epoch = self.time_key(right)
         if left_epoch is not None and right_epoch is not None:
             return left_epoch < right_epoch
         return str(left) < str(right)
 
     def is_later(self, left, right):
         """Compare timestamps across local and legacy UTC formats."""
-        left_epoch = utc_epoch(left)
-        right_epoch = utc_epoch(right)
+        if self.same_sortable_timestamp_format(left, right):
+            return str(left) > str(right)
+        left_epoch = self.time_key(left)
+        right_epoch = self.time_key(right)
         if left_epoch is not None and right_epoch is not None:
             return left_epoch > right_epoch
         return str(left) > str(right)
+
+    def same_sortable_timestamp_format(self, left, right):
+        """Return True when string comparison preserves chronological order.
+
+        Current Skannr logs use 'YYYY-MM-DD HH:MM:SS'. Older logs may use
+        'YYYY-MM-DDTHH:MM:SSZ'. Within either format, lexicographic ordering is
+        chronological and avoids expensive datetime parsing for every event.
+        """
+        left = str(left or "")
+        right = str(right or "")
+        if len(left) >= 19 and len(right) >= 19:
+            if (
+                left[4:5] == "-"
+                and left[7:8] == "-"
+                and right[4:5] == "-"
+                and right[7:8] == "-"
+            ):
+                return left[10:11] == right[10:11]
+        return False
 
     def update_signal(self, item, value):
         """Maintain latest/min/max RSSI when the raw event carries a number."""
@@ -804,8 +1179,16 @@ class DeviceHistoryBuilder:
         if signal is None:
             return
         item["signal_latest"] = signal
-        item["signal_min"] = signal if item["signal_min"] is None else min(item["signal_min"], signal)
-        item["signal_max"] = signal if item["signal_max"] is None else max(item["signal_max"], signal)
+        item["signal_min"] = (
+            signal
+            if item["signal_min"] is None
+            else min(item["signal_min"], signal)
+        )
+        item["signal_max"] = (
+            signal
+            if item["signal_max"] is None
+            else max(item["signal_max"], signal)
+        )
 
     def add_set_value(self, values, value):
         """Add a non-empty normalized value to a set."""
@@ -813,11 +1196,73 @@ class DeviceHistoryBuilder:
         if cleaned:
             values.add(cleaned)
 
+    def normalize_wifi_encryption(self, value):
+        """Canonicalize equivalent Wi-Fi security labels before comparison.
+
+        Different scan paths and older logs can describe the same AP as
+        "WPA2", "WPA2/RSN", or a transitional "WPA2/WPA3". Reports should only
+        flag real security drift, not parser vocabulary drift.
+        """
+        text = self.clean(value)
+        if not text:
+            return ""
+        lowered = text.lower()
+        if lowered in ("open", "none"):
+            return "open"
+        if "wep" in lowered:
+            return "WEP/unknown"
+        parts = set(
+            part.strip().upper()
+            for part in text.replace(",", "/").split("/")
+            if part.strip()
+        )
+        if "SAE" in parts or "WPA3" in parts:
+            return "WPA2/WPA3" if "WPA2" in parts or "RSN" in parts else "WPA3"
+        if "WPA2" in parts or "RSN" in parts:
+            return "WPA2"
+        if "WPA" in parts:
+            return "WPA"
+        return text
+
     def clean(self, value):
         """Normalize display values from logs without losing useful strings."""
         if value is None:
             return ""
         return str(value).strip()
+
+    def clean_bluetooth_name(self, value):
+        """Normalize Bluetooth names and reject command/error diagnostics."""
+        text = self.clean(value)
+        if not text:
+            return ""
+        lowered = text.lower()
+        bad_fragments = (
+            "command '['",
+            "timed out after",
+            "no route to host",
+            "host is down",
+            "input/output error",
+            "operation already in progress",
+            "failed to connect",
+        )
+        if any(fragment in lowered for fragment in bad_fragments):
+            return ""
+        return text
+
+    def clean_bluetooth_name_list(self, values):
+        """Return sorted valid Bluetooth names from a scalar/list/set field."""
+        if isinstance(values, (list, set, tuple)):
+            candidates = values
+        elif values:
+            candidates = [values]
+        else:
+            candidates = []
+        cleaned = []
+        for value in candidates:
+            name = self.clean_bluetooth_name(value)
+            if name and name not in cleaned:
+                cleaned.append(name)
+        return sorted(cleaned)
 
     def to_number(self, value):
         """Parse numeric RSSI values; return None for empty/non-numeric data."""

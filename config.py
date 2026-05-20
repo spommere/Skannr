@@ -1,3 +1,10 @@
+"""Configuration loading and lightweight hardware/software detection.
+
+Global settings live in skannr.yaml. Collector-specific settings live in
+collectors/*.yaml, then get merged into config["collectors"] so the rest of the
+runtime can treat all settings as one dictionary.
+"""
+
 import copy
 import importlib.util
 import os
@@ -68,6 +75,8 @@ DEFAULT_CONFIG = {
     "reports": {
         "ble_long_presence_sec": 3600,
         "ble_recurring_min_days": 2,
+        "ble_private_address_group_min_count": 3,
+        "new_device_window_sec": 3600,
         "ble_strong_rssi": -55,
         "wifi_strong_rssi": -50,
         "wifi_many_bssid_count": 2,
@@ -83,9 +92,23 @@ DEFAULT_CONFIG = {
         "insights_recent_after_min": 30,
         "wifi_signal_bands": [
             {"value": "strong", "label": "Strong (>= -60)", "min": -60},
-            {"value": "okay", "label": "Okay (-60 to -70)", "min": -70, "max": -60},
-            {"value": "poor", "label": "Poor (-70 to -80)", "min": -80, "max": -70},
-            {"value": "very_poor", "label": "Very Poor (-80 or worse)", "max": -80},
+            {
+                "value": "okay",
+                "label": "Okay (-60 to -70)",
+                "min": -70,
+                "max": -60,
+            },
+            {
+                "value": "poor",
+                "label": "Poor (-70 to -80)",
+                "min": -80,
+                "max": -70,
+            },
+            {
+                "value": "very_poor",
+                "label": "Very Poor (-80 or worse)",
+                "max": -80,
+            },
         ],
     },
     "collectors": {},
@@ -113,7 +136,9 @@ def collector_config_dir(config_path):
     configured = os.path.join(project_dir_for_config(config_path), "collectors")
     if os.path.isdir(configured):
         return configured
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "collectors")
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "collectors"
+    )
 
 
 def load_collector_configs(config_path):
@@ -136,6 +161,8 @@ def load_collector_configs(config_path):
             with open(path, "r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh) or {}
         except (OSError, yaml.YAMLError):
+            # A bad collector config should not prevent Skannr from starting;
+            # that collector simply will not be present in this run.
             continue
         key = str(data.get("key") or os.path.splitext(filename)[0]).strip()
         if not key:
@@ -150,7 +177,13 @@ def load_collector_configs(config_path):
 def command_succeeds(command):
     """Return True when a probe command exits successfully."""
     try:
-        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=5)
+        subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            timeout=5,
+        )
         return True
     except Exception:
         return False
@@ -202,6 +235,9 @@ def detect_hardware(config):
     """
     collectors = config.get("collectors") or {}
     hardware = {}
+    # The UI wants one row of probe results per collector. Keep the details
+    # here in sync with the collector YAML defaults, but leave active validation
+    # to each collector's detect() method.
     if "rtlsdr" in collectors:
         hardware["rtlsdr"] = {
             "rtl_power": bool(shutil.which("rtl_power")),
@@ -210,8 +246,12 @@ def detect_hardware(config):
     if "ble" in collectors:
         ble = collectors["ble"]
         hardware["ble"] = {
-            "preferred_detected": adapter_exists(ble.get("preferred_adapter", "hci1")),
-            "fallback_detected": adapter_exists(ble.get("fallback_adapter", "hci0")),
+            "preferred_detected": adapter_exists(
+                ble.get("preferred_adapter", "hci1")
+            ),
+            "fallback_detected": adapter_exists(
+                ble.get("fallback_adapter", "hci0")
+            ),
             "preferred_adapter": ble.get("preferred_adapter", "hci1"),
             "fallback_adapter": ble.get("fallback_adapter", "hci0"),
             "bleak": package_available("bleak"),
@@ -219,8 +259,12 @@ def detect_hardware(config):
     if "ble_identify" in collectors:
         ble_identify = collectors["ble_identify"]
         hardware["ble_identify"] = {
-            "preferred_detected": adapter_exists(ble_identify.get("preferred_adapter", "hci1")),
-            "fallback_detected": adapter_exists(ble_identify.get("fallback_adapter", "hci0")),
+            "preferred_detected": adapter_exists(
+                ble_identify.get("preferred_adapter", "hci1")
+            ),
+            "fallback_detected": adapter_exists(
+                ble_identify.get("fallback_adapter", "hci0")
+            ),
             "preferred_adapter": ble_identify.get("preferred_adapter", "hci1"),
             "fallback_adapter": ble_identify.get("fallback_adapter", "hci0"),
             "bleak": package_available("bleak"),
@@ -229,8 +273,12 @@ def detect_hardware(config):
     if "bt_classic" in collectors:
         bt_classic = collectors["bt_classic"]
         hardware["bt_classic"] = {
-            "preferred_detected": adapter_exists(bt_classic.get("preferred_adapter", "hci1")),
-            "fallback_detected": adapter_exists(bt_classic.get("fallback_adapter", "hci0")),
+            "preferred_detected": adapter_exists(
+                bt_classic.get("preferred_adapter", "hci1")
+            ),
+            "fallback_detected": adapter_exists(
+                bt_classic.get("fallback_adapter", "hci0")
+            ),
             "preferred_adapter": bt_classic.get("preferred_adapter", "hci1"),
             "fallback_adapter": bt_classic.get("fallback_adapter", "hci0"),
             "hcitool": bool(shutil.which("hcitool")),
@@ -240,8 +288,12 @@ def detect_hardware(config):
     if "wifi" in collectors:
         wifi = collectors["wifi"]
         hardware["wifi"] = {
-            "preferred_detected": interface_exists(wifi.get("preferred_interface", "wlan1")),
-            "fallback_detected": interface_exists(wifi.get("fallback_interface", "wlan0")),
+            "preferred_detected": interface_exists(
+                wifi.get("preferred_interface", "wlan1")
+            ),
+            "fallback_detected": interface_exists(
+                wifi.get("fallback_interface", "wlan0")
+            ),
             "preferred_interface": wifi.get("preferred_interface", "wlan1"),
             "fallback_interface": wifi.get("fallback_interface", "wlan0"),
             "iw": bool(shutil.which("iw")),
@@ -268,17 +320,23 @@ def load_config(path):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as fh:
             loaded = yaml.safe_load(fh) or {}
+        # Accept the old project key so existing local configs survive the
+        # Spectra -> Skannr rename.
         if "spectra" in loaded and "skannr" not in loaded:
             loaded["skannr"] = loaded.pop("spectra")
         legacy_collectors = loaded.pop("collectors", {}) or {}
         deep_update(config, loaded)
     else:
+        # Only create skannr.yaml on a fresh checkout. Existing files are never
+        # rewritten on startup, which preserves user comments and formatting.
         config["collectors"] = load_collector_configs(path)
         detect_hardware(config)
         save_config(path, config)
     config["collectors"] = load_collector_configs(path)
     deep_update(config["collectors"], legacy_collectors)
-    config["persistence"]["filesystem"]["retention_days"] = normalize_retention_days(
+    config["persistence"]["filesystem"][
+        "retention_days"
+    ] = normalize_retention_days(
         config["persistence"]["filesystem"].get("retention_days"),
         DEFAULT_CONFIG["persistence"]["filesystem"]["retention_days"],
     )

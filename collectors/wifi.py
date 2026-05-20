@@ -1,10 +1,23 @@
+"""Managed-mode Wi-Fi access point scanner.
+
+This collector asks the OS for visible APs. It is intentionally separate from
+wifi_monitor.py, which requires monitor mode and packet sniffing.
+"""
+
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 
 from bus import local_now
-from collectors.base import BaseCollector, STATE_OFFLINE, STATE_RETRYING, STATE_RUNNING_TIER1, STATE_RUNNING_TIER2
+from collectors.base import (
+    BaseCollector,
+    STATE_OFFLINE,
+    STATE_RETRYING,
+    STATE_RUNNING_TIER1,
+    STATE_RUNNING_TIER2,
+)
 from oui_lookup import normalize_oui, vendor_name, vendor_prefix
 
 
@@ -29,46 +42,67 @@ class WiFiCollector(BaseCollector):
         """Select preferred Wi-Fi interface first, then configured fallback."""
         preferred = self.config.get("preferred_interface", "wlan1")
         fallback = self.config.get("fallback_interface", "wlan0")
-        primary_default = "test -d /sys/class/net/{} && (command -v iw >/dev/null 2>&1 || command -v iwlist >/dev/null 2>&1)".format(preferred)
-        fallback_default = "test -d /sys/class/net/{} && (command -v iw >/dev/null 2>&1 || command -v iwlist >/dev/null 2>&1)".format(fallback)
-        primary_ok, primary_detail = self.validate_tier("primary", primary_default)
+        primary_default = "test -d /sys/class/net/{} && (command -v iw >/dev/null 2>&1 || command -v iwlist >/dev/null 2>&1)".format(
+            preferred
+        )
+        fallback_default = "test -d /sys/class/net/{} && (command -v iw >/dev/null 2>&1 || command -v iwlist >/dev/null 2>&1)".format(
+            fallback
+        )
+        primary_ok, primary_detail = self.validate_tier(
+            "primary", primary_default
+        )
         if primary_ok:
             self.active_hardware = preferred
             self.state = STATE_RUNNING_TIER1
             self.warning = None
             return True
-        fallback_ok, fallback_detail = self.validate_tier("fallback", fallback_default)
+        fallback_ok, fallback_detail = self.validate_tier(
+            "fallback", fallback_default
+        )
         if fallback_ok:
             self.active_hardware = fallback
             self.state = STATE_RUNNING_TIER2
-            self.warning = "Using fallback Wi-Fi scan interface {}. Primary validation failed: {}".format(fallback, primary_detail)
+            self.warning = "Using fallback Wi-Fi scan interface {}. Primary validation failed: {}".format(
+                fallback, primary_detail
+            )
             return True
         self.active_hardware = None
         self.state = STATE_OFFLINE
-        self.warning = "No usable Wi-Fi interface. Primary validation: {}; fallback validation: {}".format(primary_detail, fallback_detail)
+        self.warning = "No usable Wi-Fi interface. Primary validation: {}; fallback validation: {}".format(
+            primary_detail, fallback_detail
+        )
         return False
 
     async def start(self):
         """Start managed AP scans on the selected interface."""
         self._running = True
         if not self.detect():
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
+            await self.emit(
+                "collector_offline", {"reason": self.warning}, "warning"
+            )
             return
-        await self.emit("interface_mode", {
-            "interface": self.active_hardware,
-            "monitor": False,
-            "warning": self.warning,
-        }, "warning" if self.warning else "info")
+        await self.emit(
+            "interface_mode",
+            {
+                "interface": self.active_hardware,
+                "monitor": False,
+                "warning": self.warning,
+            },
+            "warning" if self.warning else "info",
+        )
         await self.managed_scan_loop(self.active_hardware)
 
     async def managed_scan_loop(self, iface):
         """Managed scanner for normal Wi-Fi interfaces."""
         interval = float(self.config.get("managed_scan_interval_sec", 2))
-        await self.emit("scan_started", {
-            "interface": iface,
-            "method": "iw/iwlist",
-            "note": "Managed scan lists visible AP SSIDs but does not capture probe requests.",
-        })
+        await self.emit(
+            "scan_started",
+            {
+                "interface": iface,
+                "method": "iw/iwlist",
+                "note": "Managed scan lists visible AP SSIDs but does not capture probe requests.",
+            },
+        )
         while self._running:
             try:
                 # Reassert the interface state before every scan. On small Pi
@@ -76,10 +110,14 @@ class WiFiCollector(BaseCollector):
                 self.ensure_interface_up(iface)
                 networks = self.scan_access_points(iface)
                 if not networks:
-                    await self.emit("scan_empty", {
-                        "interface": iface,
-                        "diagnostics": self.interface_diagnostics(iface),
-                    }, "warning")
+                    await self.emit(
+                        "scan_empty",
+                        {
+                            "interface": iface,
+                            "diagnostics": self.interface_diagnostics(iface),
+                        },
+                        "warning",
+                    )
                 for network in networks:
                     await self.emit("ap_beacon", network)
             except Exception as exc:
@@ -91,7 +129,9 @@ class WiFiCollector(BaseCollector):
                     exc,
                     self.interface_diagnostics(iface),
                 )
-                await self.emit("collector_retrying", {"reason": self.warning}, "warning")
+                await self.emit(
+                    "collector_retrying", {"reason": self.warning}, "warning"
+                )
             await asyncio.sleep(interval)
 
     def ensure_interface_up(self, iface):
@@ -99,7 +139,12 @@ class WiFiCollector(BaseCollector):
         if not iface:
             return
         try:
-            subprocess.run(["ip", "link", "set", iface, "up"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["ip", "link", "set", iface, "up"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except Exception:
             pass
 
@@ -120,7 +165,9 @@ class WiFiCollector(BaseCollector):
             summary = result.stdout.strip() or result.stderr.strip()
         except Exception as exc:
             summary = "ip link unavailable: {}".format(exc)
-        return "operstate={}, flags={}, link={}".format(operstate, flags, summary)
+        return "operstate={}, flags={}, link={}".format(
+            operstate, flags, summary
+        )
 
     def read_sys_value(self, iface, name):
         """Read one /sys/class/net value, returning 'unknown' on failure."""
@@ -132,19 +179,56 @@ class WiFiCollector(BaseCollector):
             return "unknown"
 
     def scan_access_points(self, iface):
-        """Run whichever managed scan command is available and parse results."""
-        output = self.run_scan_command(["iw", "dev", iface, "scan"])
-        if output:
-            return self.parse_iw_scan(output)
-        output = self.run_scan_command(["iwlist", iface, "scan"])
-        if output:
-            return self.parse_iwlist_scan(output)
+        """Run one managed scan source for this collector run.
+
+        Auto mode chooses the best source once, preferring modern `iw`, then
+        sticks to it. Mixing `iw` and `iwlist` across scan passes can make the
+        same AP alternate between detailed WPA2/WPA3 and generic WPA2 labels.
+        """
+        tool = self.selected_scan_tool(iface)
+        if tool == "iw":
+            output = self.run_scan_command(["iw", "dev", iface, "scan"])
+            return self.parse_iw_scan(output) if output else []
+        if tool == "iwlist":
+            output = self.run_scan_command(["iwlist", iface, "scan"])
+            return self.parse_iwlist_scan(output) if output else []
         return []
+
+    def selected_scan_tool(self, iface):
+        """Return the configured or auto-selected scan tool for this run."""
+        configured = (
+            str(self.config.get("scan_tool", "auto") or "auto").strip().lower()
+        )
+        if configured in ("iw", "iwlist"):
+            # Honor an explicit admin choice, even if auto would prefer another
+            # tool. This is useful on older distributions with partial iw data.
+            self._scan_tool = configured
+            return configured
+        if getattr(self, "_scan_tool", None):
+            return self._scan_tool
+
+        if shutil.which("iw"):
+            # iw exposes frequency and RSN details more reliably, so prefer it
+            # when present and keep using it for the whole collector run.
+            self._scan_tool = "iw"
+            return self._scan_tool
+
+        if shutil.which("iwlist"):
+            self._scan_tool = "iwlist"
+            return self._scan_tool
+
+        self._scan_tool = "iw"
+        return self._scan_tool
 
     def run_scan_command(self, command):
         """Run iw/iwlist with a timeout; empty output means try the next path."""
         try:
-            return subprocess.check_output(command, universal_newlines=True, stderr=subprocess.STDOUT, timeout=20)
+            return subprocess.check_output(
+                command,
+                universal_newlines=True,
+                stderr=subprocess.STDOUT,
+                timeout=20,
+            )
         except Exception:
             return ""
 
@@ -166,9 +250,12 @@ class WiFiCollector(BaseCollector):
                     "encryption": "open",
                     "rssi": None,
                     "timestamp": local_now(),
+                    "scan_tool": "iw",
                 }
                 current["vendor_oui"] = self.vendor_for(current["bssid"])
-                current["vendor_prefix"] = self.vendor_prefix_for(current["bssid"])
+                current["vendor_prefix"] = self.vendor_prefix_for(
+                    current["bssid"]
+                )
                 current["vendor_name"] = self.vendor_name_for(current["bssid"])
                 continue
             if not current:
@@ -176,20 +263,32 @@ class WiFiCollector(BaseCollector):
             if line.startswith("SSID:"):
                 current["ssid"] = line.split("SSID:", 1)[1].strip()
             elif line.startswith("signal:"):
-                current["rssi"] = self.parse_signal_dbm(line.split("signal:", 1)[1])
+                current["rssi"] = self.parse_signal_dbm(
+                    line.split("signal:", 1)[1]
+                )
             elif line.startswith("freq:"):
                 frequency = line.split("freq:", 1)[1].strip()
                 current["frequency_mhz"] = self.parse_frequency_mhz(frequency)
                 current["frequency_band"] = self.band_from_frequency(frequency)
                 current["channel"] = self.channel_from_frequency(frequency)
             elif line.startswith("RSN:"):
-                current["encryption"] = self.merge_encryption(current["encryption"], "WPA2/RSN")
+                # RSN normally means WPA2. Later Authentication suite lines may
+                # add SAE and upgrade the label to WPA2/WPA3.
+                current["encryption"] = self.merge_encryption(
+                    current["encryption"], "WPA2/RSN"
+                )
             elif line.startswith("WPA:"):
-                current["encryption"] = self.merge_encryption(current["encryption"], "WPA")
+                current["encryption"] = self.merge_encryption(
+                    current["encryption"], "WPA"
+                )
             elif line.startswith("* Authentication suites:") and "SAE" in line:
-                current["encryption"] = self.merge_encryption(current["encryption"], "WPA3")
+                current["encryption"] = self.merge_encryption(
+                    current["encryption"], "WPA3"
+                )
             elif line.startswith("capability:") and "Privacy" in line:
-                current["encryption"] = self.merge_encryption(current["encryption"], "WEP/unknown")
+                current["encryption"] = self.merge_encryption(
+                    current["encryption"], "WEP/unknown"
+                )
         if current:
             networks.append(current)
         return networks
@@ -200,7 +299,9 @@ class WiFiCollector(BaseCollector):
         current = None
         for raw_line in output.splitlines():
             line = raw_line.strip()
-            match = re.match(r"Cell\s+\d+\s+-\s+Address:\s+([0-9a-fA-F:]+)", line)
+            match = re.match(
+                r"Cell\s+\d+\s+-\s+Address:\s+([0-9a-fA-F:]+)", line
+            )
             if match:
                 # Each Cell block corresponds to one visible access point.
                 if current:
@@ -212,9 +313,12 @@ class WiFiCollector(BaseCollector):
                     "encryption": "open",
                     "rssi": None,
                     "timestamp": local_now(),
+                    "scan_tool": "iwlist",
                 }
                 current["vendor_oui"] = self.vendor_for(current["bssid"])
-                current["vendor_prefix"] = self.vendor_prefix_for(current["bssid"])
+                current["vendor_prefix"] = self.vendor_prefix_for(
+                    current["bssid"]
+                )
                 current["vendor_name"] = self.vendor_name_for(current["bssid"])
                 continue
             if not current:
@@ -225,17 +329,29 @@ class WiFiCollector(BaseCollector):
                 channel = re.search(r"Channel\s+(\d+)", line)
                 if channel:
                     current["channel"] = int(channel.group(1))
-                    current["frequency_band"] = self.channel_band(current["channel"])
+                    current["frequency_band"] = self.channel_band(
+                        current["channel"]
+                    )
             elif "Signal level=" in line:
-                current["rssi"] = self.parse_signal_dbm(line.split("Signal level=", 1)[1])
+                current["rssi"] = self.parse_signal_dbm(
+                    line.split("Signal level=", 1)[1]
+                )
             elif line.startswith("Encryption key:"):
-                current["encryption"] = "WEP/unknown" if line.endswith("on") else "open"
+                current["encryption"] = (
+                    "WEP/unknown" if line.endswith("on") else "open"
+                )
             elif line.startswith("IE: IEEE 802.11i/WPA2"):
-                current["encryption"] = self.merge_encryption(current["encryption"], "WPA2")
+                current["encryption"] = self.merge_encryption(
+                    current["encryption"], "WPA2"
+                )
             elif line.startswith("IE: WPA"):
-                current["encryption"] = self.merge_encryption(current["encryption"], "WPA")
+                current["encryption"] = self.merge_encryption(
+                    current["encryption"], "WPA"
+                )
             elif "Authentication Suites" in line and "SAE" in line:
-                current["encryption"] = self.merge_encryption(current["encryption"], "WPA3")
+                current["encryption"] = self.merge_encryption(
+                    current["encryption"], "WPA3"
+                )
         if current:
             networks.append(current)
         return networks
@@ -353,6 +469,8 @@ class WiFiCollector(BaseCollector):
         if isinstance(info, str):
             info = info.encode("latin1", errors="ignore")
         try:
+            # RSN element format: version, group cipher, pairwise cipher list,
+            # then AKM suite list. We only need the AKM type byte.
             offset = 2
             offset += 4
             pairwise_count = info[offset] + (info[offset + 1] << 8)
@@ -363,7 +481,7 @@ class WiFiCollector(BaseCollector):
             return []
         akms = []
         for _index in range(akm_count):
-            suite = info[offset:offset + 4]
+            suite = info[offset : offset + 4]
             if len(suite) < 4:
                 break
             if suite[:3] == b"\x00\x0f\xac":
