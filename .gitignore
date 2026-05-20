@@ -16,6 +16,8 @@ logs/
 *.log
 
 # Local machine configuration
+skannr.yaml
+spectra.yaml
 
 # Packaged archives
 *.tar

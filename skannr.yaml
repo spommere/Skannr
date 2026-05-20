@@ -1,7 +1,7 @@
 skannr:
   # Use 127.0.0.1 for local-only, 0.0.0.0 for all IPv4 interfaces, or ::
   # for IPv6. A specific Yggdrasil IPv6 address can be used here as well.
-  host: 127.0.0.1
+  host: 201:9e6:567a:4539:8d0c:ceb8:3614:a14a
   port: 5000
   log_level: INFO
 # Collector-specific settings live in collectors/<collector>.yaml.

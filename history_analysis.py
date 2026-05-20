@@ -438,8 +438,8 @@ class HistoryAnalyzer:
         to the same vendor name, different OUI prefixes alone should not turn a
         normal multi-AP network into an evil-twin warning.
         """
-        oui_values = self.vendor_value_set(vendor_ouis)
-        prefix_values = self.vendor_value_set(vendor_prefixes)
+        oui_values = self.vendor_prefix_value_set(vendor_ouis)
+        prefix_values = self.vendor_prefix_value_set(vendor_prefixes)
         name_values = self.vendor_value_set(vendor_names)
         if len(name_values) == 1:
             return False
@@ -455,6 +455,33 @@ class HistoryAnalyzer:
             if text and text not in ("unknown", "locally administered / randomized"):
                 cleaned.add(text)
         return cleaned
+
+    def vendor_prefix_value_set(self, values):
+        """Normalize vendor prefixes while ignoring locally administered MACs.
+
+        Randomized/local BSSIDs intentionally do not carry an IEEE-assigned OUI.
+        Comparing those prefixes as if they were vendors creates false evil-twin
+        warnings for normal neighbor APs or mesh nodes that use local BSSIDs.
+        """
+        cleaned = set()
+        for value in self.list_values(values):
+            text = str(value or "").strip()
+            if not text or text.lower() in ("unknown", "locally administered / randomized"):
+                continue
+            if self.is_locally_administered_prefix(text):
+                continue
+            cleaned.add(text.lower())
+        return cleaned
+
+    def is_locally_administered_prefix(self, value):
+        """Return True when the first MAC octet has the local-admin bit set."""
+        compact = "".join(ch for ch in str(value or "") if ch.lower() in "0123456789abcdef")
+        if len(compact) < 2:
+            return False
+        try:
+            return bool(int(compact[:2], 16) & 0x02)
+        except ValueError:
+            return False
 
     def activity_metadata(self, obs_type, evidence, timestamp):
         """Attach coarse activity state used by the Insights default view."""
