@@ -57,34 +57,49 @@ def collector_definitions(config=None, include_system=True):
     """Return collector metadata from loaded YAML, with a static fallback."""
     loaded = []
     for key, item in ((config or {}).get("collectors") or {}).items():
-        loaded.append({
-            "key": key,
-            "label": item.get("label") or key,
-            "description": item.get("description") or "",
-            "source_group": item.get("source_group") or item.get("key") or key,
-            "source_group_label": item.get("source_group_label") or item.get("label") or key,
-            "has_device_history": bool(item.get("has_device_history", False)),
-            "order": item.get("order", 999),
-        })
+        # YAML metadata is the source of truth when available. The fallback list
+        # exists so tests and partial installs still have sane tab labels/order.
+        loaded.append(
+            {
+                "key": key,
+                "label": item.get("label") or key,
+                "description": item.get("description") or "",
+                "source_group": item.get("source_group")
+                or item.get("key")
+                or key,
+                "source_group_label": item.get("source_group_label")
+                or item.get("label")
+                or key,
+                "has_device_history": bool(
+                    item.get("has_device_history", False)
+                ),
+                "order": item.get("order", 999),
+            }
+        )
     if loaded:
-        definitions = sorted(loaded, key=lambda item: (item.get("order", 999), item["key"]))
+        definitions = sorted(
+            loaded, key=lambda item: (item.get("order", 999), item["key"])
+        )
     else:
         definitions = list(FALLBACK_COLLECTOR_DEFINITIONS)
     if include_system:
-        definitions = definitions + [{
-            "key": "system",
-            "label": "System",
-            "description": "Skannr collector health and dependency checks",
-            "has_device_history": False,
-            "order": 9999,
-        }]
+        definitions = definitions + [
+            {
+                "key": "system",
+                "label": "System",
+                "description": "Skannr collector health and dependency checks",
+                "has_device_history": False,
+                "order": 9999,
+            }
+        ]
     return definitions
 
 
 def collector_keys(config=None, include_system=True):
     """Return collector keys in the dashboard order."""
     return [
-        item["key"] for item in collector_definitions(config, include_system=include_system)
+        item["key"]
+        for item in collector_definitions(config, include_system=include_system)
     ]
 
 
@@ -93,14 +108,18 @@ def browser_subtabs(config=None):
     tabs = [{"value": "all", "label": "All"}]
     seen = set()
     for item in collector_definitions(config, include_system=True):
+        # Multiple collectors can share one browser group. BLE Scan, BLE
+        # Identify, and Bluetooth Classic all appear under "Bluetooth".
         value = item.get("source_group") or item["key"]
         if value in seen:
             continue
         seen.add(value)
-        tabs.append({
-            "value": value,
-            "label": item.get("source_group_label") or item["label"],
-        })
+        tabs.append(
+            {
+                "value": value,
+                "label": item.get("source_group_label") or item["label"],
+            }
+        )
     return tabs
 
 
@@ -109,9 +128,12 @@ def browser_source_groups(config=None):
     groups = {}
     for item in collector_definitions(config, include_system=True):
         value = item.get("source_group") or item["key"]
-        groups.setdefault(value, {
-            "label": item.get("source_group_label") or item["label"],
-            "members": [],
-        })
+        groups.setdefault(
+            value,
+            {
+                "label": item.get("source_group_label") or item["label"],
+                "members": [],
+            },
+        )
         groups[value]["members"].append(item["key"])
     return groups

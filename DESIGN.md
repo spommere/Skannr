@@ -181,8 +181,10 @@ Purpose: lightweight managed-mode access-point scanning.
 
 Implementation:
 
-- Uses `iw dev <iface> scan` when available.
-- Falls back to `iwlist <iface> scan`.
+- Uses one scan source per collector run to avoid mixing parser detail.
+- Prefers `iw dev <iface> scan`.
+- Uses `iwlist <iface> scan` only when `iw` is absent or configured with
+  `scan_tool: iwlist`.
 - Does not put adapters into monitor mode.
 - Does not capture probe requests, deauth frames, or associations.
 
@@ -531,8 +533,9 @@ Current report families include:
 - recurring Bluetooth presence by day/hour
 - long Bluetooth presence
 - strong Bluetooth signal in the report window
-- new Bluetooth device in the report window
-- new Wi-Fi AP in the report window
+- recently new named/static Bluetooth device
+- grouped unnamed BLE randomized/private addresses by manufacturer
+- recently new Wi-Fi AP
 - strong Wi-Fi AP in the report window
 - Wi-Fi AP encryption variation
 - Wi-Fi AP channel variation

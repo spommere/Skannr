@@ -1,3 +1,6 @@
+"""Persistence interface used by the runtime fan-out path."""
+
+
 class BasePersistence:
     """Interface implemented by persistence backends."""
 

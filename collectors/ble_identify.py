@@ -1,3 +1,10 @@
+"""On-demand active BLE identification collector.
+
+BLE Scan stays passive. This collector only connects to a selected device after
+the user clicks Identify, then reads Device Information Service strings when
+the peripheral permits it.
+"""
+
 import asyncio
 
 from collectors.ble import BLECollector, adapter_operation_lock
@@ -5,6 +12,8 @@ from collectors.base import STATE_OFFLINE, STATE_STOPPED
 
 
 DIS_CHARACTERISTICS = {
+    # Serial Number is intentionally omitted. Manufacturer/model/firmware are
+    # usually enough to identify a device without collecting unique serials.
     "manufacturer_name": "00002a29-0000-1000-8000-00805f9b34fb",
     "model_number": "00002a24-0000-1000-8000-00805f9b34fb",
     "firmware_revision": "00002a26-0000-1000-8000-00805f9b34fb",
@@ -38,47 +47,69 @@ class BLEIdentifyCollector(BLECollector):
         """Connect to one BLE device and read Device Information fields."""
         mac = str(mac or "").strip()
         if not mac:
-            await self.emit("identify_failed", {"reason": "No BLE MAC address provided"}, "warning")
+            await self.emit(
+                "identify_failed",
+                {"reason": "No BLE MAC address provided"},
+                "warning",
+            )
             return
         if not self.detect():
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
+            await self.emit(
+                "collector_offline", {"reason": self.warning}, "warning"
+            )
             return
         try:
             from bleak import BleakClient
         except ImportError:
             self.state = STATE_OFFLINE
             self.warning = "Python package 'bleak' is not installed."
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
+            await self.emit(
+                "collector_offline", {"reason": self.warning}, "warning"
+            )
             return
 
         timeout = float(timeout or self.config.get("identify_timeout_sec", 10))
-        await self.emit("identify_started", {
-            "mac": mac,
-            "adapter": self.active_hardware,
-            "timeout_sec": timeout,
-        })
+        await self.emit(
+            "identify_started",
+            {
+                "mac": mac,
+                "adapter": self.active_hardware,
+                "timeout_sec": timeout,
+            },
+        )
         try:
             fields = await self.identify_with_retries(BleakClient, mac, timeout)
         except Exception as exc:
-            await self.emit("identify_failed", {
-                "mac": mac,
-                "reason": self.identify_error_message(exc),
-                "adapter": self.active_hardware,
-            }, "warning")
+            await self.emit(
+                "identify_failed",
+                {
+                    "mac": mac,
+                    "reason": self.identify_error_message(exc),
+                    "adapter": self.active_hardware,
+                },
+                "warning",
+            )
             return
 
         if not any(fields.values()):
-            await self.emit("identify_failed", {
-                "mac": mac,
-                "reason": "Device Information Service fields were not readable",
-                "adapter": self.active_hardware,
-            }, "warning")
+            await self.emit(
+                "identify_failed",
+                {
+                    "mac": mac,
+                    "reason": "Device Information Service fields were not readable",
+                    "adapter": self.active_hardware,
+                },
+                "warning",
+            )
             return
-        await self.emit("identify_result", {
-            "mac": mac,
-            "adapter": self.active_hardware,
-            **fields,
-        })
+        await self.emit(
+            "identify_result",
+            {
+                "mac": mac,
+                "adapter": self.active_hardware,
+                **fields,
+            },
+        )
 
     async def identify_with_retries(self, BleakClient, mac, timeout):
         """Serialize active GATT work and retry transient BlueZ busy errors."""
@@ -89,13 +120,18 @@ class BLEIdentifyCollector(BLECollector):
         for attempt in range(attempts):
             try:
                 async with adapter_operation_lock(self.active_hardware):
+                    # Stop passive discovery before connecting. Many BlueZ
+                    # adapters cannot scan and establish GATT cleanly at once.
                     self.prepare_adapter_for_identify()
                     client = self.bleak_client(BleakClient, mac, timeout)
                     async with client:
                         return await self.read_device_information(client)
             except Exception as exc:
                 last_error = exc
-                if not self.is_operation_in_progress(exc) or attempt == attempts - 1:
+                if (
+                    not self.is_operation_in_progress(exc)
+                    or attempt == attempts - 1
+                ):
                     raise
                 await asyncio.sleep(delay)
         raise last_error
@@ -119,7 +155,9 @@ class BLEIdentifyCollector(BLECollector):
     def bleak_client(self, client_cls, mac, timeout):
         """Create a BleakClient across older/newer bleak signatures."""
         try:
-            return client_cls(mac, timeout=timeout, adapter=self.active_hardware)
+            return client_cls(
+                mac, timeout=timeout, adapter=self.active_hardware
+            )
         except TypeError:
             return client_cls(mac, timeout=timeout)
 
@@ -133,10 +171,16 @@ class BLEIdentifyCollector(BLECollector):
     async def read_string_characteristic(self, client, uuid):
         """Best-effort UTF-8 decode for one optional GATT characteristic."""
         try:
-            value = await asyncio.wait_for(client.read_gatt_char(uuid), timeout=5)
+            value = await asyncio.wait_for(
+                client.read_gatt_char(uuid), timeout=5
+            )
         except Exception:
             return ""
         try:
-            return bytes(value).decode("utf-8", errors="replace").strip("\x00 \t\r\n")
+            return (
+                bytes(value)
+                .decode("utf-8", errors="replace")
+                .strip("\x00 \t\r\n")
+            )
         except Exception:
             return ""

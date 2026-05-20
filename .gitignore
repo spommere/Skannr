@@ -31,3 +31,5 @@ Thumbs.db
 *.swp
 *.swo
 *~
+scripts/release.sh
+skannr.yaml

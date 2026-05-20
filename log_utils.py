@@ -1,3 +1,11 @@
+"""Helpers for JSONL log windows, timestamps, and incremental checkpoints.
+
+This module is intentionally free of collector-specific logic. Device History,
+Findings, Reports, and the Flask routes all use these helpers so they agree on
+retention windows, timestamp parsing, and how much raw JSONL has already been
+folded into materialized summaries.
+"""
+
 import calendar
 import json
 import os
@@ -16,14 +24,22 @@ def utc_epoch(timestamp):
     if not timestamp:
         return None
     text = str(timestamp).strip()
+    # Legacy Spectra/early Skannr logs used UTC ISO strings. Keep them readable
+    # so users do not need to delete old logs after an upgrade.
     for pattern in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S+00:00"):
         try:
-            return float(calendar.timegm(datetime.strptime(text, pattern).timetuple()))
+            return float(
+                calendar.timegm(datetime.strptime(text, pattern).timetuple())
+            )
         except ValueError:
             pass
+    # Current logs are local display timestamps. time.mktime() intentionally
+    # interprets them in the host timezone so browser rows match local time.
     for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S %Z"):
         try:
-            return float(time.mktime(datetime.strptime(text, pattern).timetuple()))
+            return float(
+                time.mktime(datetime.strptime(text, pattern).timetuple())
+            )
         except ValueError:
             pass
     return None
@@ -51,9 +67,17 @@ def resolve_window_days(config, raw="default"):
     None means "all retained logs". When retention is a positive finite number,
     numeric windows do not claim to cover more days than can still exist on disk.
     """
-    retention_config = ((config or {}).get("persistence") or {}).get("filesystem") or {}
-    retention_days = normalize_retention_days(retention_config.get("retention_days", 30))
-    default_days = (config or {}).get("view_window", {}).get("default_days", retention_days or None)
+    retention_config = ((config or {}).get("persistence") or {}).get(
+        "filesystem"
+    ) or {}
+    retention_days = normalize_retention_days(
+        retention_config.get("retention_days", 30)
+    )
+    default_days = (
+        (config or {})
+        .get("view_window", {})
+        .get("default_days", retention_days or None)
+    )
     if raw is None:
         return None
     value = "default" if raw == "" else str(raw).strip().lower()
@@ -74,13 +98,19 @@ def resolve_window_days(config, raw="default"):
 
 def view_window_options(config):
     """Build non-duplicated View selector options for the dashboard."""
-    retention_config = ((config or {}).get("persistence") or {}).get("filesystem") or {}
-    retention_days = normalize_retention_days(retention_config.get("retention_days", 30))
+    retention_config = ((config or {}).get("persistence") or {}).get(
+        "filesystem"
+    ) or {}
+    retention_days = normalize_retention_days(
+        retention_config.get("retention_days", 30)
+    )
     default_days = resolve_window_days(config, "default")
     options = []
     seen = set()
 
     def add(value, label, days_key):
+        # Avoid showing "Default (last 30 days)" and "Last 30 days" as two
+        # separate choices when the configured default is already 30.
         if days_key in seen:
             return
         seen.add(days_key)
@@ -89,7 +119,11 @@ def view_window_options(config):
     if default_days is None:
         add("default", "Default (all retained logs)", "all")
     else:
-        add("default", "Default (last {} days)".format(int(default_days)), default_days)
+        add(
+            "default",
+            "Default (last {} days)".format(int(default_days)),
+            default_days,
+        )
 
     for days in (1, 7, 30):
         if retention_days > 0 and days > retention_days:
@@ -114,9 +148,19 @@ def window_metadata(window_days):
     if window_days is None:
         return {"days": None, "label": "All retained logs", "since": None}
     since_epoch = window_since_epoch(window_days)
-    since = datetime.fromtimestamp(since_epoch).replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
-    label_days = int(window_days) if float(window_days).is_integer() else window_days
-    return {"days": window_days, "label": "Last {} days".format(label_days), "since": since}
+    since = (
+        datetime.fromtimestamp(since_epoch)
+        .replace(microsecond=0)
+        .strftime("%Y-%m-%d %H:%M:%S")
+    )
+    label_days = (
+        int(window_days) if float(window_days).is_integer() else window_days
+    )
+    return {
+        "days": window_days,
+        "label": "Last {} days".format(label_days),
+        "since": since,
+    }
 
 
 def event_in_window(event, window_days):
@@ -145,6 +189,8 @@ def read_jsonl_events(log_dir, collector, window_days=None):
                     try:
                         event = json.loads(line)
                     except ValueError:
+                        # A truncated line should not make the whole collector
+                        # history unreadable after an interrupted write.
                         continue
                     if event_in_window(event, window_days):
                         yield event
@@ -168,7 +214,9 @@ def local_timestamp():
 def has_jsonl_checkpoint(summary):
     """Return True when a materialized summary has JSONL file offsets."""
     checkpoint = (summary or {}).get("checkpoint") or {}
-    return int(checkpoint.get("version") or 0) >= 1 and isinstance(checkpoint.get("collectors"), dict)
+    return int(checkpoint.get("version") or 0) >= 1 and isinstance(
+        checkpoint.get("collectors"), dict
+    )
 
 
 def empty_jsonl_checkpoint():
@@ -209,7 +257,9 @@ def current_jsonl_checkpoint(log_dir, collectors):
 def read_incremental_jsonl_events(log_dir, collector, checkpoint):
     """Yield JSONL events added after the stored byte offsets."""
     directory = os.path.join(log_dir, collector)
-    collector_state = checkpoint.setdefault("collectors", {}).setdefault(collector, {})
+    collector_state = checkpoint.setdefault("collectors", {}).setdefault(
+        collector, {}
+    )
     if not os.path.isdir(directory):
         return
     for filename in sorted(os.listdir(directory)):
@@ -223,6 +273,8 @@ def read_incremental_jsonl_events(log_dir, collector, checkpoint):
             continue
         offset = int(old.get("offset") or 0)
         if offset > size:
+            # Log rotation or manual truncation can make a saved offset point
+            # past EOF. Restart this file from byte 0 in that case.
             offset = 0
         try:
             with open(path, "rb") as fh:
@@ -231,6 +283,8 @@ def read_incremental_jsonl_events(log_dir, collector, checkpoint):
                     try:
                         yield json.loads(raw_line.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
+                        # Keep moving if one raw line is corrupt or partially
+                        # written. The next refresh will continue after EOF.
                         continue
                 offset = fh.tell()
         except OSError:

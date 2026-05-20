@@ -1,3 +1,10 @@
+"""Filesystem JSON Lines persistence backend.
+
+Events are appended under logs/<collector>/<date>.jsonl. Derived summaries live
+under logs/device_history/ and are intentionally separate from the raw audit
+logs.
+"""
+
 import json
 import os
 import time
@@ -18,7 +25,9 @@ class FilesystemPersistence(BasePersistence):
         # launched. The install/run instructions start from /tmp/skannr, so
         # the default becomes /tmp/skannr/logs.
         self.log_dir = config.get("log_dir", "./logs")
-        self.retention_days = normalize_retention_days(config.get("retention_days", 30))
+        self.retention_days = normalize_retention_days(
+            config.get("retention_days", 30)
+        )
         os.makedirs(self.log_dir, exist_ok=True)
         self.rotate()
 
@@ -42,9 +51,14 @@ class FilesystemPersistence(BasePersistence):
         if limit <= 0:
             return []
         events = []
-        roots = [os.path.join(self.log_dir, collector)] if collector else [
-            os.path.join(self.log_dir, name) for name in os.listdir(self.log_dir)
-        ]
+        roots = (
+            [os.path.join(self.log_dir, collector)]
+            if collector
+            else [
+                os.path.join(self.log_dir, name)
+                for name in os.listdir(self.log_dir)
+            ]
+        )
         for root in roots:
             if not os.path.isdir(root):
                 continue
@@ -79,7 +93,13 @@ class FilesystemPersistence(BasePersistence):
         for root, _dirs, files in os.walk(self.log_dir):
             for filename in files:
                 path = os.path.join(root, filename)
-                if filename.endswith(".jsonl") and os.path.getmtime(path) < cutoff:
+                if (
+                    filename.endswith(".jsonl")
+                    and os.path.getmtime(path) < cutoff
+                ):
+                    # Only raw/event JSONL files are retention-managed here.
+                    # Materialized JSON summaries are rebuilt/overwritten by
+                    # their own refresh paths.
                     os.remove(path)
 
     def stats(self):

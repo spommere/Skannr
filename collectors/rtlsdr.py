@@ -1,7 +1,18 @@
+"""RTL-SDR spectrum scan collector.
+
+This collector wraps rtl_power, learns a baseline noise floor, then emits signal
+events when frequency bins rise above that baseline.
+"""
+
 import asyncio
 import logging
 
-from collectors.base import BaseCollector, STATE_OFFLINE, STATE_RUNNING_TIER1, STATE_RUNNING_TIER2
+from collectors.base import (
+    BaseCollector,
+    STATE_OFFLINE,
+    STATE_RUNNING_TIER1,
+    STATE_RUNNING_TIER2,
+)
 
 
 class RTLSDRCollector(BaseCollector):
@@ -27,7 +38,9 @@ class RTLSDRCollector(BaseCollector):
         default_validation = "command -v rtl_power >/dev/null 2>&1 && command -v rtl_test >/dev/null 2>&1 && rtl_test -t"
         ok, detail = self.validate_tier("primary", default_validation)
         if ok:
-            self.active_hardware = "RTL-SDR index {}".format(self.config.get("device_index", 0))
+            self.active_hardware = "RTL-SDR index {}".format(
+                self.config.get("device_index", 0)
+            )
             self.state = STATE_RUNNING_TIER1
             self.warning = None
             return True
@@ -35,18 +48,26 @@ class RTLSDRCollector(BaseCollector):
         if fallback_ok:
             self.active_hardware = "RTL-SDR fallback"
             self.state = STATE_RUNNING_TIER2
-            self.warning = "Using fallback RTL-SDR validation. Primary validation failed: {}".format(detail)
+            self.warning = "Using fallback RTL-SDR validation. Primary validation failed: {}".format(
+                detail
+            )
             return True
         self.active_hardware = None
         self.state = STATE_OFFLINE
-        self.warning = "RTL-SDR validation failed: {}; fallback validation: {}".format(detail, fallback_detail)
+        self.warning = (
+            "RTL-SDR validation failed: {}; fallback validation: {}".format(
+                detail, fallback_detail
+            )
+        )
         return False
 
     async def start(self):
         """Run rtl_power, build a baseline, then publish signal changes."""
         self._running = True
         if not self.detect():
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
+            await self.emit(
+                "collector_offline", {"reason": self.warning}, "warning"
+            )
             return
 
         start_mhz = float(self.config.get("scan_start_mhz", 400))
@@ -60,30 +81,41 @@ class RTLSDRCollector(BaseCollector):
 
         # The browser uses this event to show scan parameters while the baseline
         # is still being collected.
-        await self.emit("scanner_started", {
-            "range": frequency_arg,
-            "gain": gain_arg,
-            "threshold_db": threshold,
-            "baseline_period_sec": baseline_sec,
-        })
+        await self.emit(
+            "scanner_started",
+            {
+                "range": frequency_arg,
+                "gain": gain_arg,
+                "threshold_db": threshold,
+                "baseline_period_sec": baseline_sec,
+            },
+        )
 
         try:
             # rtl_power emits CSV lines to stdout. Using asyncio subprocess
             # keeps the collector non-blocking while other collectors run.
             self._process = await asyncio.create_subprocess_exec(
                 "rtl_power",
-                "-d", str(self.config.get("device_index", 0)),
-                "-f", frequency_arg,
-                "-g", gain_arg,
-                "-i", "1",
+                "-d",
+                str(self.config.get("device_index", 0)),
+                "-f",
+                frequency_arg,
+                "-g",
+                gain_arg,
+                "-i",
+                "1",
                 "-",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            self._stderr_task = asyncio.get_event_loop().create_task(self.drain_stderr())
+            self._stderr_task = asyncio.get_event_loop().create_task(
+                self.drain_stderr()
+            )
         except Exception as exc:
             self.state = STATE_OFFLINE
-            await self.emit("collector_offline", {"reason": str(exc)}, "warning")
+            await self.emit(
+                "collector_offline", {"reason": str(exc)}, "warning"
+            )
             return
 
         loop = asyncio.get_event_loop()
@@ -106,7 +138,9 @@ class RTLSDRCollector(BaseCollector):
                 continue
             if not baseline_ready:
                 baseline_ready = True
-                await self.emit("baseline_ready", {"bins": len(self._noise_floor)})
+                await self.emit(
+                    "baseline_ready", {"bins": len(self._noise_floor)}
+                )
             await self.detect_signals(bins, threshold)
 
         await self.emit("scanner_stopped", {"reason": "process exited"})
@@ -132,7 +166,10 @@ class RTLSDRCollector(BaseCollector):
             line = await self._process.stderr.readline()
             if not line:
                 return
-            logging.debug("rtl_power stderr: %s", line.decode("utf-8", errors="replace").rstrip())
+            logging.debug(
+                "rtl_power stderr: %s",
+                line.decode("utf-8", errors="replace").rstrip(),
+            )
 
     def parse_power_line(self, line):
         """Parse one rtl_power CSV line into (MHz, dBm) bins."""
@@ -157,7 +194,9 @@ class RTLSDRCollector(BaseCollector):
         """Maintain a running average noise floor per frequency bin."""
         for frequency_mhz, power in bins:
             old = self._noise_floor.get(frequency_mhz, power)
-            self._noise_floor[frequency_mhz] = old + ((power - old) / float(sample_count))
+            self._noise_floor[frequency_mhz] = old + (
+                (power - old) / float(sample_count)
+            )
 
     async def detect_signals(self, bins, threshold):
         """Emit signal_detected/signal_lost based on baseline deltas."""
@@ -174,14 +213,22 @@ class RTLSDRCollector(BaseCollector):
                         "first_seen": None,
                         "last_seen": None,
                     }
-                    await self.emit("signal_detected", {
-                        "frequency_mhz": frequency_mhz,
-                        "power_dbm": power,
-                        "above_floor_db": round(above_floor, 2),
-                        "first_seen": None,
-                        "last_seen": None,
-                    }, "warning")
-        lost = [frequency_mhz for frequency_mhz in self._active if frequency_mhz not in seen_now]
+                    await self.emit(
+                        "signal_detected",
+                        {
+                            "frequency_mhz": frequency_mhz,
+                            "power_dbm": power,
+                            "above_floor_db": round(above_floor, 2),
+                            "first_seen": None,
+                            "last_seen": None,
+                        },
+                        "warning",
+                    )
+        lost = [
+            frequency_mhz
+            for frequency_mhz in self._active
+            if frequency_mhz not in seen_now
+        ]
         for frequency_mhz in lost:
             await self.emit("signal_lost", {"frequency_mhz": frequency_mhz})
             del self._active[frequency_mhz]

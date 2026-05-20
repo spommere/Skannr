@@ -1,3 +1,5 @@
+"""No-op persistence backend for test or ephemeral runs."""
+
 from persistence.base import BasePersistence
 
 
