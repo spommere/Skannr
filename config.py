@@ -89,6 +89,7 @@ DEFAULT_CONFIG = {
         "max_rendered_findings": 1000,
         "max_history_ssids": 8,
         "derived_stale_after_min": 15,
+        "derived_auto_refresh_min": 15,
         "insights_recent_after_min": 30,
         "wifi_signal_bands": [
             {"value": "strong", "label": "Strong (>= -60)", "min": -60},

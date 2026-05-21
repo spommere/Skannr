@@ -123,7 +123,8 @@ The global file owns:
 - live Findings thresholds
 - history-analysis thresholds
 - Reports thresholds
-- UI row limits, stale-data threshold, and signal bands
+- UI row limits, stale-data threshold, automatic derived refresh interval, and
+  signal bands
 
 Collector YAML files own:
 
@@ -398,8 +399,14 @@ Skannr has four derived data products:
 - Insights
 - Reports
 
-All four use the same selected dashboard view window. Refreshing any derived
-tab refreshes the whole bundle in dependency order:
+All four use the same selected dashboard view window. The browser automatically
+refreshes the derived bundle while the page is open. The interval is controlled
+by `ui.derived_auto_refresh_min` and defaults to 15 minutes; `0` disables the
+automatic refresh. Status strips show the last refresh time and the next
+automatic refresh countdown.
+
+Manual or automatic refresh of any derived tab refreshes the whole bundle in
+dependency order:
 
 1. Findings History
 2. Device History

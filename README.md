@@ -219,7 +219,8 @@ Important global sections:
 - `findings`: live deterministic finding thresholds
 - `history_analysis`: Insight thresholds
 - `reports`: longitudinal Report thresholds
-- `ui`: table limits, stale-data warning age, Wi-Fi signal filter bands
+- `ui`: table limits, stale-data warning age, automatic derived refresh, Wi-Fi
+  signal filter bands
 
 The Reports section includes Bluetooth privacy-address grouping:
 
@@ -273,8 +274,20 @@ persistence:
 - `999999`: effectively disable cleanup
 
 Insights, Reports, and Device History use the selected dashboard View window.
-Refreshing any of those tabs refreshes the whole derived bundle in dependency
-order:
+Skannr refreshes those derived views automatically while the browser page is
+open. The default interval is 15 minutes:
+
+```yaml
+ui:
+  derived_auto_refresh_min: 15
+```
+
+Set `derived_auto_refresh_min: 0` to disable automatic derived refresh. The
+status line shows the last refresh time and the next automatic refresh countdown.
+The Manual Refresh button is still available when you want an immediate rebuild.
+
+Manual or automatic refresh of any derived tab refreshes the whole derived bundle
+in dependency order:
 
 1. Findings History
 2. Device History

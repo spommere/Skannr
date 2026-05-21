@@ -33,6 +33,10 @@ let latestHistoryAnalysis = null;
 let latestReports = null;
 let activeWindow = "default";
 let findingsHistoryLoaded = false;
+let derivedRefreshInFlight = false;
+let autoDerivedRefreshTimer = null;
+let derivedStatusTicker = null;
+let nextAutoDerivedRefreshAtMs = null;
 const transientCollectorBanners = new Map();
 let uiConfig = {
   max_live_rows: 200,
@@ -41,6 +45,7 @@ let uiConfig = {
   max_rendered_findings: 1000,
   max_history_ssids: 8,
   derived_stale_after_min: 15,
+  derived_auto_refresh_min: 15,
   insights_recent_after_min: 30,
   wifi_signal_bands: [
     {value: "strong", label: "Strong (>= -60)", min: -60},
@@ -49,6 +54,25 @@ let uiConfig = {
     {value: "very_poor", label: "Very Poor (-80 or worse)", max: -80}
   ]
 };
+
+function fetchJson(url, options) {
+  return fetch(url, options).then((response) => {
+    const contentType = response.headers.get("content-type") || "";
+    const isJson = contentType.includes("application/json");
+    if (isJson) {
+      return response.json().then((payload) => {
+        if (!response.ok || payload.ok === false) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+        return payload;
+      });
+    }
+    return response.text().then((text) => {
+      const detail = String(text || "").replace(/\s+/g, " ").slice(0, 240);
+      throw new Error(`HTTP ${response.status}: ${detail || response.statusText}`);
+    });
+  });
+}
 
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => {
@@ -336,8 +360,7 @@ function reportColumns(report) {
 }
 
 function loadDerivedViews() {
-  fetch(`/derived_views${windowQuery()}`)
-    .then((response) => response.json())
+  fetchJson(`/derived_views${windowQuery()}`)
     .then(renderDerivedViews)
     .catch((error) => setDerivedStatus(`Derived views unavailable: ${error}`, "alert"));
 }
@@ -355,11 +378,26 @@ function windowRequestOptions() {
 }
 
 function refreshDerivedViews() {
-  setDerivedStatus("Refreshing derived data", "warning");
-  fetch("/derived_views/refresh", windowRequestOptions())
-    .then((response) => response.json())
+  const label = "Manual refresh";
+  if (derivedRefreshInFlight) {
+    setDerivedStatus(`${label} skipped; refresh already running`, "warning");
+    return Promise.resolve(null);
+  }
+  derivedRefreshInFlight = true;
+  nextAutoDerivedRefreshAtMs = null;
+  setDerivedStatus(`${label} running`, "warning");
+  let failed = false;
+  return fetchJson("/derived_views/refresh", windowRequestOptions())
     .then(renderDerivedViews)
-    .catch((error) => setDerivedStatus(`Derived refresh failed: ${error}`, "alert"));
+    .catch((error) => {
+      failed = true;
+      setDerivedStatus(`Derived refresh failed: ${error}`, "alert");
+    })
+    .finally(() => {
+      derivedRefreshInFlight = false;
+      scheduleAutoDerivedRefresh();
+      if (!failed) updateDerivedStatusLines();
+    });
 }
 
 function renderDerivedViews(bundle) {
@@ -407,6 +445,8 @@ function derivedStatusPrefix(window, generatedAt, generatedAtEpoch) {
   if (generatedAt) parts.push(`refreshed ${generatedAt}`);
   const stale = derivedStaleText(generatedAt, generatedAtEpoch);
   if (stale) parts.push(stale);
+  const auto = autoRefreshText();
+  if (auto) parts.push(auto);
   return parts.join(" | ");
 }
 
@@ -422,6 +462,67 @@ function derivedStaleText(generatedAt, generatedAtEpoch) {
   const ageMin = Math.floor((Date.now() - timestampMs) / 60000);
   if (ageMin < threshold) return "";
   return `stale: refreshed ${ageMin} min ago`;
+}
+
+function autoRefreshText() {
+  if (derivedRefreshInFlight) return "automatic refresh running";
+  if (!nextAutoDerivedRefreshAtMs) return "";
+  const remainingMs = nextAutoDerivedRefreshAtMs - Date.now();
+  if (remainingMs <= 0) return "next automatic refresh now";
+  const remainingMin = Math.max(1, Math.ceil(remainingMs / 60000));
+  return `next automatic refresh in ${remainingMin} min`;
+}
+
+function configureAutoDerivedRefresh() {
+  if (autoDerivedRefreshTimer) {
+    clearTimeout(autoDerivedRefreshTimer);
+    autoDerivedRefreshTimer = null;
+  }
+  nextAutoDerivedRefreshAtMs = null;
+  startDerivedStatusTicker();
+  scheduleAutoDerivedRefresh();
+}
+
+function startDerivedStatusTicker() {
+  if (derivedStatusTicker) clearInterval(derivedStatusTicker);
+  derivedStatusTicker = setInterval(updateDerivedStatusLines, 30000);
+}
+
+function scheduleAutoDerivedRefresh() {
+  if (autoDerivedRefreshTimer) {
+    clearTimeout(autoDerivedRefreshTimer);
+    autoDerivedRefreshTimer = null;
+  }
+  const intervalMin = uiNonNegativeNumber("derived_auto_refresh_min");
+  if (intervalMin <= 0) {
+    nextAutoDerivedRefreshAtMs = null;
+    return;
+  }
+  const intervalMs = intervalMin * 60000;
+  nextAutoDerivedRefreshAtMs = Date.now() + intervalMs;
+  autoDerivedRefreshTimer = setTimeout(refreshDerivedViewsAutomatically, intervalMs);
+}
+
+function refreshDerivedViewsAutomatically() {
+  if (derivedRefreshInFlight) {
+    scheduleAutoDerivedRefresh();
+    return;
+  }
+  derivedRefreshInFlight = true;
+  nextAutoDerivedRefreshAtMs = null;
+  setDerivedStatus("Automatic refresh running", "warning");
+  let failed = false;
+  fetchJson("/derived_views/refresh", windowRequestOptions())
+    .then(renderDerivedViews)
+    .catch((error) => {
+      failed = true;
+      setDerivedStatus(`Automatic refresh failed: ${error}`, "alert");
+    })
+    .finally(() => {
+      derivedRefreshInFlight = false;
+      scheduleAutoDerivedRefresh();
+      if (!failed) updateDerivedStatusLines();
+    });
 }
 
 function parseSkannrTimestampMs(text) {
@@ -695,6 +796,7 @@ function applyDashboardMetadata(metadata) {
   if (metadata.ui) {
     uiConfig = {...uiConfig, ...metadata.ui};
   }
+  configureAutoDerivedRefresh();
   applyWifiSignalBands();
   applyRtlsdrDefaults((metadata.collectors || {}).rtlsdr || {});
 }

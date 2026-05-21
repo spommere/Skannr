@@ -230,6 +230,20 @@ def view_metadata():
     }
 
 
+def derived_response(callback):
+    """Run a derived-data route and keep failures JSON-shaped.
+
+    Browsers always parse these endpoints as JSON. Without this wrapper, a
+    Flask traceback page is returned as HTML and the frontend can only report a
+    misleading JSON parse error instead of the real refresh failure.
+    """
+    try:
+        return callback()
+    except Exception as exc:
+        logging.exception("derived-data request failed")
+        return {"ok": False, "error": str(exc)}, 500
+
+
 @app.route("/device_history", methods=["GET"])
 def device_history():
     """Return the last on-demand device-history summary."""
@@ -242,21 +256,27 @@ def device_history():
 @app.route("/derived_views", methods=["GET"])
 def derived_views():
     """Return a consistent Findings/History/Observations bundle."""
-    return build_derived_views(requested_window_days(), force=False)
+    return derived_response(
+        lambda: build_derived_views(requested_window_days(), force=False)
+    )
 
 
 @app.route("/derived_views/refresh", methods=["POST"])
 def derived_views_refresh():
     """Refresh all derived tabs in dependency order for the current view."""
-    return build_derived_views(requested_window_days(), force=True)
+    return derived_response(
+        lambda: build_derived_views(requested_window_days(), force=True)
+    )
 
 
 @app.route("/device_history/refresh", methods=["POST"])
 def device_history_refresh():
     """Compatibility route: refresh the full derived-data bundle."""
-    return build_derived_views(requested_window_days(), force=True)[
-        "device_history"
-    ]
+    return derived_response(
+        lambda: build_derived_views(requested_window_days(), force=True)[
+            "device_history"
+        ]
+    )
 
 
 @app.route("/findings_history", methods=["GET"])
@@ -271,7 +291,11 @@ def findings_history():
 @app.route("/findings_history/refresh", methods=["POST"])
 def findings_history_refresh():
     """Compatibility route: refresh the full derived-data bundle."""
-    return build_derived_views(requested_window_days(), force=True)["findings"]
+    return derived_response(
+        lambda: build_derived_views(requested_window_days(), force=True)[
+            "findings"
+        ]
+    )
 
 
 @app.route("/history_analysis", methods=["GET"])
@@ -286,9 +310,11 @@ def history_analysis():
 @app.route("/history_analysis/refresh", methods=["POST"])
 def history_analysis_refresh():
     """Compatibility route: refresh the full derived-data bundle."""
-    return build_derived_views(requested_window_days(), force=True)[
-        "history_analysis"
-    ]
+    return derived_response(
+        lambda: build_derived_views(requested_window_days(), force=True)[
+            "history_analysis"
+        ]
+    )
 
 
 @app.route("/reports", methods=["GET"])
@@ -301,7 +327,11 @@ def reports():
 @app.route("/reports/refresh", methods=["POST"])
 def reports_refresh():
     """Compatibility route: refresh the full derived-data bundle."""
-    return build_derived_views(requested_window_days(), force=True)["reports"]
+    return derived_response(
+        lambda: build_derived_views(requested_window_days(), force=True)[
+            "reports"
+        ]
+    )
 
 
 @socketio.on("connect")

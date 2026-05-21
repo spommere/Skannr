@@ -6,7 +6,7 @@ questions such as "what recurring Bluetooth presence happened this week?" or
 """
 
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
 import time
@@ -110,9 +110,18 @@ class ReportsBuilder:
             sessions = context["sessions"]
             days = context["days"]
             hours = context["hours"]
+            start_hours = context["start_hours"]
             longest = context["longest"]
             signal_max = context["signal_max"]
-            evidence = self.ble_evidence(device, sessions, days, hours)
+            spans = context["presence_spans"]
+            evidence = self.ble_evidence(
+                device,
+                sessions,
+                days,
+                hours,
+                start_hours,
+                spans,
+            )
             private_grouped = mac in grouped_private_macs
 
             if sessions and len(days) >= int(
@@ -128,7 +137,7 @@ class ReportsBuilder:
                         "bluetooth",
                         "ble_recurring_presence",
                         "Recurring Bluetooth presence",
-                        "{} was seen on {} day(s), most often {}".format(
+                        "{} was present on {} day(s), most often during {}".format(
                             label, len(days), hour_text
                         ),
                         evidence,
@@ -202,14 +211,11 @@ class ReportsBuilder:
         """Precompute Bluetooth fields used by several report policies."""
         mac = device.get("mac") or "unknown"
         sessions = self.sessions_in_window(self.device_sessions(device))
-        days = sorted(
-            set(
-                self.day_name(session.get("start"))
-                for session in sessions
-                if session.get("start")
-            )
+        days = self.presence_days(sessions)
+        hours = self.session_hour_counts(sessions)
+        start_hours = self.hour_counts(
+            [session.get("start") for session in sessions]
         )
-        hours = self.hour_counts([session.get("start") for session in sessions])
         longest = max(
             [float(session.get("duration_sec") or 0) for session in sessions]
             or [0]
@@ -228,6 +234,8 @@ class ReportsBuilder:
             "sessions": sessions,
             "days": days,
             "hours": hours,
+            "start_hours": start_hours,
+            "presence_spans": self.session_spans(sessions),
             "longest": longest,
             "signal_max": signal_max,
             "manufacturer": manufacturer,
@@ -250,9 +258,13 @@ class ReportsBuilder:
             set(day for member in members for day in member["days"] if day)
         )
         hour_counts = Counter()
+        start_hour_counts = Counter()
+        spans = []
         signal_values = []
         for member in members:
             hour_counts.update(member["hours"])
+            start_hour_counts.update(member["start_hours"])
+            spans.extend(member["presence_spans"])
             value = member["signal_max"]
             if value is not None:
                 signal_values.append(value)
@@ -267,7 +279,10 @@ class ReportsBuilder:
             "active_addresses": len(active),
             "sample_macs": macs[:12],
             "days_seen": all_days,
+            "presence_hours": self.hour_labels(hour_counts),
             "common_hours": self.common_hours(hour_counts),
+            "common_start_hours": self.common_hours(start_hour_counts),
+            "presence_spans": spans[:8],
             "signal_max": int(signal_max) if signal_max is not None else "",
             "last_seen": last_seen,
         }
@@ -512,7 +527,15 @@ class ReportsBuilder:
             "last_seen": last_seen or "",
         }
 
-    def ble_evidence(self, device, sessions, days, hours):
+    def ble_evidence(
+        self,
+        device,
+        sessions,
+        days,
+        hours,
+        start_hours,
+        spans,
+    ):
         """Return compact Bluetooth report evidence."""
         return {
             "mac": device.get("mac") or "",
@@ -526,13 +549,21 @@ class ReportsBuilder:
             "sessions": len(sessions),
             "active_session": bool(device.get("active_session")),
             "days_seen": days,
+            "presence_hours": self.hour_labels(hours),
             "common_hours": self.common_hours(hours),
+            "common_start_hours": self.common_hours(start_hours),
+            "presence_spans": spans,
             "signal_max": device.get("signal_max"),
             "signal_min": device.get("signal_min"),
         }
 
     def wifi_ap_evidence(self, ap):
         """Return compact AP report evidence."""
+        sessions = self.sessions_in_window(self.device_sessions(ap))
+        hours = self.session_hour_counts(sessions)
+        start_hours = self.hour_counts(
+            [session.get("start") for session in sessions]
+        )
         return {
             "ssid": ap.get("ssid") or "",
             "bssid": ap.get("bssid") or "",
@@ -542,6 +573,13 @@ class ReportsBuilder:
             "channels": ap.get("channels") or [],
             "encryption": ap.get("encryption") or [],
             "signal_max": ap.get("signal_max"),
+            "sessions": len(sessions),
+            "active_session": bool(ap.get("active_session")),
+            "days_seen": self.presence_days(sessions),
+            "presence_hours": self.hour_labels(hours),
+            "common_hours": self.common_hours(hours),
+            "common_start_hours": self.common_hours(start_hours),
+            "presence_spans": self.session_spans(sessions),
         }
 
     def wifi_client_evidence(self, client):
@@ -574,6 +612,17 @@ class ReportsBuilder:
             active_copy = dict(active)
             active_copy["active"] = True
             sessions.append(active_copy)
+        if not sessions and (device or {}).get("first_seen"):
+            # Older summaries did not store explicit sessions. Keep reports
+            # useful by exposing one approximate span from first_seen to last_seen.
+            sessions.append(
+                {
+                    "start": device.get("first_seen"),
+                    "end": device.get("last_seen") or device.get("first_seen"),
+                    "duration_sec": None,
+                    "approximate": True,
+                }
+            )
         return sessions
 
     def sessions_in_window(self, sessions):
@@ -618,6 +667,121 @@ class ReportsBuilder:
             if start is not None and end is not None:
                 copied["duration_sec"] = max(0, int(end - start))
         return copied
+
+    def presence_days(self, sessions):
+        """Return weekday labels for every day overlapped by BLE sessions."""
+        days = []
+        seen = set()
+        for session in sessions or []:
+            for day in self.session_days(session):
+                if day not in seen:
+                    seen.add(day)
+                    days.append(day)
+        return days
+
+    def session_days(self, session):
+        """Return local weekday labels touched by one session."""
+        start, end = self.session_bounds(session)
+        if start is None or end is None:
+            return []
+        days = []
+        current = datetime.fromtimestamp(start).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        final = datetime.fromtimestamp(end).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        while current <= final:
+            days.append(current.strftime("%a"))
+            current = current + self.one_day()
+        return days
+
+    def session_hour_counts(self, sessions):
+        """Count each local hour overlapped by BLE presence sessions."""
+        counts = Counter()
+        for session in sessions or []:
+            start, end = self.session_bounds(session)
+            if start is None or end is None:
+                continue
+            current = datetime.fromtimestamp(start).replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            final = datetime.fromtimestamp(end).replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            while current <= final:
+                counts[current.hour] += 1
+                current = current + self.one_hour()
+        return counts
+
+    def session_spans(self, sessions, limit=8):
+        """Return recent local presence spans for report evidence."""
+        spans = []
+        ordered = sorted(
+            sessions or [],
+            key=lambda item: utc_epoch(item.get("end") or item.get("start"))
+            or 0,
+            reverse=True,
+        )
+        for session in ordered[:limit]:
+            span = self.session_span_text(session)
+            if span:
+                spans.append(span)
+        return spans
+
+    def session_span_text(self, session):
+        """Format one BLE session as a compact local date/time span."""
+        start, end = self.session_bounds(session)
+        if start is None or end is None:
+            return ""
+        start_dt = datetime.fromtimestamp(start)
+        end_dt = datetime.fromtimestamp(end)
+        if start_dt.date() == end_dt.date():
+            text = "{} {}-{}".format(
+                start_dt.strftime("%a"),
+                start_dt.strftime("%H:%M"),
+                end_dt.strftime("%H:%M"),
+            )
+        else:
+            text = "{}-{}".format(
+                start_dt.strftime("%a %H:%M"),
+                end_dt.strftime("%a %H:%M"),
+            )
+        if session.get("active"):
+            text += " active"
+        if session.get("approximate"):
+            text += " approximate"
+        return text
+
+    def session_bounds(self, session):
+        """Return epoch start/end for one session, tolerating missing end."""
+        start = utc_epoch((session or {}).get("start"))
+        end = utc_epoch(
+            (session or {}).get("end") or (session or {}).get("start")
+        )
+        if start is None or end is None:
+            return None, None
+        if end < start:
+            end = start
+        return start, end
+
+    def one_day(self):
+        """Return one day as a timedelta for Python 3.6 compatibility."""
+        return timedelta(days=1)
+
+    def one_hour(self):
+        """Return one hour as a timedelta for Python 3.6 compatibility."""
+        return timedelta(hours=1)
 
     def is_new_recent(self, item, timestamp):
         """Return True when first_seen is recent relative to report generation.
@@ -703,10 +867,48 @@ class ReportsBuilder:
         return counts
 
     def common_hours(self, counts):
-        """Return the top local hour labels from a Counter."""
+        """Return compact labels for the most common local hour buckets."""
+        return self.hour_range_labels(
+            [hour for hour, _count in counts.most_common(3)]
+        )
+
+    def hour_labels(self, counts):
+        """Return compact local hour ranges touched by presence sessions."""
+        return self.hour_range_labels(counts.keys())
+
+    def hour_range_labels(self, hours):
+        """Collapse adjacent hour buckets into readable local ranges.
+
+        Presence summaries count activity by hour bucket. Showing every bucket
+        separately is noisy for long sessions, so adjacent buckets such as
+        04:00-05:00, 05:00-06:00, 06:00-07:00 are rendered as 04:00-07:00.
+        """
+        normalized = sorted(
+            {int(hour) % 24 for hour in hours if hour is not None}
+        )
+        if not normalized:
+            return []
+
+        ranges = []
+        start = previous = normalized[0]
+        for hour in normalized[1:]:
+            if hour == previous + 1:
+                previous = hour
+                continue
+            ranges.append((start, previous))
+            start = previous = hour
+        ranges.append((start, previous))
+
+        # If activity crosses midnight, merge the leading 00:00 run with the
+        # trailing 23:00 run into one wraparound range, e.g. 22:00-02:00.
+        if len(ranges) > 1 and ranges[0][0] == 0 and ranges[-1][1] == 23:
+            first = ranges.pop(0)
+            last = ranges.pop()
+            ranges.append((last[0], first[1]))
+
         return [
-            "{:02d}:00-{:02d}:00".format(hour, (hour + 1) % 24)
-            for hour, _count in counts.most_common(3)
+            "{:02d}:00-{:02d}:00".format(start, (end + 1) % 24)
+            for start, end in ranges
         ]
 
     def common_hour_text(self, counts):
