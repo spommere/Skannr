@@ -7,14 +7,15 @@ to the dashboard.
 
 import asyncio
 import subprocess
-from bus import utc_now
+
+from bus import local_now
+from log_utils import now_epoch, timestamp_epoch
 
 
 # Collector states are intentionally stable strings because the browser uses
-# them for badges, button visibility, and primary/fallback wording.
+# them for badges and button visibility.
 STATE_DETECTING = "DETECTING"
-STATE_RUNNING_TIER1 = "RUNNING_TIER1"
-STATE_RUNNING_TIER2 = "RUNNING_TIER2"
+STATE_ONLINE = "ONLINE"
 STATE_RETRYING = "RETRYING"
 STATE_OFFLINE = "OFFLINE"
 STATE_STOPPED = "STOPPED"
@@ -28,6 +29,11 @@ class BaseCollector:
     tab_label = ""
     required_hardware = ""
 
+    @classmethod
+    def hardware_status(cls, config):
+        """Return static hardware/software probes for this collector."""
+        return {}
+
     def __init__(self, config, bus):
         # Each concrete collector receives only its config subsection, plus the
         # shared event bus used to publish observations and state changes.
@@ -37,6 +43,7 @@ class BaseCollector:
         self.active_hardware = None
         self.events_this_session = 0
         self.last_event = None
+        self.last_event_epoch = None
         self.warning = None
         self._running = False
 
@@ -64,19 +71,25 @@ class BaseCollector:
             "hardware": self.active_hardware or self.required_hardware,
             "events_this_session": self.events_this_session,
             "last_event": self.last_event,
+            "last_event_epoch": self.last_event_epoch,
             "warning": self.warning,
         }
 
     async def emit(self, event_type, data=None, severity="info"):
         """Publish one collector event and update local event counters."""
         self.events_this_session += 1
-        self.last_event = utc_now()
+        data = data or {}
+        self.last_event_epoch = timestamp_epoch(data.get("timestamp_epoch"))
+        if self.last_event_epoch is None:
+            self.last_event_epoch = now_epoch()
+        self.last_event = local_now(self.last_event_epoch)
         await self.bus.publish(
             {
                 "collector": self.config_key,
                 "type": event_type,
                 "severity": severity,
-                "data": data or {},
+                "timestamp_epoch": self.last_event_epoch,
+                "data": data,
             }
         )
 
@@ -84,29 +97,22 @@ class BaseCollector:
         """Sleep for the collector-specific retry interval."""
         await asyncio.sleep(float(self.config.get("retry_interval_sec", 5)))
 
-    def validation_command(self, tier, default_command=None):
-        """Return the configured shell validation for a collector tier.
-
-        The command lives in skannr.yaml as primary_validation or
-        fallback_validation. A value of "none" disables that tier.
-        """
-        value = self.config.get("{}_validation".format(tier), default_command)
-        if value is None:
-            return None
-        text = str(value).strip()
+    def validate_configured(self, key, default_command=None):
+        """Run one named validation command from collector config."""
+        command = self.config.get(key, default_command)
+        if command is None:
+            return False, "{} is disabled".format(key)
+        text = str(command).strip()
         if not text or text.lower() == "none":
-            return None
+            return False, "{} is disabled".format(key)
         try:
             text = text.format(**self.config)
         except Exception:
             pass
-        return text
+        return self.run_validation(key, text)
 
-    def validate_tier(self, tier, default_command=None):
-        """Run one configured validation command and return (ok, detail)."""
-        command = self.validation_command(tier, default_command)
-        if not command:
-            return False, "{} validation is disabled".format(tier)
+    def run_validation(self, label, command):
+        """Run a configured shell validation command and return (ok, detail)."""
         timeout = float(self.config.get("validation_timeout_sec", 10))
         try:
             # Validation commands are deliberately shell strings so users can
@@ -121,14 +127,14 @@ class BaseCollector:
                 universal_newlines=True,
             )
         except subprocess.TimeoutExpired:
-            return False, "{} validation timed out after {}s: {}".format(
-                tier, int(timeout), command
+            return False, "{} timed out after {}s: {}".format(
+                label, int(timeout), command
             )
         except Exception as exc:
-            return False, "{} validation could not run: {}".format(tier, exc)
+            return False, "{} could not run: {}".format(label, exc)
         output = " ".join((result.stdout or "").split())[:500]
         if result.returncode == 0:
-            return True, output or "{} validation passed".format(tier)
-        return False, output or "{} validation failed with exit {}".format(
-            tier, result.returncode
+            return True, output or "{} passed".format(label)
+        return False, output or "{} failed with exit {}".format(
+            label, result.returncode
         )

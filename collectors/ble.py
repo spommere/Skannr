@@ -9,17 +9,24 @@ import inspect
 import os
 import re
 import subprocess
-import time
 
 import yaml
 
 from collectors.base import (
     BaseCollector,
     STATE_OFFLINE,
+    STATE_ONLINE,
     STATE_RETRYING,
-    STATE_RUNNING_TIER1,
-    STATE_RUNNING_TIER2,
 )
+from collectors.hardware import (
+    availability_records,
+    bluetooth_adapter_exists,
+    bluetooth_adapters,
+    configured_candidates,
+    package_available,
+    sort_bluetooth_adapters,
+)
+from log_utils import now_epoch
 
 
 _ADAPTER_OPERATION_LOCKS = {}
@@ -62,9 +69,9 @@ def adapter_operation_lock(adapter):
 class BLECollector(BaseCollector):
     """Bluetooth Low Energy scanner based on bleak.
 
-    The preferred adapter is usually an external USB BLE dongle. The fallback
-    adapter is typically the Pi's built-in controller, which may work but often
-    has shorter range or less reliable scanning.
+    If several adapters exist, Skannr uses the ordered ``adapters`` list from
+    the collector YAML. Without an explicit list, it ranks discovered adapters
+    and normally chooses external USB adapters before built-in radios.
     """
 
     config_key = "ble"
@@ -75,6 +82,21 @@ class BLECollector(BaseCollector):
     MAC_NAME_RE = re.compile(
         r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$|^[0-9A-Fa-f]{12}$"
     )
+
+    @classmethod
+    def hardware_status(cls, config):
+        """Return Bluetooth adapter availability and bleak dependency status."""
+        discovered = bluetooth_adapters()
+        configured = configured_candidates(
+            config, "adapters"
+        ) or sort_bluetooth_adapters(discovered, config)
+        return {
+            "adapters": availability_records(
+                configured, discovered, bluetooth_adapter_exists
+            ),
+            "bleak": package_available("bleak"),
+            "auto_start": config.get("auto_start", True),
+        }
 
     def adapter_exists(self, adapter):
         """Probe for an adapter without assuming one Linux tool is present."""
@@ -138,38 +160,19 @@ class BLECollector(BaseCollector):
             return False
 
     def detect(self):
-        """Pick preferred adapter first, then fallback, then mark offline."""
-        preferred = self.config.get("preferred_adapter", "hci1")
-        fallback = self.config.get("fallback_adapter", "hci0")
-        primary_default = "test -d /sys/class/bluetooth/{} || hciconfig {} >/dev/null 2>&1".format(
-            preferred, preferred
-        )
-        fallback_default = "test -d /sys/class/bluetooth/{} || hciconfig {} >/dev/null 2>&1 || bluetoothctl list | grep -q 'Controller '".format(
-            fallback, fallback
-        )
-        primary_ok, primary_detail = self.validate_tier(
-            "primary", primary_default
-        )
-        if primary_ok:
-            self.active_hardware = preferred
-            self.state = STATE_RUNNING_TIER1
-            self.warning = None
-            return True
-        fallback_ok, fallback_detail = self.validate_tier(
-            "fallback", fallback_default
-        )
-        if fallback_ok:
-            self.active_hardware = fallback
-            self.state = STATE_RUNNING_TIER2
-            self.warning = "Using fallback Bluetooth adapter {}; range may be reduced. Primary validation failed: {}".format(
-                fallback, primary_detail
-            )
-            return True
+        """Select the first available Bluetooth adapter candidate."""
+        candidates = configured_candidates(
+            self.config, "adapters"
+        ) or sort_bluetooth_adapters(bluetooth_adapters(), self.config)
+        for adapter in candidates:
+            if self.adapter_exists(adapter):
+                self.active_hardware = adapter
+                self.state = STATE_ONLINE
+                self.warning = None
+                return True
         self.active_hardware = None
         self.state = STATE_OFFLINE
-        self.warning = "No usable Bluetooth adapter. Primary validation: {}; fallback validation: {}".format(
-            primary_detail, fallback_detail
-        )
+        self.warning = "No usable Bluetooth adapter found."
         return False
 
     async def start(self):
@@ -196,14 +199,8 @@ class BLECollector(BaseCollector):
         self.prepare_adapter()
         await self.emit(
             "scanner_started",
-            {"adapter": self.active_hardware, "tier": self.state},
+            {"adapter": self.active_hardware},
         )
-        if self.state == STATE_RUNNING_TIER2:
-            await self.emit(
-                "hardware_fallback",
-                {"adapter": self.active_hardware, "warning": self.warning},
-                "warning",
-            )
         # seen tracks device state between scans so the UI can distinguish new,
         # updated, and lost devices instead of appending duplicate rows forever.
         seen = {}
@@ -518,7 +515,7 @@ class BLECollector(BaseCollector):
         if cache is None:
             cache = {}
             self._bluez_name_cache = cache
-        now = time.time()
+        now = now_epoch()
         cached = cache.get(mac)
         if cached and now - cached["checked_at"] < ttl:
             return cached["name"]
@@ -708,9 +705,7 @@ class BLECollector(BaseCollector):
 
     def prepare_adapter(self):
         """Best-effort adapter wake-up before every scan attempt."""
-        adapter = self.active_hardware or self.config.get(
-            "fallback_adapter", "hci0"
-        )
+        adapter = self.selected_adapter()
         self.command_succeeds(["rfkill", "unblock", "bluetooth"])
         self.command_succeeds(["hciconfig", adapter, "up"])
         self.command_succeeds(["btmgmt", "power", "on"])
@@ -729,9 +724,7 @@ class BLECollector(BaseCollector):
         scanning. If the same error repeats several times, do a lightweight HCI
         reset so the collector can recover without restarting Skannr.
         """
-        adapter = self.active_hardware or self.config.get(
-            "fallback_adapter", "hci0"
-        )
+        adapter = self.selected_adapter()
         self.command_succeeds(["bluetoothctl", "scan", "off"])
         reset_after = int(self.config.get("reset_after_in_progress", 3))
         if reset_after > 0 and count >= reset_after:
@@ -759,9 +752,7 @@ class BLECollector(BaseCollector):
 
     def adapter_diagnostics(self):
         """Collect short adapter diagnostics for retry/offline warnings."""
-        adapter = self.active_hardware or self.config.get(
-            "fallback_adapter", "hci0"
-        )
+        adapter = self.selected_adapter()
         details = [
             "adapter={}".format(adapter),
             "hciconfig={}".format(
@@ -775,3 +766,12 @@ class BLECollector(BaseCollector):
             ),
         ]
         return "; ".join(details)
+
+    def selected_adapter(self):
+        """Return the adapter currently in use, or a safe local default."""
+        candidates = (
+            configured_candidates(self.config, "adapters")
+            or sort_bluetooth_adapters(bluetooth_adapters(), self.config)
+            or ["hci0"]
+        )
+        return self.active_hardware or candidates[0]

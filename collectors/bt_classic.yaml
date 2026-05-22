@@ -7,11 +7,10 @@ source_group_label: Bluetooth
 has_device_history: true
 enabled: true
 auto_start: false
-primary_validation: test -d /sys/class/bluetooth/{preferred_adapter} || hciconfig {preferred_adapter} >/dev/null 2>&1
-fallback_validation: test -d /sys/class/bluetooth/{fallback_adapter} || hciconfig {fallback_adapter} >/dev/null 2>&1 || bluetoothctl list | grep -q 'Controller '
 validation_timeout_sec: 10
-preferred_adapter: hci1
-fallback_adapter: hci0
+# Optional ordered list. When empty, Skannr ranks available BlueZ adapters and
+# tends to choose external USB adapters before built-in radios.
+adapters: []
 scan_interval_sec: 30
 scan_timeout_sec: 20
 device_timeout_sec: 180

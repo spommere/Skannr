@@ -6,11 +6,10 @@ Longer historical interpretation belongs in device_history.py, history_analysis.
 and reports.py.
 """
 
-import time
 from collections import deque
 
-from bus import utc_now
-from log_utils import utc_epoch
+from bus import local_now
+from log_utils import event_time_epoch, now_epoch, timestamp_epoch
 
 
 DEFAULT_FINDINGS_CONFIG = {
@@ -60,7 +59,7 @@ class FindingsEngine:
             return None
         replayed = 0
         for event in sorted(
-            events or [], key=lambda item: self._to_epoch(item.get("timestamp"))
+            events or [], key=lambda item: event_time_epoch(item) or 0
         ):
             if event.get("collector") == "findings":
                 continue
@@ -68,8 +67,9 @@ class FindingsEngine:
             replayed += 1
         if not replayed:
             return None
+        timestamp_epoch_value = now_epoch()
         summary = self._finding(
-            utc_now(),
+            local_now(timestamp_epoch_value),
             "info",
             "system",
             "findings_history_loaded",
@@ -77,6 +77,7 @@ class FindingsEngine:
             "Rebuilt findings state from {} persisted events".format(replayed),
             "findings-history-loaded",
             force=True,
+            timestamp_epoch_value=timestamp_epoch_value,
         )
         self.recent.appendleft(summary)
         return summary
@@ -146,8 +147,8 @@ class FindingsEngine:
         if not self.enabled:
             return []
 
-        timestamp = event.get("timestamp") or utc_now()
-        now = self._to_epoch(timestamp)
+        now = event_time_epoch(event) or now_epoch()
+        timestamp = event.get("timestamp") or local_now(now)
         findings = []
         if emit:
             # Presence expiration is checked opportunistically when new events
@@ -1126,9 +1127,14 @@ class FindingsEngine:
         key,
         force=False,
         attributes=None,
+        timestamp_epoch_value=None,
     ):
         """Create one finding unless the cooldown suppresses a duplicate."""
-        now = self._to_epoch(timestamp)
+        now = (
+            int(float(timestamp_epoch_value))
+            if timestamp_epoch_value is not None
+            else self._to_epoch(timestamp)
+        )
         last = self._last_emitted.get(key)
         cooldown = float(self.config.get("cooldown_sec", 120))
         if (
@@ -1143,6 +1149,7 @@ class FindingsEngine:
         return {
             "id": "{}-{}".format(timestamp, self._counter),
             "timestamp": timestamp,
+            "timestamp_epoch": now,
             "severity": severity,
             "source": source,
             "type": finding_type,
@@ -1160,10 +1167,10 @@ class FindingsEngine:
     def _to_epoch(self, timestamp):
         if isinstance(timestamp, (int, float)):
             return float(timestamp)
-        parsed = utc_epoch(timestamp)
+        parsed = timestamp_epoch(timestamp)
         if parsed is not None:
             return parsed
-        return time.time()
+        return now_epoch()
 
     def _to_number(self, value):
         if value is None or value == "":

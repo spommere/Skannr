@@ -6,12 +6,12 @@ events when frequency bins rise above that baseline.
 
 import asyncio
 import logging
+import shutil
 
 from collectors.base import (
     BaseCollector,
     STATE_OFFLINE,
-    STATE_RUNNING_TIER1,
-    STATE_RUNNING_TIER2,
+    STATE_ONLINE,
 )
 
 
@@ -22,6 +22,14 @@ class RTLSDRCollector(BaseCollector):
     name = "RTL-SDR"
     tab_label = "RTL-SDR"
     required_hardware = "RTL-SDR USB dongle"
+
+    @classmethod
+    def hardware_status(cls, config):
+        """Return rtl_power/rtl_test executable availability."""
+        return {
+            "rtl_power": bool(shutil.which("rtl_power")),
+            "rtl_test": bool(shutil.which("rtl_test")),
+        }
 
     def __init__(self, config, bus):
         super().__init__(config, bus)
@@ -35,30 +43,21 @@ class RTLSDRCollector(BaseCollector):
 
     def detect(self):
         """Validate that rtl_power exists and an RTL-SDR device is present."""
-        default_validation = "command -v rtl_power >/dev/null 2>&1 && command -v rtl_test >/dev/null 2>&1 && rtl_test -t"
-        ok, detail = self.validate_tier("primary", default_validation)
+        default_validation = (
+            "command -v rtl_power >/dev/null 2>&1 && "
+            "command -v rtl_test >/dev/null 2>&1 && rtl_test -t"
+        )
+        ok, detail = self.validate_configured("validation", default_validation)
         if ok:
             self.active_hardware = "RTL-SDR index {}".format(
                 self.config.get("device_index", 0)
             )
-            self.state = STATE_RUNNING_TIER1
+            self.state = STATE_ONLINE
             self.warning = None
-            return True
-        fallback_ok, fallback_detail = self.validate_tier("fallback", None)
-        if fallback_ok:
-            self.active_hardware = "RTL-SDR fallback"
-            self.state = STATE_RUNNING_TIER2
-            self.warning = "Using fallback RTL-SDR validation. Primary validation failed: {}".format(
-                detail
-            )
             return True
         self.active_hardware = None
         self.state = STATE_OFFLINE
-        self.warning = (
-            "RTL-SDR validation failed: {}; fallback validation: {}".format(
-                detail, fallback_detail
-            )
-        )
+        self.warning = "RTL-SDR validation failed: {}".format(detail)
         return False
 
     async def start(self):

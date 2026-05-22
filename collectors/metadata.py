@@ -30,6 +30,7 @@ FALLBACK_COLLECTOR_DEFINITIONS = [
     },
     {
         "key": "ble_identify",
+        "kind": "action",
         "label": "BLE Identify",
         "description": "On-demand active BLE Device Information Service reader",
         "source_group": "bluetooth",
@@ -57,6 +58,8 @@ def collector_definitions(config=None, include_system=True):
     """Return collector metadata from loaded YAML, with a static fallback."""
     loaded = []
     for key, item in ((config or {}).get("collectors") or {}).items():
+        if item.get("kind") == "action":
+            continue
         # YAML metadata is the source of truth when available. The fallback list
         # exists so tests and partial installs still have sane tab labels/order.
         loaded.append(
@@ -103,6 +106,41 @@ def collector_keys(config=None, include_system=True):
     ]
 
 
+def all_source_definitions(config=None, include_system=True):
+    """Return collector/action source metadata for UI source grouping."""
+    loaded = []
+    for key, item in ((config or {}).get("collectors") or {}).items():
+        loaded.append(
+            {
+                "key": key,
+                "label": item.get("label") or key,
+                "source_group": item.get("source_group")
+                or item.get("key")
+                or key,
+                "source_group_label": item.get("source_group_label")
+                or item.get("label")
+                or key,
+                "order": item.get("order", 999),
+            }
+        )
+    if not loaded:
+        loaded = list(FALLBACK_COLLECTOR_DEFINITIONS)
+    definitions = sorted(
+        loaded, key=lambda item: (item.get("order", 999), item["key"])
+    )
+    if include_system:
+        definitions = definitions + [
+            {
+                "key": "system",
+                "label": "System",
+                "source_group": "system",
+                "source_group_label": "System",
+                "order": 9999,
+            }
+        ]
+    return definitions
+
+
 def browser_subtabs(config=None):
     """Return the super-tab source list used by the browser."""
     tabs = [{"value": "all", "label": "All"}]
@@ -126,7 +164,7 @@ def browser_subtabs(config=None):
 def browser_source_groups(config=None):
     """Return grouped collector sources for browser filtering."""
     groups = {}
-    for item in collector_definitions(config, include_system=True):
+    for item in all_source_definitions(config, include_system=True):
         value = item.get("source_group") or item["key"]
         groups.setdefault(
             value,

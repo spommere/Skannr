@@ -4,8 +4,7 @@ label: RTL-SDR
 description: rtl_power spectrum scanning
 has_device_history: false
 enabled: true
-primary_validation: command -v rtl_power >/dev/null 2>&1 && command -v rtl_test >/dev/null 2>&1 && rtl_test -t
-fallback_validation: none
+validation: command -v rtl_power >/dev/null 2>&1 && command -v rtl_test >/dev/null 2>&1 && rtl_test -t
 validation_timeout_sec: 10
 device_index: 0
 scan_start_mhz: 400

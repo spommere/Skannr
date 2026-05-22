@@ -19,9 +19,12 @@ COLLECTOR_CLASS_BY_KEY = {
     "wifi": WiFiCollector,
     "wifi_monitor": WiFiMonitorCollector,
     "ble": BLECollector,
-    "ble_identify": BLEIdentifyCollector,
     "bt_classic": BluetoothClassicCollector,
     "rtlsdr": RTLSDRCollector,
+}
+
+ACTION_CLASS_BY_KEY = {
+    "ble_identify": BLEIdentifyCollector,
 }
 
 
@@ -41,3 +44,30 @@ def load_collectors(config, bus):
         if section.get("enabled", True):
             collectors.append(cls(section, bus))
     return collectors
+
+
+def detect_collector_hardware(config):
+    """Return static hardware/software probe results for enabled collectors."""
+    hardware = {}
+    collector_config = config.get("collectors") or {}
+    for key in collector_keys(config, include_system=False):
+        cls = COLLECTOR_CLASS_BY_KEY.get(key)
+        section = collector_config.get(key) or {}
+        if not cls or not section.get("enabled", True):
+            continue
+        hardware[key] = cls.hardware_status(section)
+    return hardware
+
+
+def load_actions(config, bus):
+    """Instantiate enabled on-demand actions that are not dashboard collectors."""
+    actions = {}
+    collector_config = config.get("collectors") or {}
+    for key, cls in ACTION_CLASS_BY_KEY.items():
+        section = dict(collector_config.get(key) or {})
+        section["_global_config"] = config
+        if section.get("enabled", True):
+            # Actions validate hardware when invoked. Running validation during
+            # startup can block the dashboard on optional tools such as BlueZ.
+            actions[key] = cls(section, bus)
+    return actions

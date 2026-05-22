@@ -1,6 +1,6 @@
 # Skannr Design Document
 
-Version: 0.1.0, 2026-05-19
+Version: 0.1.3, 2026-05-22
 
 ## 1. Overview
 
@@ -28,8 +28,8 @@ broker, external web assets, or internet access at runtime.
 ### Goals
 
 - Provide one local dashboard for nearby Wi-Fi, Bluetooth, and RTL-SDR activity.
-- Degrade visibly when preferred hardware is missing, rather than silently
-  falling back.
+- Degrade visibly when configured or required hardware is missing, rather than
+  silently pretending the collector is healthy.
 - Keep collectors independent so Wi-Fi scan, Wi-Fi monitor, Bluetooth, and
   RTL-SDR can fail or stop without taking down the whole dashboard.
 - Persist raw events as simple JSONL files that can be inspected or analyzed
@@ -97,6 +97,7 @@ Collector events use a normalized envelope:
   "collector": "wifi",
   "type": "ap_beacon",
   "severity": "info",
+  "timestamp_epoch": 1779235200,
   "timestamp": "2026-05-19 17:00:00",
   "data": {
     "ssid": "example",
@@ -106,9 +107,11 @@ Collector events use a normalized envelope:
 ```
 
 The collector and type identify the source and semantic event. Data is
-collector-specific but should remain JSON-serializable. Timestamps are local
-display time in `YYYY-MM-DD HH:MM:SS`; older UTC `...Z` timestamps remain
-readable.
+collector-specific but should remain JSON-serializable. Epoch seconds are the
+canonical internal time source for calculations. Local display timestamps in
+`YYYY-MM-DD HH:MM:SS` are derived from epoch values on the Skannr host for the
+UI and logs. Browser code uses epoch values for age/delta math but does not
+parse or reformat Skannr timestamps in the browser machine's timezone.
 
 ## 4. Configuration Model
 
@@ -123,20 +126,20 @@ The global file owns:
 - live Findings thresholds
 - history-analysis thresholds
 - Reports thresholds
-- UI row limits, stale-data threshold, automatic derived refresh interval, and
-  signal bands
+- UI row limits, stale-data threshold, and automatic derived refresh interval
 
 Collector YAML files own:
 
 - collector key, label, order, description, and grouping
 - enabled/auto-start behavior
-- primary/fallback validation commands
-- collector-specific interfaces, adapters, scan intervals, and thresholds
+- collector-owned validation commands
+- collector-specific interface/adapter candidate lists, scan intervals, and
+  thresholds
 
 `config.load_config()` loads defaults from `config.py`, overlays `skannr.yaml`,
 loads collector YAML files, normalizes retention, resolves relative `log_dir`
-against the config directory, and runs hardware/software probes for System
-Status.
+against the config directory, and asks each configured collector for its
+hardware/software probes for System Status.
 
 The first run writes `skannr.yaml` only if it does not exist. Existing YAML is
 not rewritten on startup, so comments and user formatting are preserved.
@@ -150,29 +153,39 @@ All collectors derive from `BaseCollector`. The base class provides:
 - Start/Stop lifecycle hooks
 - event emission
 - retry sleep helper
-- primary/fallback validation command execution
+- shared shell validation execution for collectors that need it
 
 Collector states are:
 
 - `DETECTING`
-- `RUNNING_TIER1`
-- `RUNNING_TIER2`
+- `ONLINE`
 - `RETRYING`
 - `OFFLINE`
 - `STOPPED`
 
-The UI renders `RUNNING_TIER1` as primary and `RUNNING_TIER2` as fallback.
+For hardware-oriented status lines, the browser translates collector-owned
+probes and detected Linux devices into availability wording such as
+`hci0: available`, `hci1: unavailable`, and `active: hci0`. Validation exit
+codes and shell-output details are not shown in the normal dashboard status
+line.
 
-Validation is externalized through YAML:
+Device selection is externalized through YAML:
 
 ```yaml
-primary_validation: test -d /sys/class/net/{preferred_interface}
-fallback_validation: test -d /sys/class/net/{fallback_interface}
+interfaces: []
+adapters: []
 validation_timeout_sec: 10
 ```
 
+Command validation is also YAML-driven for collectors that need a concrete
+probe, for example RTL-SDR:
+
+```yaml
+validation: command -v rtl_power >/dev/null 2>&1 && command -v rtl_test >/dev/null 2>&1 && rtl_test -t
+```
+
 The validation string is formatted with collector config keys, run as a shell
-command, and treated as passing only on exit code 0. `none` disables that tier.
+command, and treated as passing only on exit code 0.
 
 ## 6. Built-In Collectors
 
@@ -248,16 +261,19 @@ Purpose: passive Bluetooth Low Energy advertisement scanning.
 Implementation:
 
 - Uses `bleak` and BlueZ.
-- Prefers `hci1`, falls back to `hci0` by default.
+- Uses the ordered `adapters` list when configured; otherwise ranks available
+  BlueZ adapters and normally chooses external USB adapters before built-in
+  radios.
 - Uses a shared adapter operation lock so BLE Scan and BLE Identify do not
   collide on the same adapter.
 - Tracks seen, updated, and lost devices.
+- The browser renders only recently seen BLE rows as live/identifiable
+  candidates. The cutoff is `ui.bluetooth_live_recent_sec`, default `600`.
 - Can reset/retry after repeated BlueZ `InProgress` errors.
 
 Important events:
 
 - `scanner_started`
-- `hardware_fallback`
 - `device_seen`
 - `device_updated`
 - `device_lost`
@@ -272,6 +288,10 @@ Device History contribution:
 - seen/update/lost counts
 - presence sessions, including active sessions persisted across refreshes
 
+The live Bluetooth table decodes common Bluetooth SIG service UUIDs for display.
+The raw UUID values remain in Device History so vendor-specific services are
+not lost.
+
 ### BLE Identify (`ble_identify`)
 
 Purpose: on-demand active GATT query for selected BLE devices.
@@ -280,18 +300,25 @@ Implementation:
 
 - Uses the same adapter validation model as BLE Scan.
 - Does not auto-start.
-- The browser calls `/ble_identify` with a MAC address.
+- Does not appear as its own System Status row. The UI treats it as an
+  on-demand Bluetooth action and shows adapter availability once through BLE
+  Scan/Bluetooth Classic.
+- The browser calls `/ble_identify` from Identify buttons on recent BLE Scan
+  rows.
 - Attempts to read selected Device Information Service fields.
 
 Fields read:
 
 - Manufacturer Name (`2A29`)
 - Model Number (`2A24`)
+- Serial Number (`2A25`)
 - Firmware Revision (`2A26`)
 - Hardware Revision (`2A27`)
 - Software Revision (`2A28`)
+- PnP ID (`2A50`)
 
-Serial Number (`2A25`) is not read by default.
+Serial Number can be uniquely identifying. It is read only during explicit
+on-demand Identify actions and should be treated as sensitive exported data.
 
 Important events:
 
@@ -303,6 +330,8 @@ Important events:
 Device History contribution:
 
 - Identify results enrich the Bluetooth record for the MAC.
+- Identify activity is displayed as an unfiltered activity log under BLE Scan;
+  Device History and Reports retain the longer-term Bluetooth history.
 
 ### Bluetooth Classic (`bt_classic`)
 
@@ -338,7 +367,6 @@ Purpose: passive spectrum scanning over a configured frequency range.
 Implementation:
 
 - Validates `rtl_power`, `rtl_test`, and connected device presence.
-- Has no fallback by default.
 - Runs `rtl_power` as an asyncio subprocess.
 - Builds a baseline noise floor for `baseline_period_sec`.
 - Emits signal detections when bins exceed the baseline by `threshold_db`.
@@ -354,8 +382,8 @@ Important events:
 
 Device History contribution:
 
-- None yet. RTL-SDR appears in Insights/Reports subtabs for consistency, but
-  no materialized RTL-SDR device-history summary is implemented.
+- None yet. RTL-SDR appears in Insights/Reports source filters for consistency,
+  but no materialized RTL-SDR device-history summary is implemented.
 
 ## 7. Persistence
 
@@ -399,11 +427,40 @@ Skannr has four derived data products:
 - Insights
 - Reports
 
-All four use the same selected dashboard view window. The browser automatically
-refreshes the derived bundle while the page is open. The interval is controlled
-by `ui.derived_auto_refresh_min` and defaults to 15 minutes; `0` disables the
-automatic refresh. Status strips show the last refresh time and the next
-automatic refresh countdown.
+The three dashboard-facing derived views have distinct responsibilities:
+
+- Insights: recent event log, tactical/debuggable.
+- Reports: ranked intelligence summary, strategic/operator-facing.
+- Device History: state database view.
+
+All four products use the same selected dashboard view window as their maximum
+raw-log scope. Insights then apply an additional recent-event lookback,
+`history_analysis.insights_recent_hours`, because the tab is meant to answer
+"what changed recently?" rather than reproduce the full longitudinal report.
+Set the value to `0` to disable the additional Insights cutoff.
+
+The browser automatically refreshes the derived bundle while the page is open.
+The interval is controlled by `ui.derived_auto_refresh_min` and defaults to 15
+minutes; `0` disables the automatic refresh. Status strips show the last
+refresh time and the next automatic refresh countdown. If the browser notices
+that the derived bundle is already stale, it starts an immediate catch-up
+refresh instead of waiting for the next scheduled interval. Refresh failures
+remain visible until a later refresh succeeds. Browser wake/focus events reload
+the derived views from the backend so a sleeping client can catch up to Pis
+that continued collecting.
+When live Wi-Fi/Bluetooth rows arrive, or collector status shows scan events
+have already happened while Device History is still empty, the browser treats
+that as evidence that raw scan data exists and starts a throttled catch-up
+refresh. This covers the fresh-log case where the first page load sees empty
+cached derived summaries before scans have been materialized.
+Successful derived refreshes also rehydrate the live Wi-Fi Scan and BLE Scan
+tables from Device History so missed browser events do not leave the scan tabs
+showing stale rows when newer materialized data exists. The BLE Scan table is
+also periodically repainted so its recent-device filter can age rows out even
+when no new BLE event arrives after a sleeping browser wakes. Device History
+records carry numeric epoch fields next to display timestamps, and the browser
+uses those epochs for live/recent filtering when available. Display timestamps
+remain the Skannr-host strings from the event or derived summary.
 
 Manual or automatic refresh of any derived tab refreshes the whole bundle in
 dependency order:
@@ -425,7 +482,6 @@ emits normalized finding records for explicit conditions such as:
 - randomized/local Wi-Fi MAC
 - strong nearby Wi-Fi client or AP
 - probe burst
-- Wi-Fi fallback mode
 - BLE device seen/returned/lost
 - strong BLE signal
 - BLE identify success/failure
@@ -441,6 +497,10 @@ updated incrementally from new finding log bytes.
 
 Device History is the materialized per-device state used by the History tab,
 Insights, and Reports.
+
+System events are intentionally excluded from Device History because they are
+runtime state, not per-device history. They remain eligible for Insights and
+Reports when they are actionable.
 
 Current Wi-Fi AP history tracks:
 
@@ -497,12 +557,25 @@ are not the normal runtime query path.
 
 ### Insights
 
-Insights are deterministic analysis over the selected Device History view. They
-are generated by `HistoryAnalyzer` and written to:
+Insights are the recent event feed. They combine live Findings with
+short-horizon Device History observations so an operator can debug recent
+changes and see the lower-level events that may later roll up into Reports.
+They are intentionally event-oriented: one row describes one finding or
+observation, sorted by event/activity time descending. Device-centric
+consolidation and long-term pattern interpretation belong in Reports.
+
+History observations are generated by `HistoryAnalyzer` and written to:
 
 ```text
 logs/device_history/history_analysis.json
 ```
+
+The persisted analysis file can cover the selected View window, but the
+browser-facing Insights payload is filtered by
+`history_analysis.insights_recent_hours`. For Findings, the event timestamp is
+the cutoff field. For history observations, `last_seen_epoch` is preferred over
+the row timestamp because observations are regenerated on refresh; this prevents
+old device behavior from becoming "recent" merely because analysis was rebuilt.
 
 Current rule families include:
 
@@ -523,8 +596,7 @@ Current rule families include:
 - recurring Bluetooth presence
 - locally administered/randomized MAC population
 
-The analysis is ranked by severity, score, and timestamp. It does not call an
-LLM.
+The analysis does not call an LLM.
 
 ### Reports
 
@@ -554,10 +626,96 @@ Current report families include:
 Bluetooth sessions are clipped to the selected report window so a last-24-hours
 report does not count hours before the window boundary.
 
+The Reports UI provides a Type filter over broad report families: security,
+presence, signal, new-device, behavior, identity, collector, and analysis. The
+small summary line above the table is derived from the currently visible rows,
+so it changes with source filtering, type filtering, and search text.
+Report evidence remains structured in JSON, but the browser renders it as
+source-aware operator text. Related details are folded together to keep rows
+readable: session state is part of `Observed`, Wi-Fi security is part of
+`Radio`, and strong-signal findings include their signal value on the
+`Findings` line. Bluetooth reports show pattern, observed, and signal context;
+Wi-Fi AP reports show network, radio/security, and observed context; Wi-Fi
+Monitor client reports show client, probe, and activity context. This keeps the
+table readable without discarding the raw evidence fields. In the table, the
+Evidence cell is rendered as compact stacked label/value lines rather than a
+pipe-delimited log string.
+Bluetooth report generation is device-centric on the server side. Stable BLE
+MACs produce one device-profile row with a Subject, merged findings, summary,
+and behavioral evidence. Unnamed/private BLE address churn remains grouped as a
+manufacturer-level private-address cluster. The UI should render those server
+decisions rather than re-derive intelligence from raw evidence fields.
+Wi-Fi report generation uses the same server-side consolidation. AP-level
+findings such as new AP, strong signal, channel variation, and security
+variation are merged into one access-point profile per BSSID. SSID-level
+behavior, such as multiple BSSIDs or locally administered/randomized BSSID
+groups, is emitted as an SSID profile. The Subject column owns identity; Evidence
+describes radio/security, observation pattern/session state, signal, vendors,
+and BSSID lists as applicable.
+
+#### Report Scoring
+
+Reports use a server-side `score` from 0 to 100. The score is an operator
+attention rank, not a probability of malicious activity. Rows are sorted by
+severity, then score, then last-seen time. A high score means the profile is more
+important to review because several signals line up: long presence, repeated
+presence, current activity, strong nearby signal, new appearance, weak security,
+or unusually broad address/BSSID behavior.
+
+Bluetooth stable-device scoring:
+
+- Longest session: `+25` for at least 1 hour, `+40` for at least 4 hours, `+50`
+  for at least 8 hours.
+- Days seen: `+15` for the configured recurring threshold, `+25` for 3-4 days,
+  `+35` for 5 or more days.
+- Predictable timing: `+10` for recurring start-hour pattern and `+10` for
+  recurring active-hour pattern.
+- Current activity: `+15` when the device is still active.
+- Proximity: `+10` for RSSI at least `-70`, `+20` for at least `-55`, `+30` for
+  at least `-45`.
+- New named/static device: `+30`.
+
+Bluetooth private-address cluster scoring:
+
+- Address count: `+15` for at least 10 addresses, `+25` for at least 50,
+  `+35` for at least 100.
+- Current activity: `+10` if any private address in the cluster is still active.
+- Proximity: `+20` for RSSI at least `-55`, `+30` for at least `-45`.
+- Cluster score is capped at 95 because identity is weaker than a stable named
+  device.
+
+Wi-Fi AP/BSSID scoring:
+
+- New AP: `+25`.
+- Proximity: `+10` for RSSI at least `-70`, `+20` for at least `-55`, `+35` for
+  at least `-40`, `+45` for at least `-25`.
+- Security: `+50` for open/WEP/WPA, `+35` for meaningful encryption variation,
+  `+20` for lower-value security-detail variation.
+- Radio drift: `+15` when one BSSID appears on multiple channels.
+- Current activity: `+10` when still active.
+- Persistence: `+15` for at least 4 hours, `+25` for at least 8 hours.
+
+Wi-Fi SSID scoring:
+
+- BSSID count: `+10` for 2 BSSIDs, `+20` for 3-5, `+30` for 6 or more.
+- Vendor diversity: `+25` when one SSID spans multiple vendors.
+- Locally administered/randomized BSSIDs: `+15`.
+- Security diversity: `+35` for mixed weak/open and secured security, `+20` for
+  other mixed security values.
+- Channel/band spread: `+10` for multiple channels, `+15` for both 2.4 GHz and
+  5 GHz.
+- Strong member: `+15` for any member at least `-55`, `+25` for any member at
+  least `-40`.
+
+Scores at or above 75 become warning-level profile rows unless a more specific
+security rule already set severity. This is intentionally a high-attention
+threshold, not a claim that the device or network is hostile.
+
 ## 9. Browser UI
 
-The UI is a single static page served from `static/index.html` with behavior in
-`static/app.js`.
+The UI is a single static page served from `static/index.html`. Most dashboard
+behavior lives in `static/app.js`; reusable table schemas/rendering live in
+`static/tables.js`.
 
 Top-level tabs:
 
@@ -570,10 +728,15 @@ Top-level tabs:
 - RTL-SDR
 - System Status
 
-Insights, Reports, and Device History have collector subtabs built from
-collector metadata. Bluetooth collectors are grouped under a single Bluetooth
-source group. Wi-Fi Scan and Wi-Fi Monitor remain separate sources because one
-is managed scanning and the other is monitor-mode capture.
+Insights, Reports, and Device History have Source filter chips built from
+collector metadata. They are filters over one dataset, not navigation tabs.
+Bluetooth collectors are grouped under a single Bluetooth source group. Wi-Fi
+Scan and Wi-Fi Monitor remain separate sources because one is managed scanning
+and the other is monitor-mode capture.
+Live Wi-Fi Scan and BLE Scan tables use one row-search box each instead of
+separate per-column selector controls.
+Device History omits System from its Source filter; System is not a device
+source.
 
 The header contains:
 
@@ -583,7 +746,8 @@ The header contains:
 
 The connection badge reflects the browser event stream. The view-window selector
 is populated from `skannr.yaml`, `retention_days`, and optional
-`view_window.default_days`.
+`view_window.default_days`. System Status uses concise availability wording for
+hardware and keeps software checks in a separate column.
 
 The dashboard uses local assets only. No CDN is required.
 
@@ -677,24 +841,27 @@ Adding a collector currently requires:
 1. Add `collectors/<key>.yaml` with key, label, order, validation commands, and
    collector-specific settings.
 2. Add `collectors/<key>.py` implementing a `BaseCollector` subclass.
-3. Add the class to `COLLECTOR_CLASS_BY_KEY` in `collectors/__init__.py`.
-4. If the collector contributes to Device History, extend
+3. Implement `hardware_status()` on the subclass if System Status needs static
+   hardware or software probes.
+4. Add the class to `COLLECTOR_CLASS_BY_KEY` in `collectors/__init__.py`.
+5. If the collector contributes to Device History, extend
    `DeviceHistoryBuilder.COLLECTORS` and add parsing logic.
-5. If the collector should appear in Insights or Reports, add rules in
+6. If the collector should appear in Insights or Reports, add rules in
    `history_analysis.py` or `reports.py`.
-6. If the collector needs custom live UI, add table/rendering logic in
-   `static/index.html` and `static/app.js`.
+7. If the collector needs custom live UI, add markup in `static/index.html`,
+   table schema in `static/tables.js`, and behavior in `static/app.js`.
 
-Collector metadata and subtabs are already driven by YAML, but collector class
-registration and domain-specific UI/history logic are still explicit code
-changes. This is intentional for now: collector capture behavior and history
-semantics differ enough that a fully dynamic plugin UI would add complexity
-before the collector set stabilizes.
+Collector metadata and derived-view source filters are already driven by YAML,
+but collector class registration and domain-specific UI/history logic are still
+explicit code changes. This is intentional for now: collector capture behavior
+and history semantics differ enough that a fully dynamic plugin UI would add
+complexity before the collector set stabilizes.
 
 ## 14. Known Limitations
 
-- Device History currently has rich Wi-Fi and Bluetooth support; RTL-SDR and
-  System have placeholder history subtabs only.
+- Device History currently has rich Wi-Fi and Bluetooth support; RTL-SDR has a
+  placeholder history source only, and System is omitted because it is not a
+  device source.
 - Reports are deterministic summaries, not forensic conclusions.
 - Wi-Fi Monitor only hears frames on the channel currently selected by the
   channel hopper.
@@ -725,6 +892,7 @@ before the collector set stabilizes.
   requirements*.txt
   collectors/
     base.py
+    hardware.py
     metadata.py
     wifi.py
     wifi.yaml
@@ -749,6 +917,7 @@ before the collector set stabilizes.
     none.py
   static/
     index.html
+    tables.js
     app.js
     style.css
   logs/

@@ -6,17 +6,13 @@ or tool while main.py owns persistence, findings generation, and UI fan-out.
 """
 
 import asyncio
-from datetime import datetime
+
+from log_utils import format_epoch, now_epoch, timestamp_epoch
 
 
-def local_now():
-    """Return local timestamps for event payloads and UI display."""
-    return datetime.now().replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def utc_now():
-    """Compatibility wrapper for existing call sites; returns local time now."""
-    return local_now()
+def local_now(epoch=None):
+    """Return Skannr's local display timestamp for an epoch value."""
+    return format_epoch(now_epoch() if epoch is None else epoch)
 
 
 class EventBus:
@@ -33,9 +29,15 @@ class EventBus:
         """Normalize an event and enqueue it for the runtime fan-out task."""
         # Every persisted/UI event should have these fields, even if a collector
         # only supplied the collector/type-specific data.
-        event.setdefault("timestamp", utc_now())
+        data = event.setdefault("data", {})
+        epoch = timestamp_epoch(event.get("timestamp_epoch"))
+        if epoch is None:
+            epoch = timestamp_epoch(data.get("timestamp_epoch"))
+        if epoch is None:
+            epoch = now_epoch()
+        event["timestamp_epoch"] = epoch
+        event.setdefault("timestamp", local_now(epoch))
         event.setdefault("severity", "info")
-        event.setdefault("data", {})
         await self.queue.put(event)
 
     async def next(self):

@@ -37,26 +37,79 @@ let derivedRefreshInFlight = false;
 let autoDerivedRefreshTimer = null;
 let derivedStatusTicker = null;
 let nextAutoDerivedRefreshAtMs = null;
+let lastDerivedRefreshError = "";
+let lastWakeRefreshAtMs = 0;
+let emptyDerivedRefreshRequestedAtMs = 0;
+let emptyDerivedRefreshAttempts = 0;
+let derivedRefreshMode = "";
 const transientCollectorBanners = new Map();
+const BLUETOOTH_SERVICE_NAMES = {
+  "1800": "Generic Access",
+  "1801": "Generic Attribute",
+  "1802": "Immediate Alert",
+  "1803": "Link Loss",
+  "1804": "Tx Power",
+  "1805": "Current Time",
+  "1806": "Reference Time Update",
+  "1807": "Next DST Change",
+  "1808": "Glucose",
+  "1809": "Health Thermometer",
+  "180a": "Device Information",
+  "180d": "Heart Rate",
+  "180e": "Phone Alert Status",
+  "180f": "Battery",
+  "1810": "Blood Pressure",
+  "1811": "Alert Notification",
+  "1812": "Human Interface Device",
+  "1813": "Scan Parameters",
+  "1814": "Running Speed and Cadence",
+  "1815": "Automation IO",
+  "1816": "Cycling Speed and Cadence",
+  "1818": "Cycling Power",
+  "1819": "Location and Navigation",
+  "181a": "Environmental Sensing",
+  "181b": "Body Composition",
+  "181c": "User Data",
+  "181d": "Weight Scale",
+  "181e": "Bond Management",
+  "181f": "Continuous Glucose Monitoring",
+  "1820": "Internet Protocol Support",
+  "1821": "Indoor Positioning",
+  "1822": "Pulse Oximeter",
+  "1823": "HTTP Proxy",
+  "1824": "Transport Discovery",
+  "1825": "Object Transfer",
+  "1826": "Fitness Machine",
+  "1827": "Mesh Provisioning",
+  "1828": "Mesh Proxy",
+  "1829": "Reconnection Configuration",
+  "183a": "Insulin Delivery",
+  "183b": "Binary Sensor",
+  "183c": "Emergency Configuration",
+  "fe59": "Nordic DFU",
+  "fe95": "Xiaomi",
+  "feaa": "Eddystone",
+  "fec7": "Apple Nearby",
+  "fef3": "Google",
+};
 let uiConfig = {
   max_live_rows: 200,
   max_history_rows: 500,
   max_event_log_items: 100,
   max_rendered_findings: 1000,
   max_history_ssids: 8,
+  bluetooth_live_recent_sec: 600,
   derived_stale_after_min: 15,
   derived_auto_refresh_min: 15,
-  insights_recent_after_min: 30,
-  wifi_signal_bands: [
-    {value: "strong", label: "Strong (>= -60)", min: -60},
-    {value: "okay", label: "Okay (-60 to -70)", min: -70, max: -60},
-    {value: "poor", label: "Poor (-70 to -80)", min: -80, max: -70},
-    {value: "very_poor", label: "Very Poor (-80 or worse)", max: -80}
-  ]
+  insights_recent_after_min: 30
 };
 
 function fetchJson(url, options) {
-  return fetch(url, options).then((response) => {
+  const requestOptions = {
+    cache: "no-store",
+    ...(options || {})
+  };
+  return fetch(url, requestOptions).then((response) => {
     const contentType = response.headers.get("content-type") || "";
     const isJson = contentType.includes("application/json");
     if (isJson) {
@@ -89,6 +142,8 @@ if (viewWindowFilter) {
   viewWindowFilter.addEventListener("change", () => {
     activeWindow = viewWindowFilter.value || "default";
     findingsHistoryLoaded = false;
+    emptyDerivedRefreshRequestedAtMs = 0;
+    emptyDerivedRefreshAttempts = 0;
     loadDerivedViews();
   });
 }
@@ -106,35 +161,27 @@ if (insightsSearch) {
 }
 const insightsRefreshButton = document.getElementById("insights-refresh");
 if (insightsRefreshButton) {
-  insightsRefreshButton.addEventListener("click", refreshDerivedViews);
+  insightsRefreshButton.addEventListener("click", () => refreshDerivedViews("manual"));
 }
 const reportsRefreshButton = document.getElementById("reports-refresh");
 if (reportsRefreshButton) {
-  reportsRefreshButton.addEventListener("click", refreshDerivedViews);
+  reportsRefreshButton.addEventListener("click", () => refreshDerivedViews("manual"));
 }
 const reportsSearch = document.getElementById("reports-search");
 if (reportsSearch) {
   reportsSearch.addEventListener("input", () => renderReports(latestReports || {}));
 }
-const wifiSsidFilter = document.getElementById("wifi-ssid-filter");
-if (wifiSsidFilter) {
-  wifiSsidFilter.addEventListener("change", renderWifiTables);
+const reportsTypeFilter = document.getElementById("reports-type-filter");
+if (reportsTypeFilter) {
+  reportsTypeFilter.addEventListener("change", () => renderReports(latestReports || {}));
 }
-const wifiEncryptionFilter = document.getElementById("wifi-encryption-filter");
-if (wifiEncryptionFilter) {
-  wifiEncryptionFilter.addEventListener("change", renderWifiTables);
+const wifiSearch = document.getElementById("wifi-search");
+if (wifiSearch) {
+  wifiSearch.addEventListener("input", renderWifiTables);
 }
-const wifiSignalFilter = document.getElementById("wifi-signal-filter");
-if (wifiSignalFilter) {
-  wifiSignalFilter.addEventListener("change", renderWifiTables);
-}
-const bleMacFilter = document.getElementById("ble-mac-filter");
-if (bleMacFilter) {
-  bleMacFilter.addEventListener("change", renderBleTable);
-}
-const bleIdentifyButton = document.getElementById("ble-identify-button");
-if (bleIdentifyButton) {
-  bleIdentifyButton.addEventListener("click", requestBleIdentify);
+const bleSearch = document.getElementById("ble-search");
+if (bleSearch) {
+  bleSearch.addEventListener("input", renderBleTable);
 }
 const btClassicStartButton = document.getElementById("bt-classic-start");
 if (btClassicStartButton) {
@@ -147,9 +194,12 @@ if (btClassicStopButton) {
 document.querySelectorAll("[data-bluetooth-subtab]").forEach((button) => {
   button.addEventListener("click", () => showBluetoothSubtab(button.dataset.bluetoothSubtab));
 });
+setInterval(() => {
+  renderBleTable();
+}, 30000);
 const historyRefreshButton = document.getElementById("history-refresh");
 if (historyRefreshButton) {
-  historyRefreshButton.addEventListener("click", refreshDerivedViews);
+  historyRefreshButton.addEventListener("click", () => refreshDerivedViews("manual"));
 }
 const historySearch = document.getElementById("history-search");
 if (historySearch) {
@@ -166,8 +216,14 @@ socket.on("skannr_event", handleEvent);
 buildSubtabs();
 loadCollectorMetadata();
 loadViewMetadata();
-renderBleIdentifyDevices();
 setInterval(updateDerivedStatusLines, 60000);
+setInterval(renderLiveTables, 30000);
+["focus", "pageshow", "online"].forEach((eventName) => {
+  window.addEventListener(eventName, refreshAfterBrowserWake);
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshAfterBrowserWake();
+});
 
 function createLocalEventSocket() {
   const handlers = new Map();
@@ -312,17 +368,32 @@ function renderReports(reportBundle) {
   const tbody = document.getElementById("reports-list");
   if (!tbody) return;
   tbody.innerHTML = "";
-  rows.reports.filter(reportMatchesSubtab).filter(reportMatchesSearch).slice(0, uiNumber("max_rendered_findings")).forEach((report) => {
-    const tr = document.createElement("tr");
-    reportColumns(report).forEach((column) => {
-      const td = document.createElement("td");
-      td.className = `report-col-${column.key}`;
-      td.textContent = column.value;
-      tr.appendChild(td);
+  rows.reports
+    .filter(reportMatchesSubtab)
+    .filter(reportMatchesTypeFilter)
+    .filter(reportMatchesSearch)
+    .slice(0, uiNumber("max_rendered_findings"))
+    .forEach((report) => {
+      const tr = document.createElement("tr");
+      reportColumns(report).forEach((column) => {
+        const td = document.createElement("td");
+        td.className = `report-col-${column.key}`;
+        if (column.key === "evidence") {
+          renderReportEvidenceCell(td, reportEvidenceItems(report));
+        } else {
+          td.textContent = column.value;
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
     });
-    tbody.appendChild(tr);
-  });
   updateReportsStatus(latestReports);
+  updateReportsSummary(
+    rows.reports
+      .filter(reportMatchesSubtab)
+      .filter(reportMatchesTypeFilter)
+      .filter(reportMatchesSearch)
+  );
 }
 
 function renderReportsHeader() {
@@ -346,14 +417,16 @@ function reportCells(report) {
 function reportColumns(report) {
   const columns = [
     {key: "generated", label: "Generated", value: report.timestamp || ""},
-    {key: "severity", label: "Severity", value: report.severity || ""}
+    {key: "severity", label: "Severity", value: report.severity || ""},
+    {key: "score", label: "Score", value: report.score || 0}
   ];
   if (showReportsSourceColumn()) columns.push({key: "source", label: "Source", value: sourceLabel(report.source)});
   columns.push(
     {key: "type", label: "Type", value: categoryForType(report.type || "report")},
     {key: "report", label: "Report", value: report.title || ""},
+    {key: "subject", label: "Subject", value: report.subject || ""},
     {key: "summary", label: "Summary", value: report.summary || ""},
-    {key: "evidence", label: "Evidence", value: evidenceText(report.evidence || {}, report.summary || "")},
+    {key: "evidence", label: "Evidence", value: reportEvidenceText(report)},
     {key: "last-seen", label: "Last Seen", value: report.last_seen || ""}
   );
   return columns;
@@ -377,24 +450,32 @@ function windowRequestOptions() {
   };
 }
 
-function refreshDerivedViews() {
-  const label = "Manual refresh";
+function refreshDerivedViews(mode) {
+  const refreshMode = mode || "manual";
+  const label = derivedRefreshLabel(refreshMode);
   if (derivedRefreshInFlight) {
     setDerivedStatus(`${label} skipped; refresh already running`, "warning");
     return Promise.resolve(null);
   }
   derivedRefreshInFlight = true;
+  derivedRefreshMode = refreshMode;
   nextAutoDerivedRefreshAtMs = null;
   setDerivedStatus(`${label} running`, "warning");
   let failed = false;
   return fetchJson("/derived_views/refresh", windowRequestOptions())
-    .then(renderDerivedViews)
+    .then((bundle) => {
+      validateDerivedBundleShape(bundle);
+      lastDerivedRefreshError = "";
+      renderDerivedViews(bundle);
+    })
     .catch((error) => {
       failed = true;
+      lastDerivedRefreshError = `Derived refresh failed: ${error}`;
       setDerivedStatus(`Derived refresh failed: ${error}`, "alert");
     })
     .finally(() => {
       derivedRefreshInFlight = false;
+      derivedRefreshMode = "";
       scheduleAutoDerivedRefresh();
       if (!failed) updateDerivedStatusLines();
     });
@@ -403,9 +484,117 @@ function refreshDerivedViews() {
 function renderDerivedViews(bundle) {
   renderFindingsHistory(bundle.findings || {});
   renderDeviceHistory(bundle.device_history || {});
+  hydrateLiveScanTablesFromHistory(bundle.device_history || {});
   renderHistoryAnalysis(bundle.history_analysis || {});
   renderReports(bundle.reports || {});
   renderCombinedInsights();
+  if (derivedHistoryHasRows()) {
+    emptyDerivedRefreshAttempts = 0;
+  }
+  maybeRefreshEmptyDerivedViews("derived views loaded");
+}
+
+function renderLiveTables() {
+  renderBleTable();
+}
+
+function maybeRefreshEmptyDerivedViews(reason) {
+  if (derivedRefreshInFlight || derivedHistoryHasRows() || !liveScanRowsSeen()) {
+    return;
+  }
+  if (emptyDerivedRefreshAttempts >= 3) return;
+  const now = Date.now();
+  if (now - emptyDerivedRefreshRequestedAtMs < 60000) return;
+  emptyDerivedRefreshRequestedAtMs = now;
+  emptyDerivedRefreshAttempts += 1;
+  setDerivedStatus(`Refreshing derived views after new scan data (${reason})`, "warning");
+  setTimeout(() => refreshDerivedViews("catch-up"), 1000);
+}
+
+function derivedHistoryHasRows() {
+  const history = latestDeviceHistory || {};
+  const wifi = history.wifi || {};
+  const bluetooth = history.bluetooth || history.ble || {};
+  return Boolean(
+    (wifi.access_points || []).length ||
+    (wifi.clients || []).length ||
+    (bluetooth.devices || []).length
+  );
+}
+
+function liveScanRowsSeen() {
+  return Boolean(
+    rows.aps.size ||
+    rows.ble.size ||
+    rows.btClassic.size ||
+    collectorScanEventsSeen()
+  );
+}
+
+function collectorScanEventsSeen() {
+  const scanCollectors = new Set(["wifi", "ble", "bt_classic"]);
+  return (latestCollectorStatuses || []).some((item) => {
+    return scanCollectors.has(item.key) && Number(item.events_this_session || 0) > 0;
+  });
+}
+
+function validateDerivedBundleShape(bundle) {
+  if (!bundle || typeof bundle !== "object") {
+    throw new Error("refresh returned no derived bundle");
+  }
+  if (!bundle.device_history || !bundle.history_analysis || !bundle.reports) {
+    throw new Error("refresh returned incomplete derived data");
+  }
+}
+
+function hydrateLiveScanTablesFromHistory(history) {
+  const wifi = (history || {}).wifi || {};
+  const bluetooth = (history || {}).bluetooth || (history || {}).ble || {};
+  let wifiChanged = false;
+  (wifi.access_points || []).forEach((item) => {
+    if (!item.bssid) return;
+    const current = rows.aps.get(item.bssid) || {};
+    const channel = latestArrayValue(item.channels);
+    rows.aps.set(item.bssid, {
+      ...current,
+      ssid: latestArrayValue(item.ssids) || current.ssid || "",
+      bssid: item.bssid,
+      vendor_name: item.vendor_name,
+      vendor_prefix: item.vendor_prefix,
+      vendor_oui: item.vendor_oui,
+      channel,
+      frequency_band: bandForChannel(channel),
+      encryption: latestArrayValue(item.encryption) || current.encryption || "",
+      rssi: item.signal_latest || item.signal_max || current.rssi,
+      last_seen: item.last_seen || current.last_seen || "",
+      last_seen_epoch: item.last_seen_epoch || current.last_seen_epoch
+    });
+    wifiChanged = true;
+  });
+
+  let bleChanged = false;
+  (bluetooth.devices || []).forEach((item) => {
+    if (!item.mac) return;
+    const current = rows.ble.get(item.mac) || {};
+    rows.ble.set(item.mac, {
+      ...current,
+      ...item,
+      manufacturer:
+        item.manufacturer || item.manufacturer_name || current.manufacturer,
+      rssi: item.signal_latest || item.signal_max || current.rssi,
+      last_seen: item.last_seen || current.last_seen || "",
+      last_seen_epoch: item.last_seen_epoch || current.last_seen_epoch
+    });
+    bleChanged = true;
+  });
+
+  if (wifiChanged) renderWifiTables();
+  if (bleChanged) renderBleTable();
+}
+
+function latestArrayValue(values) {
+  if (!Array.isArray(values) || !values.length) return "";
+  return values[values.length - 1];
 }
 
 function setDerivedStatus(text, state) {
@@ -435,6 +624,18 @@ function setReportsStatus(text, state) {
 }
 
 function updateDerivedStatusLines() {
+  if (lastDerivedRefreshError) {
+    const auto = autoRefreshText();
+    setDerivedStatus(
+      auto ? `${lastDerivedRefreshError} | ${auto}` : lastDerivedRefreshError,
+      "alert"
+    );
+    return;
+  }
+  if (shouldRunStaleDerivedRefresh()) {
+    refreshDerivedViewsAutomatically();
+    return;
+  }
   if (latestFindingsHistory || latestHistoryAnalysis) updateInsightsStatus();
   if (latestReports) updateReportsStatus(latestReports);
   if (latestDeviceHistory) updateDeviceHistoryStatus(latestDeviceHistory);
@@ -456,16 +657,62 @@ function derivedStatusState(generatedAt, generatedAtEpoch, normalState) {
 
 function derivedStaleText(generatedAt, generatedAtEpoch) {
   const threshold = uiNonNegativeNumber("derived_stale_after_min");
-  if (!generatedAt || threshold <= 0) return "";
-  const timestampMs = Number.isFinite(Number(generatedAtEpoch)) ? Number(generatedAtEpoch) * 1000 : parseSkannrTimestampMs(generatedAt);
+  if ((!generatedAt && !generatedAtEpoch) || threshold <= 0) return "";
+  const timestampMs = Number.isFinite(Number(generatedAtEpoch))
+    ? Number(generatedAtEpoch) * 1000
+    : null;
   if (!timestampMs) return "";
   const ageMin = Math.floor((Date.now() - timestampMs) / 60000);
   if (ageMin < threshold) return "";
   return `stale: refreshed ${ageMin} min ago`;
 }
 
+function latestSeenStatusText(records, keys) {
+  const timestampMs = latestRecordTimestampMs(records, keys);
+  if (!timestampMs) return records && records.length ? "latest seen: unknown" : "";
+  return `latest seen ${formatAgeMinutes(timestampMs)} ago`;
+}
+
+function derivedDataStatusState(records, keys, normalState) {
+  if (normalState === "alert") return normalState;
+  const threshold = uiNonNegativeNumber("derived_stale_after_min");
+  if (threshold <= 0) return normalState;
+  const timestampMs = latestRecordTimestampMs(records, keys);
+  if (!timestampMs) return normalState;
+  return Date.now() - timestampMs >= threshold * 60000 ? "warning" : normalState;
+}
+
+function latestRecordTimestampMs(records, keys) {
+  const values = (records || []).map((item) => {
+    for (const key of keys) {
+      const timestampMs = recordTimestampMs(item, key);
+      if (timestampMs) return timestampMs;
+    }
+    return null;
+  }).filter((value) => Number.isFinite(value) && value > 0);
+  return values.length ? Math.max(...values) : null;
+}
+
+function formatAgeMinutes(timestampMs) {
+  const ageMin = Math.max(0, Math.floor((Date.now() - timestampMs) / 60000));
+  if (ageMin < 60) return `${ageMin} min`;
+  const hours = Math.floor(ageMin / 60);
+  const minutes = ageMin % 60;
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+function derivedRefreshLabel(mode) {
+  return {
+    automatic: "Automatic refresh",
+    "catch-up": "Catch-up refresh",
+    manual: "Manual refresh"
+  }[mode] || "Derived refresh";
+}
+
 function autoRefreshText() {
-  if (derivedRefreshInFlight) return "automatic refresh running";
+  if (derivedRefreshInFlight) {
+    return `${derivedRefreshLabel(derivedRefreshMode).toLowerCase()} running`;
+  }
   if (!nextAutoDerivedRefreshAtMs) return "";
   const remainingMs = nextAutoDerivedRefreshAtMs - Date.now();
   if (remainingMs <= 0) return "next automatic refresh now";
@@ -509,29 +756,76 @@ function refreshDerivedViewsAutomatically() {
     return;
   }
   derivedRefreshInFlight = true;
+  derivedRefreshMode = "automatic";
   nextAutoDerivedRefreshAtMs = null;
-  setDerivedStatus("Automatic refresh running", "warning");
+  setDerivedStatus(`${derivedRefreshLabel(derivedRefreshMode)} running`, "warning");
   let failed = false;
   fetchJson("/derived_views/refresh", windowRequestOptions())
-    .then(renderDerivedViews)
+    .then((bundle) => {
+      validateDerivedBundleShape(bundle);
+      lastDerivedRefreshError = "";
+      renderDerivedViews(bundle);
+    })
     .catch((error) => {
       failed = true;
+      lastDerivedRefreshError = `Automatic refresh failed: ${error}`;
       setDerivedStatus(`Automatic refresh failed: ${error}`, "alert");
     })
     .finally(() => {
       derivedRefreshInFlight = false;
+      derivedRefreshMode = "";
       scheduleAutoDerivedRefresh();
       if (!failed) updateDerivedStatusLines();
     });
 }
 
-function parseSkannrTimestampMs(text) {
-  const value = String(text || "").trim();
-  if (!value) return null;
-  const legacyUtc = value.endsWith("Z") ? value : null;
-  const local = value.includes(" ") ? value.replace(" ", "T") : value;
-  const parsed = new Date(legacyUtc || local);
-  return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+function refreshAfterBrowserWake() {
+  const now = Date.now();
+  if (now - lastWakeRefreshAtMs < 10000 || derivedRefreshInFlight) return;
+  lastWakeRefreshAtMs = now;
+  renderLiveTables();
+  loadDerivedViews();
+  updateDerivedStatusLines();
+}
+
+function shouldRunStaleDerivedRefresh() {
+  const intervalMin = uiNonNegativeNumber("derived_auto_refresh_min");
+  const staleMin = uiNonNegativeNumber("derived_stale_after_min");
+  if (intervalMin <= 0 || staleMin <= 0 || derivedRefreshInFlight) return false;
+  const lastRefreshMs = latestDerivedRefreshMs();
+  if (!lastRefreshMs) return false;
+  const ageMs = Date.now() - lastRefreshMs;
+  if (ageMs < staleMin * 60000) return false;
+  if (autoDerivedRefreshTimer) {
+    clearTimeout(autoDerivedRefreshTimer);
+    autoDerivedRefreshTimer = null;
+  }
+  nextAutoDerivedRefreshAtMs = Date.now();
+  return true;
+}
+
+function latestDerivedRefreshMs() {
+  const timestamps = [
+    summaryRefreshMs(latestFindingsHistory),
+    summaryRefreshMs(latestHistoryAnalysis),
+    summaryRefreshMs(latestDeviceHistory),
+    summaryRefreshMs(latestReports)
+  ].filter((value) => Number.isFinite(value) && value > 0);
+  return timestamps.length ? Math.max(...timestamps) : null;
+}
+
+function summaryRefreshMs(summary) {
+  if (!summary) return null;
+  const epoch = Number(summary.refreshed_at_epoch || summary.generated_at_epoch);
+  if (Number.isFinite(epoch) && epoch > 0) return epoch * 1000;
+  return null;
+}
+
+function recordTimestampMs(item, key) {
+  if (!item) return null;
+  const epoch = Number(item[`${key}_epoch`]);
+  if (Number.isFinite(epoch) && epoch > 0) return epoch * 1000;
+  return null;
 }
 
 function uiNonNegativeNumber(key) {
@@ -572,11 +866,26 @@ function updateReportsStatus(bundle) {
   const refreshedAt = source.refreshed_at || source.generated_at;
   const refreshedEpoch = source.refreshed_at_epoch || source.generated_at_epoch;
   const total = rows.reports.length;
-  const visible = rows.reports.filter(reportMatchesSubtab).filter(reportMatchesSearch);
+  const visible = rows.reports
+    .filter(reportMatchesSubtab)
+    .filter(reportMatchesTypeFilter)
+    .filter(reportMatchesSearch);
   const warnings = rows.reports.filter((item) => item.severity === "warning").length;
+  const newestSeen = latestSeenStatusText(visible, ["last_seen", "timestamp"]);
+  const normalState = derivedStatusState(
+    refreshedAt,
+    refreshedEpoch,
+    visible.some((item) => item.severity === "warning" || item.severity === "error" || item.severity === "alert") ? "warning" : "ok"
+  );
   setReportsStatus(
-    `${derivedStatusPrefix(window, refreshedAt, refreshedEpoch)} | ${visible.length} shown | ${total} reports | ${warnings} warnings`,
-    derivedStatusState(refreshedAt, refreshedEpoch, visible.some((item) => item.severity === "warning" || item.severity === "error" || item.severity === "alert") ? "warning" : "ok")
+    [
+      derivedStatusPrefix(window, refreshedAt, refreshedEpoch),
+      newestSeen,
+      `${visible.length} shown`,
+      `${total} reports`,
+      `${warnings} warnings`
+    ].filter(Boolean).join(" | "),
+    derivedDataStatusState(visible, ["last_seen", "timestamp"], normalState)
   );
 }
 
@@ -584,6 +893,12 @@ function reportMatchesSubtab(report) {
   const mode = activeSubtabs.reports || "all";
   if (mode === "all") return true;
   return sourceMatchesSubtab(report.source, mode);
+}
+
+function reportMatchesTypeFilter(report) {
+  const mode = reportsTypeFilter ? reportsTypeFilter.value : "all";
+  if (mode === "all") return true;
+  return reportFilterType(report) === mode;
 }
 
 function reportMatchesSearch(report) {
@@ -594,12 +909,56 @@ function showReportsSourceColumn() {
   return (activeSubtabs.reports || "all") === "all";
 }
 
+function updateReportsSummary(visible) {
+  const summary = document.getElementById("reports-summary");
+  if (!summary) return;
+  const reports = visible || [];
+  if (!reports.length) {
+    summary.textContent = "No reports match the current view";
+    return;
+  }
+  const counts = reports.reduce((acc, report) => {
+    const key = reportFilterType(report);
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const top = Object.entries(counts)
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, 4)
+    .map(([key, count]) => `${reportFilterTypeLabel(key)}: ${count}`);
+  summary.textContent = `Top report types in this view: ${top.join(" | ")}`;
+}
+
+function reportFilterType(report) {
+  const text = String(report.type || "").toLowerCase();
+  if (text.includes("new")) return "new";
+  return categoryForType(text || "report");
+}
+
+function reportFilterTypeLabel(type) {
+  return {
+    security: "Security",
+    presence: "Presence",
+    signal: "Signal",
+    new: "New",
+    behavior: "Behavior",
+    identity: "Identity",
+    collector: "Collector",
+    analysis: "Analysis"
+  }[type] || type;
+}
+
 function sortReports(items) {
   return (items || []).sort((left, right) => {
     const severity = severityRank(right.severity) - severityRank(left.severity);
     if (severity !== 0) return severity;
     const score = Number(right.score || 0) - Number(left.score || 0);
     if (score !== 0) return score;
+    const leftMs = recordTimestampMs(left, "last_seen") || recordTimestampMs(left, "timestamp");
+    const rightMs = recordTimestampMs(right, "last_seen") || recordTimestampMs(right, "timestamp");
+    if (leftMs && rightMs && leftMs !== rightMs) return rightMs - leftMs;
+    if (leftMs && !rightMs) return -1;
+    if (!leftMs && rightMs) return 1;
     return String(right.last_seen || right.timestamp || "").localeCompare(String(left.last_seen || left.timestamp || ""));
   });
 }
@@ -623,15 +982,17 @@ function collectorEntryForSource(source) {
 }
 
 function insightMatchesActivityFilter(insight) {
-  const mode = insightsActivityFilter ? insightsActivityFilter.value : "important";
+  const mode = insightsActivityFilter ? insightsActivityFilter.value : "all";
   if (mode === "all") return true;
   const severity = String(insight.severity || "").toLowerCase();
   const isImportantSeverity = severity === "warning" || severity === "error" || severity === "alert";
+  const state = activityState(insight);
+  const score = Number(insight.score || 0);
   if (mode === "important") {
-    return isImportantSeverity || ["active", "recent", "recurring"].includes(activityState(insight));
+    return isImportantSeverity || state === "recurring" || score >= 70;
   }
   if (mode === "recent") {
-    return isImportantSeverity || ["active", "recent", "recurring"].includes(activityState(insight));
+    return state === "active" || state === "recent";
   }
   return true;
 }
@@ -645,8 +1006,7 @@ function activityState(insight) {
 }
 
 function insightAgeMinutes(insight) {
-  const timestamp = insight.last_seen || insight.timestamp;
-  const timestampMs = parseSkannrTimestampMs(timestamp);
+  const timestampMs = recordTimestampMs(insight, "last_seen") || recordTimestampMs(insight, "timestamp");
   if (!timestampMs) return null;
   return Math.max(0, Math.floor((Date.now() - timestampMs) / 60000));
 }
@@ -678,36 +1038,6 @@ function insightMatchesSeverityFilter(insight) {
   return true;
 }
 
-function updateWifiSsidFilter() {
-  if (!wifiSsidFilter) return;
-  const selected = wifiSsidFilter.value || "all";
-  const ssids = currentWifiSsids();
-  wifiSsidFilter.innerHTML = "";
-  appendSelectOption(wifiSsidFilter, "all", "All");
-  if (ssids.has("")) appendSelectOption(wifiSsidFilter, "__blank__", "(blank)");
-  [...ssids].filter((ssid) => ssid).sort().forEach((ssid) => appendSelectOption(wifiSsidFilter, ssid, ssid));
-  wifiSsidFilter.value = selected === "__blank__" && ssids.has("") ? selected : (ssids.has(selected) ? selected : "all");
-}
-
-function updateWifiEncryptionFilter() {
-  if (!wifiEncryptionFilter) return;
-  const selected = wifiEncryptionFilter.value || "all";
-  const values = new Set();
-  rows.aps.forEach((item) => {
-    if (item.encryption) values.add(item.encryption);
-  });
-  wifiEncryptionFilter.innerHTML = "";
-  appendSelectOption(wifiEncryptionFilter, "all", "All");
-  [...values].sort().forEach((value) => appendSelectOption(wifiEncryptionFilter, value, value));
-  wifiEncryptionFilter.value = values.has(selected) ? selected : "all";
-}
-
-function currentWifiSsids() {
-  const ssids = new Set();
-  rows.aps.forEach((item) => ssids.add(item.ssid || ""));
-  return ssids;
-}
-
 function appendSelectOption(select, value, label) {
   const option = document.createElement("option");
   option.value = value;
@@ -716,17 +1046,22 @@ function appendSelectOption(select, value, label) {
 }
 
 function buildSubtabs() {
-  document.querySelectorAll(".subtabs[data-subtab-group]").forEach((container) => {
+  document.querySelectorAll(".source-filter[data-subtab-group]").forEach((container) => {
     const group = container.dataset.subtabGroup;
-    const selected = activeSubtabs[group] || "all";
+    const entries = subtabEntriesForGroup(group);
+    let selected = activeSubtabs[group] || "all";
+    if (!entries.some((entry) => entry.value === selected)) {
+      selected = "all";
+      activeSubtabs[group] = selected;
+    }
     container.innerHTML = "";
-    COLLECTOR_SUBTABS.forEach((entry) => {
+    entries.forEach((entry) => {
       const button = document.createElement("button");
-      button.className = `subtab ${entry.value === selected ? "active" : ""}`;
+      button.className = `source-filter-button ${entry.value === selected ? "active" : ""}`;
       button.dataset.subtab = entry.value;
       button.textContent = entry.label;
       button.addEventListener("click", () => {
-        container.querySelectorAll(".subtab").forEach((item) => item.classList.remove("active"));
+        container.querySelectorAll(".source-filter-button").forEach((item) => item.classList.remove("active"));
         button.classList.add("active");
         activeSubtabs[group] = button.dataset.subtab;
         updateSubtabPanel(group);
@@ -737,6 +1072,13 @@ function buildSubtabs() {
     });
     updateSubtabPanel(group);
   });
+}
+
+function subtabEntriesForGroup(group) {
+  if (group === "history") {
+    return COLLECTOR_SUBTABS.filter((entry) => entry.value !== "system");
+  }
+  return COLLECTOR_SUBTABS;
 }
 
 function loadCollectorMetadata() {
@@ -797,7 +1139,6 @@ function applyDashboardMetadata(metadata) {
     uiConfig = {...uiConfig, ...metadata.ui};
   }
   configureAutoDerivedRefresh();
-  applyWifiSignalBands();
   applyRtlsdrDefaults((metadata.collectors || {}).rtlsdr || {});
 }
 
@@ -805,18 +1146,6 @@ function applyAppVersion(version) {
   const node = document.getElementById("app-version");
   if (!node) return;
   node.textContent = version ? `v${version}` : "";
-}
-
-function applyWifiSignalBands() {
-  if (!wifiSignalFilter) return;
-  const selected = wifiSignalFilter.value || "all";
-  const bands = Array.isArray(uiConfig.wifi_signal_bands) ? uiConfig.wifi_signal_bands : [];
-  wifiSignalFilter.innerHTML = "";
-  appendSelectOption(wifiSignalFilter, "all", "All");
-  bands.forEach((band) => {
-    if (band && band.value) appendSelectOption(wifiSignalFilter, band.value, band.label || band.value);
-  });
-  wifiSignalFilter.value = bands.some((band) => band && band.value === selected) ? selected : "all";
 }
 
 function applyRtlsdrDefaults(config) {
@@ -842,13 +1171,19 @@ function uiNumber(key) {
 function renderRtlsdrEvent(event) {
   document.getElementById("rtlsdr-status").textContent = event.type;
   if (event.type === "scanner_started") {
-    setCollectorBanner("rtlsdr", "RUNNING", `primary | ${event.data.range} | gain=${event.data.gain}`);
+    setCollectorBanner("rtlsdr", "ONLINE", `${event.data.range} | gain=${event.data.gain}`);
   }
   if (event.type === "baseline_ready") {
     document.getElementById("baseline-state").textContent = `Detection active (${event.data.bins} bins)`;
   }
   if (event.type === "signal_detected") {
-    const item = {...event.data, first_seen: event.timestamp, last_seen: event.timestamp};
+    const item = {
+      ...event.data,
+      first_seen: event.timestamp,
+      first_seen_epoch: event.timestamp_epoch,
+      last_seen: event.timestamp,
+      last_seen_epoch: event.timestamp_epoch
+    };
     rows.signals.set(item.frequency_mhz, item);
     prependList("rtlsdr-events", `${event.timestamp} detected ${item.frequency_mhz} MHz +${item.above_floor_db} dB`);
   }
@@ -856,61 +1191,136 @@ function renderRtlsdrEvent(event) {
     rows.signals.delete(event.data.frequency_mhz);
     prependList("rtlsdr-events", `${event.timestamp} lost ${event.data.frequency_mhz} MHz`);
   }
-  renderTable("rtlsdr-signals", [...rows.signals.values()], (item) => [
-    item.frequency_mhz, item.power_dbm, item.above_floor_db, item.first_seen || "", item.last_seen || ""
-  ]);
+  renderSchemaTable("rtlsdr-signals", [...rows.signals.values()], "rtlsdrSignals");
 }
 
 function renderBleEvent(event) {
   document.getElementById("ble-status").textContent = event.type;
-  if (event.type === "collector_offline" || event.type === "collector_retrying" || event.type === "hardware_fallback") {
-    setCollectorBanner("ble", event.type, event.data.reason || event.data.warning || "");
+  if (event.type === "collector_offline" || event.type === "collector_retrying") {
+    setCollectorBanner("ble", event.type, eventStatusDetail("ble", event.data.adapter, event.data.reason || event.data.warning || ""));
   }
   if (event.type === "scanner_started") {
-    setCollectorBanner("ble", "RUNNING", `${tierLabel(event.data.tier)} | Adapter ${event.data.adapter}`);
+    setCollectorBanner("ble", "ONLINE", eventStatusDetail("ble", event.data.adapter, ""));
   }
   if (!["device_seen", "device_updated"].includes(event.type)) return;
   const data = event.data;
   const key = data.mac;
   const current = rows.ble.get(key) || {};
-  const merged = {...current, ...data, last_seen: event.timestamp};
+  const merged = {
+    ...current,
+    ...data,
+    last_seen: event.timestamp,
+    last_seen_epoch: event.timestamp_epoch
+  };
   rows.ble.set(key, merged);
-  updateBleMacFilter();
   renderBleTable();
-  renderBleIdentifyDevices();
-}
-
-function updateBleMacFilter() {
-  if (!bleMacFilter) return;
-  const selected = bleMacFilter.value || "all";
-  const macs = new Set();
-  rows.ble.forEach((item) => {
-    if (item.mac) macs.add(item.mac);
-  });
-  bleMacFilter.innerHTML = "";
-  appendSelectOption(bleMacFilter, "all", "All");
-  [...macs].sort().forEach((mac) => appendSelectOption(bleMacFilter, mac, mac));
-  bleMacFilter.value = macs.has(selected) ? selected : "all";
+  maybeRefreshEmptyDerivedViews("Bluetooth scan");
 }
 
 function renderBleTable() {
-  renderTable("ble-devices", [...rows.ble.values()].filter(bleDeviceMatchesFilters), (item) => [
-    item.mac, bleDeviceName(item), formatSignal(item.rssi), item.manufacturer || "",
-    (item.service_uuids || []).join(", "), item.last_seen || ""
-  ]);
+  const tbody = document.getElementById("ble-devices");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  const devices = [...rows.ble.values()]
+    .filter(bleDeviceIsRecent)
+    .filter(bleDeviceMatchesSearch)
+    .sort(compareBleIdentifyDevices)
+    .slice(0, uiNumber("max_live_rows"));
+  if (!devices.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 7;
+    td.textContent = "No recently seen BLE devices";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  devices.forEach((item) => {
+    const tr = document.createElement("tr");
+    [
+      item.mac,
+      bleDeviceName(item),
+      formatSignal(item.rssi),
+      item.manufacturer || "",
+      bluetoothServiceList(item.service_uuids),
+      item.last_seen || ""
+    ].forEach((value) => {
+      const td = document.createElement("td");
+      td.textContent = value || "";
+      tr.appendChild(td);
+    });
+    const actionCell = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Identify";
+    button.addEventListener("click", () => identifyBleMac(item.mac || ""));
+    actionCell.appendChild(button);
+    tr.appendChild(actionCell);
+    tbody.appendChild(tr);
+  });
 }
 
-function bleDeviceMatchesFilters(item) {
-  const mode = bleMacFilter ? bleMacFilter.value : "all";
-  if (mode === "all") return true;
-  return item.mac === mode;
+function bleDeviceIsRecent(item) {
+  const maxAgeSec = uiNumber("bluetooth_live_recent_sec");
+  const timestampMs = recordTimestampMs(item, "last_seen");
+  if (!timestampMs) return false;
+  return Date.now() - timestampMs <= maxAgeSec * 1000;
+}
+
+function bleDeviceMatchesSearch(item) {
+  return rowMatchesSearch([
+    item.mac,
+    bleDeviceName(item),
+    item.manufacturer,
+    formatSignal(item.rssi),
+    bluetoothServiceList(item.service_uuids),
+    item.last_seen
+  ], bleSearch);
+}
+
+function bluetoothServiceList(uuids) {
+  return (uuids || []).map(bluetoothServiceLabel).join(", ");
+}
+
+function bluetoothServiceLabel(uuid) {
+  const shortId = bluetoothAssignedNumber(uuid);
+  if (!shortId) return customBluetoothUuidLabel(uuid);
+  const name = BLUETOOTH_SERVICE_NAMES[shortId.toLowerCase()];
+  if (name) return `${name} (${shortId.toUpperCase()})`;
+  return shortId.length === 4 ? `Unknown service (${shortId.toUpperCase()})` : String(uuid || "");
+}
+
+function bluetoothAssignedNumber(uuid) {
+  const text = String(uuid || "").trim().toLowerCase();
+  if (!text) return "";
+  const compact = text.replace(/[^0-9a-f]/g, "");
+  if (/^[0-9a-f]{4}$/.test(compact)) {
+    return compact;
+  }
+  if (/^0000[0-9a-f]{4}$/.test(compact)) {
+    return compact.slice(4);
+  }
+  const compactBase = compact.match(
+    /^0000([0-9a-f]{4})00001000800000805f9b34fb$/
+  );
+  if (compactBase) return compactBase[1];
+  const match = text.match(/^0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb$/);
+  return match ? match[1] : "";
+}
+
+function customBluetoothUuidLabel(uuid) {
+  const text = String(uuid || "").trim();
+  if (!text) return "";
+  const compact = text.replace(/[^0-9a-fA-F]/g, "");
+  if (compact.length > 8) return `Vendor service ${compact.slice(0, 8)}...`;
+  return text;
 }
 
 function renderBtClassicEvent(event) {
   document.getElementById("bt_classic-status").textContent = event.type;
   const data = event.data || {};
   if (event.type === "scanner_started") {
-    setCollectorBanner("bt_classic", "RUNNING", `${tierLabel(data.tier)} | Adapter ${data.adapter}`);
+    setCollectorBanner("bt_classic", "ONLINE", eventStatusDetail("bt_classic", data.adapter, ""));
   }
   if (event.type === "classic_scan_started") {
     setBtClassicScanState(`Scanning on ${data.adapter || "adapter"}...`, "warning");
@@ -920,31 +1330,36 @@ function renderBtClassicEvent(event) {
     const label = count === 1 ? "1 device" : `${count} devices`;
     setBtClassicScanState(`Last scan completed at ${event.timestamp}: ${label} found in ${data.duration_sec || "?"}s`, count ? "ok" : "muted");
   }
-  if (event.type === "hardware_fallback" || event.type === "collector_offline" || event.type === "collector_retrying") {
-    setCollectorBanner("bt_classic", event.type, data.reason || data.warning || "");
+  if (event.type === "collector_offline" || event.type === "collector_retrying") {
+    setCollectorBanner("bt_classic", event.type, eventStatusDetail("bt_classic", data.adapter, data.reason || data.warning || ""));
   }
   if (event.type === "classic_device_seen" || event.type === "classic_device_updated") {
     const key = data.mac;
     const current = rows.btClassic.get(key) || {};
-    rows.btClassic.set(key, {...current, ...data, last_seen: event.timestamp});
+    rows.btClassic.set(key, {
+      ...current,
+      ...data,
+      last_seen: event.timestamp,
+      last_seen_epoch: event.timestamp_epoch
+    });
     renderBtClassicTable();
+    maybeRefreshEmptyDerivedViews("Bluetooth classic scan");
   }
   if (event.type === "classic_device_lost") {
     const current = rows.btClassic.get(data.mac) || data;
-    rows.btClassic.set(data.mac, {...current, last_seen: event.timestamp, state: "lost"});
+    rows.btClassic.set(data.mac, {
+      ...current,
+      last_seen: event.timestamp,
+      last_seen_epoch: event.timestamp_epoch,
+      state: "lost"
+    });
     renderBtClassicTable();
+    maybeRefreshEmptyDerivedViews("Bluetooth classic scan");
   }
 }
 
 function renderBtClassicTable() {
-  renderTable("bt-classic-devices", [...rows.btClassic.values()], (item) => [
-    item.mac || "",
-    bluetoothDisplayName(item.name, item.mac),
-    item.vendor_name || item.vendor_prefix || "",
-    item.class || "",
-    item.clock_offset || "",
-    item.last_seen || ""
-  ]);
+  renderSchemaTable("bt-classic-devices", [...rows.btClassic.values()], "btClassicDevices");
 }
 
 function setBtClassicScanState(text, state) {
@@ -954,29 +1369,20 @@ function setBtClassicScanState(text, state) {
   node.className = `status-strip ${state || "muted"}`;
 }
 
-function requestBleIdentify() {
-  const macInput = document.getElementById("ble-identify-mac");
-  const timeoutInput = document.getElementById("ble-identify-timeout");
-  const mac = macInput ? macInput.value.trim() : "";
-  const timeout = timeoutInput ? Number(timeoutInput.value) : 10;
-  identifyBleMac(mac, timeout);
-}
-
 function identifyBleMac(mac, timeout) {
   if (!mac) {
-    setTransientCollectorBanner("ble_identify", "identify_failed", "Enter a BLE MAC address");
+    setTransientCollectorBanner("ble_identify", "identify_failed", "Missing BLE MAC address");
     return;
   }
   const normalizedTimeout = Number(timeout);
-  const macInput = document.getElementById("ble-identify-mac");
-  const timeoutInput = document.getElementById("ble-identify-timeout");
-  if (macInput) macInput.value = mac;
-  if (timeoutInput && Number.isFinite(normalizedTimeout)) timeoutInput.value = normalizedTimeout;
   setTransientCollectorBanner("ble_identify", "IDENTIFYING", `Identifying ${mac}`, 5000);
   fetch("/ble_identify", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({mac, timeout_sec: Number.isFinite(normalizedTimeout) ? normalizedTimeout : 10})
+    body: JSON.stringify({
+      mac,
+      timeout_sec: Number.isFinite(normalizedTimeout) ? normalizedTimeout : undefined
+    })
   }).then((response) => {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json();
@@ -986,105 +1392,55 @@ function identifyBleMac(mac, timeout) {
 }
 
 function renderBleIdentifyEvent(event) {
-  document.getElementById("ble_identify-status").textContent = event.type;
   const data = event.data || {};
   if (event.type === "identify_started") {
     setTransientCollectorBanner("ble_identify", "IDENTIFYING", `${data.mac} via ${data.adapter || "adapter"}`, 5000);
   } else if (event.type === "identify_result") {
-    setTransientCollectorBanner("ble_identify", "STOPPED", `${data.mac}: ${data.manufacturer_name || data.model_number || "identified"}`);
-    rows.bleIdentify.unshift({...data, event_type: event.type, timestamp: event.timestamp});
+    setTransientCollectorBanner("ble_identify", "IDLE", `${data.mac}: ${data.manufacturer_name || data.model_number || "identified"}`);
+    rows.bleIdentify.unshift({
+      ...data,
+      event_type: event.type,
+      timestamp: event.timestamp,
+      timestamp_epoch: event.timestamp_epoch
+    });
     rows.bleIdentify = rows.bleIdentify.slice(0, uiNumber("max_live_rows"));
-    mergeBleIdentifyResult(data, event.timestamp);
+    mergeBleIdentifyResult(data, event.timestamp, event.timestamp_epoch);
     renderBleIdentifyTable();
-    renderBleIdentifyDevices();
+    renderBleTable();
   } else if (event.type === "identify_failed" || event.type === "collector_offline") {
     setTransientCollectorBanner("ble_identify", event.type, data.reason || "Identify failed");
-    rows.bleIdentify.unshift({...data, event_type: event.type, timestamp: event.timestamp});
+    rows.bleIdentify.unshift({
+      ...data,
+      event_type: event.type,
+      timestamp: event.timestamp,
+      timestamp_epoch: event.timestamp_epoch
+    });
     rows.bleIdentify = rows.bleIdentify.slice(0, uiNumber("max_live_rows"));
     renderBleIdentifyTable();
   }
 }
 
 function renderBleIdentifyTable() {
-  renderTable("ble-identify-results", rows.bleIdentify, (item) => [
-    item.timestamp || "",
-    item.mac || "",
-    item.event_type === "identify_result" ? "identified" : (item.reason || item.event_type || ""),
-    item.manufacturer_name || "",
-    item.model_number || "",
-    item.firmware_revision || "",
-    item.hardware_revision || "",
-    item.software_revision || ""
-  ]);
+  renderSchemaTable("ble-identify-results", rows.bleIdentify, "bleIdentifyResults", {preserveOrder: true});
 }
 
-function mergeBleIdentifyResult(data, timestamp) {
+function mergeBleIdentifyResult(data, timestamp, timestampEpoch) {
   if (!data || !data.mac) return;
   const current = rows.ble.get(data.mac) || {};
   rows.ble.set(data.mac, {
     ...current,
     ...data,
-    last_seen: current.last_seen || timestamp
+    last_seen: current.last_seen || timestamp,
+    last_seen_epoch: current.last_seen_epoch || timestampEpoch
   });
-}
-
-function renderBleIdentifyDevices() {
-  const tbody = document.getElementById("ble-identify-devices");
-  if (!tbody) return;
-  tbody.innerHTML = "";
-  const devices = knownBleIdentifyDevices().slice(0, uiNumber("max_history_rows"));
-  if (!devices.length) {
-    const tr = document.createElement("tr");
-    const td = document.createElement("td");
-    td.colSpan = 7;
-    td.textContent = "No BLE Scan or Device History devices available yet";
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-    return;
-  }
-  devices.forEach((item) => {
-    const tr = document.createElement("tr");
-    [
-      item.mac || "",
-      bleDeviceName(item),
-      item.manufacturer_name || item.manufacturer || "",
-      formatSignal(item.rssi !== undefined ? item.rssi : item.signal_latest),
-      item.last_seen || "",
-      bleIdentitySummary(item)
-    ].forEach((value) => {
-      const td = document.createElement("td");
-      td.textContent = value;
-      tr.appendChild(td);
-    });
-    const actionCell = document.createElement("td");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = "Identify";
-    button.addEventListener("click", () => identifyBleMac(item.mac || "", currentBleIdentifyTimeout()));
-    actionCell.appendChild(button);
-    tr.appendChild(actionCell);
-    tbody.appendChild(tr);
-  });
-}
-
-function knownBleIdentifyDevices() {
-  const merged = new Map();
-  const historyDevices = ((((latestDeviceHistory || {}).bluetooth || (latestDeviceHistory || {}).ble || {}).devices) || []);
-  historyDevices.filter((item) => !item.transports || (item.transports || []).includes("ble")).forEach((item) => mergeKnownBleDevice(merged, item));
-  rows.ble.forEach((item) => mergeKnownBleDevice(merged, item));
-  return [...merged.values()].sort(compareBleIdentifyDevices);
-}
-
-function mergeKnownBleDevice(merged, item) {
-  if (!item || !item.mac) return;
-  const current = merged.get(item.mac) || {};
-  merged.set(item.mac, {...current, ...item});
 }
 
 function compareBleIdentifyDevices(left, right) {
-  const leftSeen = left.last_seen || "";
-  const rightSeen = right.last_seen || "";
-  if (leftSeen !== rightSeen) return rightSeen.localeCompare(leftSeen);
+  const leftMs = recordTimestampMs(left, "last_seen");
+  const rightMs = recordTimestampMs(right, "last_seen");
+  if (leftMs && rightMs && leftMs !== rightMs) return rightMs - leftMs;
+  if (leftMs && !rightMs) return -1;
+  if (!leftMs && rightMs) return 1;
   return (left.mac || "").localeCompare(right.mac || "");
 }
 
@@ -1120,44 +1476,30 @@ function bluetoothNameLooksLikeCommandError(name) {
   return /^command:?\s+/i.test(String(name || "").trim());
 }
 
-function bleIdentitySummary(item) {
-  const values = [
-    item.manufacturer_name,
-    item.model_number,
-    item.firmware_revision,
-    item.hardware_revision,
-    item.software_revision
-  ].filter(Boolean);
-  return values.join(" | ");
-}
-
-function currentBleIdentifyTimeout() {
-  const timeoutInput = document.getElementById("ble-identify-timeout");
-  const timeout = timeoutInput ? Number(timeoutInput.value) : 10;
-  return Number.isFinite(timeout) ? timeout : 10;
-}
-
 function renderWifiEvent(event) {
   document.getElementById("wifi-status").textContent = event.type;
   if (event.type === "interface_mode") {
     const mode = "managed scan";
-    const tier = event.data.warning ? "fallback" : "primary";
-    setCollectorBanner("wifi", event.data.warning ? "hardware_fallback" : "RUNNING", `${tier} | ${event.data.interface} ${mode}${event.data.warning ? `: ${event.data.warning}` : ""}`);
+    const detail = eventStatusDetail("wifi", event.data.interface, event.data.warning || "");
+    setCollectorBanner("wifi", "ONLINE", `${detail} | ${mode}`);
   }
   if (event.type === "collector_retrying" || event.type === "collector_offline") {
-    setCollectorBanner("wifi", event.type, event.data.reason || "");
+    setCollectorBanner("wifi", event.type, eventStatusDetail("wifi", event.data.interface, event.data.reason || ""));
   }
   if (event.type === "scan_started") {
-    setCollectorBanner("wifi", "RUNNING", `${event.data.interface}: ${event.data.note}`);
+    setCollectorBanner("wifi", "ONLINE", `${eventStatusDetail("wifi", event.data.interface, "")} | ${event.data.note}`);
   }
   if (event.type === "scan_empty") {
     setCollectorBanner("wifi", "collector_retrying", `${event.data.interface}: no SSIDs found; ${event.data.diagnostics || ""}`);
   }
   if (event.type === "ap_beacon") {
-    rows.aps.set(event.data.bssid, {...event.data, last_seen: event.timestamp});
-    updateWifiSsidFilter();
-    updateWifiEncryptionFilter();
+    rows.aps.set(event.data.bssid, {
+      ...event.data,
+      last_seen: event.timestamp,
+      last_seen_epoch: event.timestamp_epoch
+    });
     renderWifiTables();
+    maybeRefreshEmptyDerivedViews("Wi-Fi scan");
   }
 }
 
@@ -1165,7 +1507,7 @@ function renderWifiMonitorEvent(event) {
   document.getElementById("wifi_monitor-status").textContent = event.type;
   if (event.type === "monitor_started") {
     const data = event.data || {};
-    setCollectorBanner("wifi_monitor", "RUNNING", `primary | ${data.interface} | channels ${formatChannelList(data.channels)} | dwell ${data.dwell_sec}s`);
+    setCollectorBanner("wifi_monitor", "ONLINE", `${data.interface} available, active: ${data.interface} | channels ${formatChannelList(data.channels)} | dwell ${data.dwell_sec}s`);
     setWifiMonitorPlan(`Bands ${formatChannelList(data.supported_bands)} | channels ${formatChannelList(data.channels)}`, "ok");
   }
   if (event.type === "monitor_channel_changed") {
@@ -1180,22 +1522,19 @@ function renderWifiMonitorEvent(event) {
     renderWifiEvent({...event, collector: "wifi"});
   }
   if (["probe_request", "ap_beacon", "association_seen", "deauth_seen", "disassoc_seen"].includes(event.type)) {
-    rows.monitorEvents.unshift({...event.data, event_type: event.type, last_seen: event.timestamp});
+    rows.monitorEvents.unshift({
+      ...event.data,
+      event_type: event.type,
+      last_seen: event.timestamp,
+      last_seen_epoch: event.timestamp_epoch
+    });
     rows.monitorEvents = rows.monitorEvents.slice(0, uiNumber("max_live_rows"));
     renderWifiMonitorTable();
   }
 }
 
 function renderWifiMonitorTable() {
-  renderTable("wifi-monitor-events", rows.monitorEvents, (item) => [
-    item.event_type || "",
-    item.channel || "",
-    item.client_mac || "",
-    item.ap_mac || item.bssid || "",
-    item.ssid || item.ssid_probed || "",
-    formatSignal(item.rssi),
-    item.last_seen || ""
-  ]);
+  renderSchemaTable("wifi-monitor-events", rows.monitorEvents, "wifiMonitorEvents");
 }
 
 function setWifiMonitorPlan(text, state) {
@@ -1211,9 +1550,24 @@ function formatChannelList(values) {
 }
 
 function renderWifiTables() {
-  renderTable("wifi-aps", [...rows.aps.values()].filter(wifiApMatchesFilters), (item) => [
-    item.ssid || "", item.bssid || "", vendorLabel(item), channelFreq(item.channel, item.frequency_band), item.encryption || "", formatSignal(item.rssi), item.last_seen
-  ]);
+  const aps = [...rows.aps.values()]
+    .filter(wifiApMatchesSearch)
+    .sort(compareWifiAccessPoints);
+  renderSchemaTable("wifi-aps", aps, "wifiAccessPoints", {
+    preserveOrder: true
+  });
+}
+
+function compareWifiAccessPoints(left, right) {
+  const leftMs = recordTimestampMs(left, "last_seen");
+  const rightMs = recordTimestampMs(right, "last_seen");
+  if (leftMs && rightMs && leftMs !== rightMs) return rightMs - leftMs;
+  if (leftMs && !rightMs) return -1;
+  if (!leftMs && rightMs) return 1;
+  const leftSsid = left.ssid || "";
+  const rightSsid = right.ssid || "";
+  if (leftSsid !== rightSsid) return leftSsid.localeCompare(rightSsid);
+  return (left.bssid || "").localeCompare(right.bssid || "");
 }
 
 function renderDeviceHistory(history) {
@@ -1224,6 +1578,12 @@ function renderDeviceHistory(history) {
   const aps = wifi.access_points || [];
   const clients = wifi.clients || [];
   const devices = ble.devices || [];
+  const monitorEmpty = document.getElementById("history-wifi-monitor-empty");
+  if (monitorEmpty) {
+    monitorEmpty.textContent = clients.length
+      ? `${clients.length} Wi-Fi client/probe histories in this view`
+      : "No Wi-Fi client/probe history in this view. Wi-Fi Monitor must be running in monitor mode to collect clients, probes, deauth, and association frames.";
+  }
   renderHistoryTable("history-wifi-aps", aps, (item) => [
     item.ssid || "(blank)",
     item.bssid || "",
@@ -1255,7 +1615,9 @@ function renderDeviceHistory(history) {
     bleDeviceName(item),
     item.manufacturer_name || item.manufacturer || item.vendor_name || "",
     item.model_number || "",
+    item.serial_number || "",
     item.firmware_revision || "",
+    item.pnp_id || "",
     item.first_seen || "",
     item.last_seen || "",
     signalRange(item),
@@ -1266,7 +1628,6 @@ function renderDeviceHistory(history) {
     (item.sessions || []).length,
     item.finding_count || 0
   ], historySearch);
-  renderBleIdentifyDevices();
 }
 
 function updateDeviceHistoryStatus(history) {
@@ -1277,9 +1638,23 @@ function updateDeviceHistoryStatus(history) {
   const devices = ble.devices || [];
   const window = history.window || {};
   const refreshedAt = history.refreshed_at || history.generated_at;
+  const visible = [...aps, ...clients, ...devices];
+  const shown = visible.length;
+  const rawEvents = history.records_read || 0;
+  const newestSeen = latestSeenStatusText(visible, ["last_seen", "timestamp"]);
+  const refreshedEpoch = history.refreshed_at_epoch || history.generated_at_epoch;
+  const normalState = derivedStatusState(refreshedAt, refreshedEpoch, "ok");
   setHistoryStatus(
-    `${derivedStatusPrefix(window, refreshedAt, history.refreshed_at_epoch || history.generated_at_epoch)} | ${history.records_read || 0} records | ${aps.length} APs | ${clients.length} Wi-Fi clients | ${devices.length} Bluetooth devices`,
-    derivedStatusState(refreshedAt, history.refreshed_at_epoch || history.generated_at_epoch, "ok")
+    [
+      derivedStatusPrefix(window, refreshedAt, refreshedEpoch),
+      newestSeen,
+      `${shown} devices/APs shown`,
+      `${rawEvents} raw events processed`,
+      `${aps.length} APs`,
+      `${clients.length} Wi-Fi clients`,
+      `${devices.length} Bluetooth devices`
+    ].filter(Boolean).join(" | "),
+    derivedDataStatusState(visible, ["last_seen", "timestamp"], normalState)
   );
 }
 
@@ -1345,8 +1720,8 @@ function renderCombinedInsights() {
 
 function sortInsights(items) {
   return (items || []).sort((left, right) => {
-    const leftMs = parseSkannrTimestampMs(left.timestamp);
-    const rightMs = parseSkannrTimestampMs(right.timestamp);
+    const leftMs = recordTimestampMs(left, "timestamp");
+    const rightMs = recordTimestampMs(right, "timestamp");
     if (leftMs && rightMs && leftMs !== rightMs) return rightMs - leftMs;
     if (leftMs && !rightMs) return -1;
     if (!leftMs && rightMs) return 1;
@@ -1360,6 +1735,7 @@ function normalizeFindingInsight(finding) {
   const detail = finding.detail || "";
   return {
     timestamp: finding.timestamp || "",
+    timestamp_epoch: finding.timestamp_epoch,
     severity: finding.severity || "",
     source: finding.source || "",
     type: finding.type || "finding",
@@ -1369,6 +1745,7 @@ function normalizeFindingInsight(finding) {
     evidence_text: evidenceText(finding.attributes || {}, detail),
     activity_state: finding.activity_state || "",
     last_seen: finding.last_seen || finding.timestamp || "",
+    last_seen_epoch: finding.last_seen_epoch || finding.timestamp_epoch,
     origin: "live event",
   };
 }
@@ -1377,6 +1754,7 @@ function normalizeObservationInsight(observation) {
   const detail = observation.detail || "";
   return {
     timestamp: observation.timestamp || "",
+    timestamp_epoch: observation.timestamp_epoch,
     severity: observation.severity || "",
     source: observation.source || "",
     type: observation.type || "observation",
@@ -1386,6 +1764,7 @@ function normalizeObservationInsight(observation) {
     evidence_text: evidenceText(observation.evidence || {}, detail),
     activity_state: observation.activity_state || "",
     last_seen: observation.last_seen || "",
+    last_seen_epoch: observation.last_seen_epoch,
     age_minutes: observation.age_minutes,
     origin: "device history",
     score: observation.score || 0,
@@ -1395,15 +1774,30 @@ function normalizeObservationInsight(observation) {
 function updateInsightsStatus() {
   const source = latestHistoryAnalysis || latestFindingsHistory || {};
   const window = source.window || {};
+  const insightsWindow = source.insights_window || {};
   const refreshedAt = source.refreshed_at || source.generated_at;
   const refreshedEpoch = source.refreshed_at_epoch || source.generated_at_epoch;
   const total = rows.insights.length;
   const visible = rows.insights.filter(insightMatchesFilters).filter(insightMatchesSearch);
   const warnings = rows.insights.filter((item) => item.severity === "warning").length;
   const errors = rows.insights.filter((item) => item.severity === "error" || item.severity === "alert").length;
+  const newestSeen = latestSeenStatusText(visible, ["last_seen", "timestamp"]);
+  const normalState = derivedStatusState(
+    refreshedAt,
+    refreshedEpoch,
+    visible.some((item) => item.severity === "warning" || item.severity === "error" || item.severity === "alert") ? "warning" : "ok"
+  );
   setInsightsStatus(
-    `${derivedStatusPrefix(window, refreshedAt, refreshedEpoch)} | ${visible.length} shown | ${total} insights | ${warnings} warnings | ${errors} errors`,
-    derivedStatusState(refreshedAt, refreshedEpoch, visible.some((item) => item.severity === "warning" || item.severity === "error" || item.severity === "alert") ? "warning" : "ok")
+    [
+      insightsWindow.label || "",
+      derivedStatusPrefix(window, refreshedAt, refreshedEpoch),
+      newestSeen,
+      `${visible.length} shown`,
+      `${total} insights`,
+      `${warnings} warnings`,
+      `${errors} errors`
+    ].filter(Boolean).join(" | "),
+    derivedDataStatusState(visible, ["last_seen", "timestamp"], normalState)
   );
 }
 
@@ -1422,20 +1816,236 @@ function severityRank(severity) {
   return {"error": 3, "alert": 3, "warning": 2, "info": 1}[String(severity || "").toLowerCase()] || 0;
 }
 
+function reportEvidenceText(report) {
+  return reportEvidenceItems(report)
+    .map((item) => `${item.label}: ${item.value}`)
+    .join(" | ");
+}
+
+function reportEvidenceItems(report) {
+  const evidence = (report || {}).evidence || {};
+  const source = String((report || {}).source || "").toLowerCase();
+  const type = String((report || {}).type || "").toLowerCase();
+  if (source === "bluetooth" || type.startsWith("ble_")) {
+    return bluetoothReportEvidenceItems(evidence);
+  }
+  if (source === "wifi" || type.startsWith("wifi_ap") || type.includes("ssid")) {
+    return wifiApReportEvidenceItems(evidence);
+  }
+  if (source === "wifi_monitor" || type.startsWith("wifi_client")) {
+    return wifiClientReportEvidenceItems(evidence);
+  }
+  return genericEvidenceItems(evidence, (report || {}).summary || "");
+}
+
+function renderReportEvidenceCell(cell, items) {
+  const evidenceItems = items || [];
+  if (!evidenceItems.length) {
+    cell.textContent = "";
+    return;
+  }
+  const list = document.createElement("dl");
+  list.className = "evidence-list";
+  evidenceItems.forEach((item) => {
+    const term = document.createElement("dt");
+    term.textContent = item.label;
+    const detail = document.createElement("dd");
+    detail.textContent = item.value;
+    list.appendChild(term);
+    list.appendChild(detail);
+  });
+  cell.appendChild(list);
+}
+
 function evidenceText(evidence, detail) {
-  if (!evidence) return "";
+  return genericEvidenceText(evidence, detail);
+}
+
+function bluetoothReportEvidenceItems(evidence) {
+  const parts = [];
+  const signal = signalRangeText(evidence.signal_min, evidence.signal_max);
+  const foldedSignal = findingsMentionStrongSignal(evidence.findings);
+  const findings = findingsText(evidence.findings, signal, foldedSignal);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const pattern = presencePatternText(evidence);
+  if (pattern) parts.push({label: "Pattern", value: pattern});
+  const observed = observedSessionText(evidence);
+  if (observed) parts.push({label: "Observed", value: observed});
+  const activity = bluetoothActivityText(evidence);
+  if (activity) parts.push({label: "Activity", value: activity});
+  if (signal && !foldedSignal) parts.push({label: "Signal", value: signal});
+  if (evidence.sample_macs && evidence.sample_macs.length) {
+    parts.push({label: "Samples", value: compactList(evidence.sample_macs, 6)});
+  }
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
+}
+
+function bluetoothActivityText(evidence) {
+  const parts = [];
+  if (evidence.address_count) {
+    parts.push(`${evidence.address_count} private/randomized address(es)`);
+  }
+  if (evidence.active_addresses) {
+    parts.push(`${evidence.active_addresses} active`);
+  }
+  return parts.join("; ");
+}
+
+function wifiApReportEvidenceItems(evidence) {
+  const parts = [];
+  const signal = signalRangeText(null, evidence.signal_max);
+  const foldedSignal = findingsMentionStrongSignal(evidence.findings);
+  const findings = findingsText(evidence.findings, signal, foldedSignal);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const radio = [
+    evidence.channels && evidence.channels.length ? `channels ${compactList(evidence.channels, 8)}` : "",
+    evidence.bssids && evidence.bssids.length ? `${evidence.bssids.length} BSSIDs` : "",
+    evidence.encryption && evidence.encryption.length ? `security ${compactList(evidence.encryption, 6)}` : ""
+  ].filter(Boolean).join("; ");
+  if (radio) parts.push({label: "Radio", value: radio});
+  if (evidence.vendors && evidence.vendors.length) {
+    parts.push({label: "Vendors", value: compactList(evidence.vendors, 4)});
+  }
+  const pattern = presencePatternText(evidence);
+  if (pattern) parts.push({label: "Pattern", value: pattern});
+  const observed = observedSessionText(evidence);
+  if (observed) parts.push({label: "Observed", value: observed});
+  if (signal && !foldedSignal) parts.push({label: "Signal", value: signal});
+  if (evidence.bssids && evidence.bssids.length) {
+    parts.push({label: "BSSIDs", value: compactList(evidence.bssids, 8)});
+  }
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
+}
+
+function wifiClientReportEvidenceItems(evidence) {
+  const parts = [];
+  const client = [
+    evidence.mac ? `MAC ${evidence.mac}` : "",
+    evidence.vendor || ""
+  ].filter(Boolean).join("; ");
+  if (client) parts.push({label: "Client", value: client});
+  const probes = [
+    evidence.probe_count ? `${evidence.probe_count} probes` : "",
+    evidence.probed_ssids && evidence.probed_ssids.length ? `SSIDs ${compactList(evidence.probed_ssids, 6)}` : ""
+  ].filter(Boolean).join("; ");
+  if (probes) parts.push({label: "Probes", value: probes});
+  const activity = [
+    evidence.association_count ? `${evidence.association_count} associations` : "",
+    evidence.deauth_count ? `${evidence.deauth_count} deauth` : "",
+    evidence.disassoc_count ? `${evidence.disassoc_count} disassoc` : ""
+  ].filter(Boolean).join("; ");
+  if (activity) parts.push({label: "Activity", value: activity});
+  if (evidence.first_seen || evidence.last_seen) {
+    parts.push({label: "Observed", value: timeRangeText(evidence.first_seen, evidence.last_seen)});
+  }
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
+}
+
+function presencePatternText(evidence) {
+  const parts = [];
+  if (evidence.days_seen && evidence.days_seen.length) {
+    parts.push(`seen ${compactList(evidence.days_seen, 7)}`);
+  }
+  if (evidence.common_hours && evidence.common_hours.length) {
+    parts.push(`usually active ${compactList(evidence.common_hours, 3)}`);
+  } else if (evidence.presence_hours && evidence.presence_hours.length) {
+    parts.push(`active during ${compactList(evidence.presence_hours, 3)}`);
+  }
+  if (evidence.common_start_hours && evidence.common_start_hours.length) {
+    parts.push(`usually starts ${compactList(evidence.common_start_hours, 3)}`);
+  }
+  return parts.join("; ");
+}
+
+function findingsText(findings, signal, includeSignal) {
+  if (!findings || !findings.length) return "";
+  const parts = [compactList(findings, 5)];
+  if (includeSignal && signal) parts.push(signal);
+  return parts.filter(Boolean).join("; ");
+}
+
+function findingsMentionStrongSignal(findings) {
+  if (!findings || !findings.length) return false;
+  return findings.some((item) => {
+    const text = String(item || "").toLowerCase();
+    return text.includes("strong") && text.includes("signal");
+  });
+}
+
+function observedSessionText(evidence) {
+  let observed = "";
+  if (evidence.presence_spans && evidence.presence_spans.length) {
+    observed = compactList(evidence.presence_spans, 4);
+  } else if (evidence.first_seen || evidence.last_seen) {
+    observed = timeRangeText(evidence.first_seen, evidence.last_seen);
+  }
+
+  const session = sessionText(evidence.sessions, evidence.active_session);
+  return [observed, session].filter(Boolean).join("; ");
+}
+
+function sessionText(count, active) {
+  const sessions = Number(count || 0);
+  const sessionPart = sessions ? `${sessions} visit${sessions === 1 ? "" : "s"}` : "";
+  const activePart = active === true ? "currently present" : active === false ? "not currently present" : "";
+  return [sessionPart, activePart].filter(Boolean).join("; ");
+}
+
+function signalRangeText(min, max) {
+  const hasMin = min !== null && min !== undefined && min !== "";
+  const hasMax = max !== null && max !== undefined && max !== "";
+  if (hasMin && hasMax) return `${min} to ${max} dBm`;
+  if (hasMax) return `up to ${max} dBm`;
+  if (hasMin) return `${min} dBm`;
+  return "";
+}
+
+function timeRangeText(first, last) {
+  if (first && last && first !== last) return `${first} to ${last}`;
+  return first || last || "";
+}
+
+function compactList(values, limit) {
+  const items = Array.isArray(values) ? values.filter((item) => item !== "" && item !== null && item !== undefined) : [];
+  if (!items.length) return "";
+  const shown = items.slice(0, limit);
+  const suffix = items.length > shown.length ? ` +${items.length - shown.length}` : "";
+  return `${shown.join(", ")}${suffix}`;
+}
+
+function genericEvidenceText(evidence, detail) {
+  return genericEvidenceItems(evidence, detail)
+    .map((item) => `${item.label}: ${item.value}`)
+    .join(" | ");
+}
+
+function genericEvidenceItems(evidence, detail) {
+  if (!evidence) return [];
   const parts = [];
   const detailText = String(detail || "").toLowerCase();
   Object.keys(evidence).sort().forEach((key) => {
-    const value = evidence[key];
-    if (evidenceValueAlreadyShown(value, detailText)) return;
+    if (key.endsWith("_epoch")) return;
+    const value = evidenceDisplayValue(evidence, key);
+    if (value === "" || value === null || value === undefined) return;
+    if (!alwaysShowEvidenceKey(key) && evidenceValueAlreadyShown(value, detailText)) return;
     if (Array.isArray(value)) {
-      parts.push(`${key}: ${value.join(", ")}`);
+      parts.push({label: key, value: value.join(", ")});
     } else {
-      parts.push(`${key}: ${value}`);
+      parts.push({label: key, value: String(value)});
     }
   });
-  return parts.join(" | ");
+  return parts;
+}
+
+function evidenceDisplayValue(evidence, key) {
+  if ((key.endsWith("_seen") || key === "timestamp") && evidence[key]) {
+    return evidence[key];
+  }
+  return evidence[key];
+}
+
+function alwaysShowEvidenceKey(key) {
+  return ["first_seen", "last_seen", "presence_spans"].includes(key);
 }
 
 function evidenceValueAlreadyShown(value, detailText) {
@@ -1455,39 +2065,16 @@ function updateSubtabPanel(group) {
   });
 }
 
-function wifiApMatchesFilters(item) {
-  return wifiSsidMatches(item.ssid || "") &&
-    wifiEncryptionMatches(item.encryption || "") &&
-    wifiSignalMatches(item.rssi);
-}
-
-function wifiSsidMatches(ssid) {
-  const mode = wifiSsidFilter ? wifiSsidFilter.value : "all";
-  if (mode === "all") return true;
-  if (mode === "__blank__") return !ssid;
-  return ssid === mode;
-}
-
-function wifiEncryptionMatches(encryption) {
-  const mode = wifiEncryptionFilter ? wifiEncryptionFilter.value : "all";
-  if (mode === "all") return true;
-  return encryption === mode;
-}
-
-function wifiSignalMatches(value) {
-  const mode = wifiSignalFilter ? wifiSignalFilter.value : "all";
-  if (mode === "all") return true;
-  const signal = Number(value);
-  if (Number.isNaN(signal)) return false;
-  const bands = Array.isArray(uiConfig.wifi_signal_bands) ? uiConfig.wifi_signal_bands : [];
-  const band = bands.find((entry) => entry && entry.value === mode);
-  if (!band) return true;
-  if (band.min !== undefined && signal < Number(band.min)) return false;
-  if (band.max !== undefined) {
-    if (band.min === undefined) return signal <= Number(band.max);
-    return signal < Number(band.max);
-  }
-  return true;
+function wifiApMatchesSearch(item) {
+  return rowMatchesSearch([
+    item.ssid || "",
+    item.bssid || "",
+    vendorLabel(item),
+    channelFreq(item.channel, item.frequency_band),
+    item.encryption || "",
+    formatSignal(item.rssi),
+    item.last_seen || ""
+  ], wifiSearch);
 }
 
 function renderCollectorHealth(statuses) {
@@ -1499,53 +2086,50 @@ function renderCollectorHealth(statuses) {
     const tr = document.createElement("tr");
     [
       item.name,
-      displayState(item.state),
+      collectorDisplayState(item),
       hardwareSummary(item),
       softwareSummary(item.key),
       item.events_this_session,
       item.last_event || "",
-      item.warning || ""
+      displayWarning(item)
     ].forEach((value) => {
       const td = document.createElement("td");
       td.textContent = value;
       tr.appendChild(td);
     });
     const control = document.createElement("td");
-    if (item.key === "ble_identify") {
-      control.textContent = "Manual";
-    } else {
-      const state = String(item.state || "");
-      const running = state.startsWith("RUNNING") || state === "RETRYING" || state === "DETECTING";
-      const stopped = state === "STOPPED" || state === "OFFLINE";
-      if (!running) {
-        const start = document.createElement("button");
-        start.textContent = "Start";
-        start.addEventListener("click", () => {
-          setCollectorBanner(item.key, "STARTING", "Start requested");
-          socket.emit("collector_control", {key: item.key, action: "start"});
-        });
-        control.appendChild(start);
-      }
-      if (!stopped) {
-        const stop = document.createElement("button");
-        stop.textContent = "Stop";
-        stop.addEventListener("click", () => {
-          setCollectorBanner(item.key, "STOPPING", "Stop requested");
-          socket.emit("collector_control", {key: item.key, action: "stop"});
-        });
-        control.appendChild(stop);
-      }
+    const state = String(item.state || "");
+    const running = state === "ONLINE" || state === "RETRYING" || state === "DETECTING";
+    const stopped = state === "STOPPED" || state === "OFFLINE";
+    if (!running) {
+      const start = document.createElement("button");
+      start.textContent = "Start";
+      start.addEventListener("click", () => {
+        setCollectorBanner(item.key, "STARTING", "Start requested");
+        socket.emit("collector_control", {key: item.key, action: "start"});
+      });
+      control.appendChild(start);
+    }
+    if (!stopped) {
+      const stop = document.createElement("button");
+      stop.textContent = "Stop";
+      stop.addEventListener("click", () => {
+        setCollectorBanner(item.key, "STOPPING", "Stop requested");
+        socket.emit("collector_control", {key: item.key, action: "stop"});
+      });
+      control.appendChild(stop);
     }
     tr.appendChild(control);
     tbody.appendChild(tr);
   });
+  maybeRefreshEmptyDerivedViews("collector events");
 }
 
 function updateCollectorTabStatus(item) {
   const status = document.getElementById(`${item.key}-status`);
-  const visualState = item.warning && String(item.state).startsWith("RUNNING") ? "hardware_fallback" : item.state;
+  const visualState = item.state;
   if (status) {
-    status.textContent = displayState(item.state);
+    status.textContent = collectorDisplayState(item);
     status.className = `badge ${badgeClassForState(visualState)}`;
   }
   updateCollectorActionButtons(item);
@@ -1553,10 +2137,14 @@ function updateCollectorTabStatus(item) {
   setCollectorBanner(item.key, visualState, collectorStatusDetail(item));
 }
 
+function collectorDisplayState(item) {
+  return displayState(item.state);
+}
+
 function updateCollectorActionButtons(item) {
   if (item.key !== "bt_classic") return;
   const state = String(item.state || "");
-  const running = state.startsWith("RUNNING") || state === "RETRYING" || state === "DETECTING";
+  const running = state === "ONLINE" || state === "RETRYING" || state === "DETECTING";
   const start = document.getElementById("bt-classic-start");
   const stop = document.getElementById("bt-classic-stop");
   if (start) start.style.display = running ? "none" : "";
@@ -1565,21 +2153,33 @@ function updateCollectorActionButtons(item) {
 
 function collectorStatusDetail(item) {
   const hardware = hardwareSummary(item);
-  const warning = item.warning ? ` | ${item.warning}` : "";
-  return `${hardware}${warning}`.replace(/^\s*\|\s*/, "") || item.warning || "";
+  const cleanWarning = displayWarning(item);
+  const warning = cleanWarning ? ` | ${cleanWarning}` : "";
+  return `${hardware}${warning}`.replace(/^\s*\|\s*/, "") || cleanWarning || "";
 }
 
-function tierLabel(state) {
-  if (state === "RUNNING_TIER1") return "primary";
-  if (state === "RUNNING_TIER2") return "fallback";
-  if (state === "RUNNING") return "Running";
-  return String(state || "Unknown").replace(/_/g, " ");
+function eventStatusDetail(key, activeHardware, warning) {
+  return collectorStatusDetail({
+    key,
+    hardware: activeHardware,
+    warning
+  });
+}
+
+function displayWarning(item) {
+  const warning = String((item || {}).warning || "").trim();
+  if (!warning) return "";
+  return warningIsValidationDetail(warning) ? "" : warning;
+}
+
+function warningIsValidationDetail(warning) {
+  const text = String(warning || "").toLowerCase();
+  return text.includes("validation") || text.includes(" exited ") || text.includes(" exit ");
 }
 
 function displayState(state) {
-  if (state === "RUNNING_TIER1") return "RUNNING primary";
-  if (state === "RUNNING_TIER2") return "RUNNING fallback";
-  return tierLabel(state);
+  if (state === "IDLE") return "IDLE / on demand";
+  return String(state || "Unknown").replace(/_/g, " ");
 }
 
 function setCollectorBanner(key, state, detail) {
@@ -1609,15 +2209,15 @@ function hasActiveTransientCollectorBanner(key) {
 }
 
 function badgeClassForState(state) {
-  if (String(state).startsWith("RUNNING")) return "ok";
-  if (state === "RETRYING" || state === "STARTING" || state === "STOPPING" || state === "hardware_fallback") return "warning";
+  if (state === "ONLINE") return "ok";
+  if (state === "RETRYING" || state === "STARTING" || state === "STOPPING") return "warning";
   if (state === "OFFLINE") return "alert";
   return "muted";
 }
 
 function bannerClassForState(state) {
-  if (String(state).startsWith("RUNNING") || state === "RUNNING") return "ok";
-  if (state === "RETRYING" || state === "STARTING" || state === "STOPPING" || state === "hardware_fallback" || state === "collector_retrying") return "warning";
+  if (state === "ONLINE") return "ok";
+  if (state === "RETRYING" || state === "STARTING" || state === "STOPPING" || state === "collector_retrying") return "warning";
   if (state === "OFFLINE" || state === "collector_offline") return "alert";
   return "muted";
 }
@@ -1631,36 +2231,75 @@ function renderSystemStatus(status) {
 function hardwareSummary(item) {
   const detected = (latestSystemStatus.hardware || {})[item.key] || {};
   if (item.key === "wifi") {
-    return [
-      detected.preferred_detected === undefined ? null : `${detected.preferred_interface || "preferred interface"}: ${detected.preferred_detected ? "found" : "missing"}`,
-      detected.fallback_detected === undefined ? null : `${detected.fallback_interface || "fallback interface"}: ${detected.fallback_detected ? "found" : "missing"}`,
-      item.hardware ? `active: ${item.hardware}` : null
-    ].filter(Boolean).join(", ");
+    return availabilitySummary(
+      "Wi-Fi interfaces",
+      wirelessAvailabilityRecords(detected),
+      cleanActiveHardware(item.hardware)
+    );
   }
   if (item.key === "wifi_monitor") {
     const active = item.hardware && item.hardware !== "Wi-Fi adapter already in monitor mode";
+    const monitorRecords = Array.isArray(detected.interfaces) ? detected.interfaces : [];
+    const wireless = Array.isArray(detected.wireless_interfaces)
+      ? detected.wireless_interfaces.join(", ")
+      : "";
+    const summary = availabilitySummary(
+      "Monitor-mode interfaces",
+      monitorRecords,
+      active ? cleanActiveHardware(item.hardware) : ""
+    );
     return [
+      summary,
+      wireless ? `wireless interfaces present: ${wireless}` : null,
       detected.interface ? `configured: ${detected.interface}` : null,
-      active ? `active: ${item.hardware}` : null,
       detected.auto_start === false ? "on demand" : null
     ].filter(Boolean).join(", ");
   }
   if (item.key === "ble") {
-    return [
-      detected.preferred_detected === undefined ? null : `${detected.preferred_adapter || "preferred adapter"}: ${detected.preferred_detected ? "found" : "missing"}`,
-      detected.fallback_detected === undefined ? null : `${detected.fallback_adapter || "fallback adapter"}: ${detected.fallback_detected ? "found" : "missing"}`,
-      item.hardware ? `active: ${item.hardware}` : null
-    ].filter(Boolean).join(", ");
+    return availabilitySummary(
+      "Bluetooth adapters",
+      bluetoothAvailabilityRecords(detected),
+      cleanActiveHardware(item.hardware)
+    );
   }
-  if (item.key === "ble_identify" || item.key === "bt_classic") {
-    return [
-      detected.preferred_detected === undefined ? null : `${detected.preferred_adapter || "preferred adapter"}: ${detected.preferred_detected ? "found" : "missing"}`,
-      detected.fallback_detected === undefined ? null : `${detected.fallback_adapter || "fallback adapter"}: ${detected.fallback_detected ? "found" : "missing"}`,
-      detected.auto_start === false ? "on demand" : null,
-      item.hardware ? `active: ${item.hardware}` : null
-    ].filter(Boolean).join(", ");
+  if (item.key === "bt_classic") {
+    return availabilitySummary(
+      "Bluetooth adapters",
+      bluetoothAvailabilityRecords(detected),
+      cleanActiveHardware(item.hardware)
+    );
   }
   return item.hardware || "";
+}
+
+function availabilitySummary(label, records, active) {
+  if (active) {
+    records.forEach((item) => {
+      if (item.name === active) item.available = true;
+    });
+  }
+  const entries = records.map((item) => `${item.name}: ${item.available ? "available" : "unavailable"}`);
+  if (!entries.length && !active) return `${label}: unavailable`;
+  if (active) entries.push(`active: ${active}`);
+  return `${label}: ${entries.join(", ")}`;
+}
+
+function bluetoothAvailabilityRecords(detected) {
+  if (Array.isArray(detected.adapters)) return detected.adapters;
+  return [];
+}
+
+function wirelessAvailabilityRecords(detected) {
+  if (Array.isArray(detected.interfaces)) return detected.interfaces;
+  return [];
+}
+
+function cleanActiveHardware(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (text.includes("adapter for") || text.includes("interface for")) return "";
+  if (text.includes("required")) return "";
+  return text;
 }
 
 function softwareSummary(key) {
@@ -1680,7 +2319,7 @@ function softwareSummary(key) {
       executableStatus("rtl_test", detected.rtl_test)
     ].filter(Boolean).join(", ");
   }
-  if (key === "ble" || key === "ble_identify") {
+  if (key === "ble") {
     return packageStatus("bleak", detected.bleak);
   }
   if (key === "bt_classic") {
@@ -1712,42 +2351,6 @@ function formatSignal(value) {
   const number = Number(value);
   if (Number.isNaN(number)) return value;
   return String(Math.round(number));
-}
-
-function renderTable(id, items, cellBuilder) {
-  const tbody = document.getElementById(id);
-  if (!tbody) return;
-  tbody.innerHTML = "";
-  items.slice(-uiNumber("max_live_rows")).reverse().forEach((item) => {
-    const tr = document.createElement("tr");
-    cellBuilder(item).forEach((value) => {
-      const td = document.createElement("td");
-      td.textContent = value;
-      tr.appendChild(td);
-    });
-    tbody.appendChild(tr);
-  });
-}
-
-function renderHistoryTable(id, items, cellBuilder, searchInput) {
-  const tbody = document.getElementById(id);
-  tbody.innerHTML = "";
-  items.filter((item) => rowMatchesSearch(cellBuilder(item), searchInput)).slice(0, uiNumber("max_history_rows")).forEach((item) => {
-    const tr = document.createElement("tr");
-    cellBuilder(item).forEach((value) => {
-      const td = document.createElement("td");
-      td.textContent = value;
-      tr.appendChild(td);
-    });
-    tbody.appendChild(tr);
-  });
-}
-
-function rowMatchesSearch(values, input) {
-  if (!input) return true;
-  const needle = String(input.value || "").trim().toLowerCase();
-  if (!needle) return true;
-  return values.some((value) => String(value === null || value === undefined ? "" : value).toLowerCase().includes(needle));
 }
 
 function prependList(id, text) {

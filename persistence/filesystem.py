@@ -7,10 +7,8 @@ logs.
 
 import json
 import os
-import time
-from datetime import datetime
 
-from log_utils import normalize_retention_days
+from log_utils import format_epoch, normalize_retention_days, now_epoch
 from persistence.base import BasePersistence
 
 
@@ -34,7 +32,7 @@ class FilesystemPersistence(BasePersistence):
     def write(self, event):
         """Append one event to logs/<collector>/<YYYY-MM-DD>.jsonl."""
         collector = event.get("collector", "system")
-        date = datetime.now().strftime("%Y-%m-%d")
+        date = format_epoch(event.get("timestamp_epoch") or now_epoch())[:10]
         directory = os.path.join(self.log_dir, collector)
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, "{}.jsonl".format(date))
@@ -89,7 +87,7 @@ class FilesystemPersistence(BasePersistence):
 
     def rotate(self):
         """Delete old JSONL files based on retention_days."""
-        cutoff = time.time() - (self.retention_days * 86400)
+        cutoff = now_epoch() - (self.retention_days * 86400)
         for root, _dirs, files in os.walk(self.log_dir):
             for filename in files:
                 path = os.path.join(root, filename)

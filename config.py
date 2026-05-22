@@ -1,4 +1,4 @@
-"""Configuration loading and lightweight hardware/software detection.
+"""Configuration loading for global and collector-specific settings.
 
 Global settings live in skannr.yaml. Collector-specific settings live in
 collectors/*.yaml, then get merged into config["collectors"] so the rest of the
@@ -6,13 +6,11 @@ runtime can treat all settings as one dictionary.
 """
 
 import copy
-import importlib.util
 import os
-import shutil
-import subprocess
 
 import yaml
 
+from collectors import detect_collector_hardware
 from log_utils import normalize_retention_days
 
 
@@ -69,6 +67,7 @@ DEFAULT_CONFIG = {
         "ble_recurring_min_sessions": 3,
         "ble_recurring_window_min": 30,
         "recent_activity_window_sec": 1800,
+        "insights_recent_hours": 6,
         "wifi_short_lived_sec": 900,
         "sensitive_ssids": [],
     },
@@ -88,29 +87,10 @@ DEFAULT_CONFIG = {
         "max_event_log_items": 100,
         "max_rendered_findings": 1000,
         "max_history_ssids": 8,
+        "bluetooth_live_recent_sec": 600,
         "derived_stale_after_min": 15,
         "derived_auto_refresh_min": 15,
         "insights_recent_after_min": 30,
-        "wifi_signal_bands": [
-            {"value": "strong", "label": "Strong (>= -60)", "min": -60},
-            {
-                "value": "okay",
-                "label": "Okay (-60 to -70)",
-                "min": -70,
-                "max": -60,
-            },
-            {
-                "value": "poor",
-                "label": "Poor (-70 to -80)",
-                "min": -80,
-                "max": -70,
-            },
-            {
-                "value": "very_poor",
-                "label": "Very Poor (-80 or worse)",
-                "max": -80,
-            },
-        ],
     },
     "collectors": {},
 }
@@ -175,142 +155,10 @@ def load_collector_configs(config_path):
     return collectors
 
 
-def command_succeeds(command):
-    """Return True when a probe command exits successfully."""
-    try:
-        subprocess.run(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-            timeout=5,
-        )
-        return True
-    except Exception:
-        return False
-
-
-def bluetoothctl_has_controller():
-    """Detect Bluetooth when /sys or hciconfig do not expose the adapter."""
-    try:
-        result = subprocess.run(
-            ["bluetoothctl", "list"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=5,
-            universal_newlines=True,
-        )
-        return "Controller " in result.stdout
-    except Exception:
-        return False
-
-
-def adapter_exists(adapter):
-    """Check for a Bluetooth adapter using several Pi/Linux mechanisms."""
-    if os.path.exists(os.path.join("/sys/class/bluetooth", adapter)):
-        return True
-    if command_succeeds(["hciconfig", adapter]):
-        return True
-    if adapter == "hci0" and bluetoothctl_has_controller():
-        return True
-    return False
-
-
-def interface_exists(interface):
-    """Check whether a Linux network interface exists."""
-    return os.path.exists(os.path.join("/sys/class/net", interface))
-
-
-def package_available(name):
-    """Check whether an optional Python package is importable in this venv."""
-    return importlib.util.find_spec(name) is not None
-
-
 def detect_hardware(config):
-    """Populate config['hardware'] with static probe results for the UI.
-
-    These are not active scans. They answer questions like "is rtl_power in
-    PATH?", "does wlan1 exist?", and "is scapy installed for monitor capture?"
-    so System Status can separate missing software from missing radio hardware.
-    """
-    collectors = config.get("collectors") or {}
-    hardware = {}
-    # The UI wants one row of probe results per collector. Keep the details
-    # here in sync with the collector YAML defaults, but leave active validation
-    # to each collector's detect() method.
-    if "rtlsdr" in collectors:
-        hardware["rtlsdr"] = {
-            "rtl_power": bool(shutil.which("rtl_power")),
-            "rtl_test": bool(shutil.which("rtl_test")),
-        }
-    if "ble" in collectors:
-        ble = collectors["ble"]
-        hardware["ble"] = {
-            "preferred_detected": adapter_exists(
-                ble.get("preferred_adapter", "hci1")
-            ),
-            "fallback_detected": adapter_exists(
-                ble.get("fallback_adapter", "hci0")
-            ),
-            "preferred_adapter": ble.get("preferred_adapter", "hci1"),
-            "fallback_adapter": ble.get("fallback_adapter", "hci0"),
-            "bleak": package_available("bleak"),
-        }
-    if "ble_identify" in collectors:
-        ble_identify = collectors["ble_identify"]
-        hardware["ble_identify"] = {
-            "preferred_detected": adapter_exists(
-                ble_identify.get("preferred_adapter", "hci1")
-            ),
-            "fallback_detected": adapter_exists(
-                ble_identify.get("fallback_adapter", "hci0")
-            ),
-            "preferred_adapter": ble_identify.get("preferred_adapter", "hci1"),
-            "fallback_adapter": ble_identify.get("fallback_adapter", "hci0"),
-            "bleak": package_available("bleak"),
-            "auto_start": ble_identify.get("auto_start", False),
-        }
-    if "bt_classic" in collectors:
-        bt_classic = collectors["bt_classic"]
-        hardware["bt_classic"] = {
-            "preferred_detected": adapter_exists(
-                bt_classic.get("preferred_adapter", "hci1")
-            ),
-            "fallback_detected": adapter_exists(
-                bt_classic.get("fallback_adapter", "hci0")
-            ),
-            "preferred_adapter": bt_classic.get("preferred_adapter", "hci1"),
-            "fallback_adapter": bt_classic.get("fallback_adapter", "hci0"),
-            "hcitool": bool(shutil.which("hcitool")),
-            "bluetoothctl": bool(shutil.which("bluetoothctl")),
-            "auto_start": bt_classic.get("auto_start", False),
-        }
-    if "wifi" in collectors:
-        wifi = collectors["wifi"]
-        hardware["wifi"] = {
-            "preferred_detected": interface_exists(
-                wifi.get("preferred_interface", "wlan1")
-            ),
-            "fallback_detected": interface_exists(
-                wifi.get("fallback_interface", "wlan0")
-            ),
-            "preferred_interface": wifi.get("preferred_interface", "wlan1"),
-            "fallback_interface": wifi.get("fallback_interface", "wlan0"),
-            "iw": bool(shutil.which("iw")),
-            "iwlist": bool(shutil.which("iwlist")),
-        }
-    if "wifi_monitor" in collectors:
-        wifi_monitor = collectors["wifi_monitor"]
-        hardware["wifi_monitor"] = {
-            "iw": bool(shutil.which("iw")),
-            "airmon_ng": bool(shutil.which("airmon-ng")),
-            "scapy": package_available("scapy"),
-            "auto_start": wifi_monitor.get("auto_start", False),
-            "interface": wifi_monitor.get("interface", "auto"),
-        }
-    config["hardware"] = hardware
-    return hardware
+    """Populate config['hardware'] with collector-owned probe results."""
+    config["hardware"] = detect_collector_hardware(config)
+    return config["hardware"]
 
 
 def load_config(path):
@@ -321,10 +169,6 @@ def load_config(path):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as fh:
             loaded = yaml.safe_load(fh) or {}
-        # Accept the old project key so existing local configs survive the
-        # Spectra -> Skannr rename.
-        if "spectra" in loaded and "skannr" not in loaded:
-            loaded["skannr"] = loaded.pop("spectra")
         legacy_collectors = loaded.pop("collectors", {}) or {}
         deep_update(config, loaded)
     else:

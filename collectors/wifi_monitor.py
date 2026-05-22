@@ -7,6 +7,7 @@ sniffs management frames and retunes across supported channels on demand.
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -15,28 +16,64 @@ from bus import local_now
 from collectors.base import (
     BaseCollector,
     STATE_OFFLINE,
+    STATE_ONLINE,
     STATE_RETRYING,
-    STATE_RUNNING_TIER1,
     STATE_STOPPED,
 )
+from collectors.hardware import (
+    availability_records,
+    configured_candidates,
+    monitor_mode_interfaces,
+    package_available,
+    sort_wifi_interfaces,
+    wireless_interfaces,
+)
 from collectors.wifi import WiFiCollector
-from log_utils import read_jsonl_events
+from log_utils import now_epoch, read_jsonl_events
 
 
 class WiFiMonitorCollector(WiFiCollector):
     """On-demand monitor-mode Wi-Fi collector with channel hopping.
 
-    The normal Wi-Fi collector stays lightweight and can run managed fallback
-    scans. This collector assumes the user has already put a separate adapter
-    into monitor mode, then samples supported 2.4/5 GHz channels for raw
-    management frames such as probes, beacons, association attempts, and
-    deauth/disassoc traffic.
+    The normal Wi-Fi collector stays lightweight and uses managed AP scans.
+    This collector assumes the user has already put a separate adapter into
+    monitor mode, then samples supported 2.4/5 GHz channels for raw management
+    frames such as probes, beacons, association attempts, and deauth/disassoc
+    traffic.
     """
 
     config_key = "wifi_monitor"
     name = "Wi-Fi Monitor"
     tab_label = "Wi-Fi Monitor"
     required_hardware = "Wi-Fi adapter already in monitor mode"
+
+    @classmethod
+    def hardware_status(cls, config):
+        """Return monitor-mode interface and packet-capture dependency status."""
+        wireless = wireless_interfaces()
+        monitors = monitor_mode_interfaces()
+        interface = config.get("interface", "auto")
+        configured = configured_candidates(
+            config, "interfaces", extra_keys=("interface",)
+        )
+        if interface == "auto":
+            configured = [
+                item for item in configured if item and item != "auto"
+            ] or sort_wifi_interfaces(monitors, config)
+        return {
+            "iw": bool(shutil.which("iw")),
+            "airmon_ng": bool(shutil.which("airmon-ng")),
+            "scapy": package_available("scapy"),
+            "auto_start": config.get("auto_start", False),
+            "interface": interface,
+            "wireless_interfaces": wireless,
+            "monitor_interfaces": monitors,
+            "interfaces": availability_records(
+                configured,
+                monitors,
+                lambda name: name in monitors,
+            ),
+        }
 
     def __init__(self, config, bus):
         super().__init__(config, bus)
@@ -48,21 +85,19 @@ class WiFiMonitorCollector(WiFiCollector):
 
     def detect(self):
         """Report availability without starting sniffing or channel hopping."""
-        primary_ok, primary_detail = self.validate_tier(
-            "primary", "command -v iw >/dev/null 2>&1"
-        )
-        if not primary_ok:
+        if not shutil.which("iw"):
             self.active_hardware = None
             self.state = STATE_OFFLINE
-            self.warning = "Wi-Fi monitor validation failed: {}".format(
-                primary_detail
-            )
+            self.warning = "iw was not found in PATH."
             return False
         iface = self.select_monitor_interface()
         if not iface:
             self.active_hardware = None
             self.state = STATE_OFFLINE
-            self.warning = "No monitor-mode Wi-Fi interface found. Put a separate Wi-Fi adapter into monitor mode, then click Start."
+            self.warning = (
+                "No monitor-mode Wi-Fi interface found. Put a separate Wi-Fi "
+                "adapter into monitor mode, then click Start."
+            )
             return False
         self.active_hardware = iface
         self.state = STATE_STOPPED
@@ -75,7 +110,10 @@ class WiFiMonitorCollector(WiFiCollector):
         iface = self.select_monitor_interface()
         if not iface:
             self.state = STATE_OFFLINE
-            self.warning = "No monitor-mode Wi-Fi interface found. Put a separate Wi-Fi adapter into monitor mode, then click Start."
+            self.warning = (
+                "No monitor-mode Wi-Fi interface found. Put a separate Wi-Fi "
+                "adapter into monitor mode, then click Start."
+            )
             await self.emit(
                 "collector_offline", {"reason": self.warning}, "warning"
             )
@@ -94,15 +132,18 @@ class WiFiMonitorCollector(WiFiCollector):
             return
 
         self.active_hardware = iface
-        self.state = STATE_RUNNING_TIER1
+        self.state = STATE_ONLINE
         self.warning = None
         self.ensure_interface_up(iface)
         self._supported_channels = self.supported_channels_by_band()
         self._channel_plan = self.build_channel_plan()
         if not self._channel_plan:
             self.state = STATE_OFFLINE
-            self.warning = "No supported 2.4 GHz or 5 GHz channels were discovered for {}.".format(
-                iface
+            self.warning = (
+                "No supported 2.4 GHz or 5 GHz channels were discovered for "
+                "{}."
+            ).format(
+                iface,
             )
             await self.emit(
                 "collector_offline", {"reason": self.warning}, "warning"
@@ -125,7 +166,8 @@ class WiFiMonitorCollector(WiFiCollector):
             """Convert raw 802.11 management frames into Skannr events."""
             if not self._running or not packet.haslayer(Dot11):
                 return
-            timestamp = local_now()
+            timestamp_epoch = now_epoch()
+            timestamp = local_now(timestamp_epoch)
             dot11 = packet.getlayer(Dot11)
             rssi = getattr(packet, "dBm_AntSignal", None)
             channel = (
@@ -146,6 +188,7 @@ class WiFiMonitorCollector(WiFiCollector):
                     "rssi": rssi,
                     "channel": channel,
                     "timestamp": timestamp,
+                    "timestamp_epoch": timestamp_epoch,
                     "monitor_interface": iface,
                 }
                 asyncio.run_coroutine_threadsafe(
@@ -164,6 +207,7 @@ class WiFiMonitorCollector(WiFiCollector):
                     "encryption": self.get_encryption(packet),
                     "rssi": rssi,
                     "timestamp": timestamp,
+                    "timestamp_epoch": timestamp_epoch,
                     "monitor_interface": iface,
                 }
                 asyncio.run_coroutine_threadsafe(
@@ -173,21 +217,21 @@ class WiFiMonitorCollector(WiFiCollector):
                 # Association/reassociation requests show client/AP activity but
                 # usually do not include a stable SSID.
                 payload = self.client_ap_payload(
-                    dot11, rssi, channel, timestamp, iface
+                    dot11, rssi, channel, timestamp, timestamp_epoch, iface
                 )
                 asyncio.run_coroutine_threadsafe(
                     self.emit("association_seen", payload), loop
                 )
             elif dot11.subtype == 10:
                 payload = self.client_ap_payload(
-                    dot11, rssi, channel, timestamp, iface
+                    dot11, rssi, channel, timestamp, timestamp_epoch, iface
                 )
                 asyncio.run_coroutine_threadsafe(
                     self.emit("disassoc_seen", payload), loop
                 )
             elif dot11.subtype == 12:
                 payload = self.client_ap_payload(
-                    dot11, rssi, channel, timestamp, iface
+                    dot11, rssi, channel, timestamp, timestamp_epoch, iface
                 )
                 asyncio.run_coroutine_threadsafe(
                     self.emit("deauth_seen", payload), loop
@@ -286,18 +330,16 @@ class WiFiMonitorCollector(WiFiCollector):
         return False
 
     def select_monitor_interface(self):
-        """Return the first configured or discovered monitor-mode interface."""
-        configured = self.config.get("interfaces") or []
-        if isinstance(configured, str):
-            configured = [configured]
+        """Return the best configured or discovered monitor-mode interface."""
+        configured = configured_candidates(
+            self.config, "interfaces", extra_keys=("interface",)
+        )
         discovered = self.monitor_interfaces()
         for iface in configured:
             if iface in discovered:
                 return iface
-        preferred = self.config.get("interface")
-        if preferred and preferred != "auto" and preferred in discovered:
-            return preferred
-        return discovered[0] if discovered else None
+        ranked = sort_wifi_interfaces(discovered, self.config)
+        return ranked[0] if ranked else None
 
     def monitor_interfaces(self):
         """Parse 'iw dev' and return interfaces whose type is monitor."""
@@ -483,7 +525,9 @@ class WiFiMonitorCollector(WiFiCollector):
             return channel
         return self._current_channel
 
-    def client_ap_payload(self, dot11, rssi, channel, timestamp, iface):
+    def client_ap_payload(
+        self, dot11, rssi, channel, timestamp, timestamp_epoch, iface
+    ):
         """Build common client/AP event payload for management frames."""
         return {
             "client_mac": dot11.addr2,
@@ -491,6 +535,7 @@ class WiFiMonitorCollector(WiFiCollector):
             "rssi": rssi,
             "channel": channel,
             "timestamp": timestamp,
+            "timestamp_epoch": timestamp_epoch,
             "monitor_interface": iface,
         }
 

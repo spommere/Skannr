@@ -14,10 +14,17 @@ from bus import local_now
 from collectors.base import (
     BaseCollector,
     STATE_OFFLINE,
+    STATE_ONLINE,
     STATE_RETRYING,
-    STATE_RUNNING_TIER1,
-    STATE_RUNNING_TIER2,
 )
+from collectors.hardware import (
+    availability_records,
+    configured_candidates,
+    network_interface_exists,
+    sort_wifi_interfaces,
+    wireless_interfaces,
+)
+from log_utils import now_epoch
 from oui_lookup import normalize_oui, vendor_name, vendor_prefix
 
 
@@ -34,43 +41,43 @@ class WiFiCollector(BaseCollector):
     tab_label = "Wi-Fi Scan"
     required_hardware = "Wi-Fi interface for managed AP scans"
 
+    @classmethod
+    def hardware_status(cls, config):
+        """Return managed Wi-Fi interface and scanner executable status."""
+        discovered = wireless_interfaces()
+        configured = configured_candidates(config, "interfaces") or discovered
+        return {
+            "interfaces": availability_records(
+                configured, discovered, network_interface_exists
+            ),
+            "iw": bool(shutil.which("iw")),
+            "iwlist": bool(shutil.which("iwlist")),
+        }
+
     def interface_exists(self, interface):
         """Check whether the configured Linux network interface exists."""
         return os.path.exists(os.path.join("/sys/class/net", interface))
 
     def detect(self):
-        """Select preferred Wi-Fi interface first, then configured fallback."""
-        preferred = self.config.get("preferred_interface", "wlan1")
-        fallback = self.config.get("fallback_interface", "wlan0")
-        primary_default = "test -d /sys/class/net/{} && (command -v iw >/dev/null 2>&1 || command -v iwlist >/dev/null 2>&1)".format(
-            preferred
-        )
-        fallback_default = "test -d /sys/class/net/{} && (command -v iw >/dev/null 2>&1 || command -v iwlist >/dev/null 2>&1)".format(
-            fallback
-        )
-        primary_ok, primary_detail = self.validate_tier(
-            "primary", primary_default
-        )
-        if primary_ok:
-            self.active_hardware = preferred
-            self.state = STATE_RUNNING_TIER1
-            self.warning = None
-            return True
-        fallback_ok, fallback_detail = self.validate_tier(
-            "fallback", fallback_default
-        )
-        if fallback_ok:
-            self.active_hardware = fallback
-            self.state = STATE_RUNNING_TIER2
-            self.warning = "Using fallback Wi-Fi scan interface {}. Primary validation failed: {}".format(
-                fallback, primary_detail
-            )
-            return True
+        """Select the best available managed Wi-Fi interface."""
+        if not shutil.which("iw") and not shutil.which("iwlist"):
+            self.active_hardware = None
+            self.state = STATE_OFFLINE
+            self.warning = "Neither iw nor iwlist was found in PATH."
+            return False
+
+        discovered = wireless_interfaces()
+        configured = configured_candidates(self.config, "interfaces")
+        candidates = configured or sort_wifi_interfaces(discovered, self.config)
+        for interface in candidates:
+            if interface in discovered or self.interface_exists(interface):
+                self.active_hardware = interface
+                self.state = STATE_ONLINE
+                self.warning = None
+                return True
         self.active_hardware = None
         self.state = STATE_OFFLINE
-        self.warning = "No usable Wi-Fi interface. Primary validation: {}; fallback validation: {}".format(
-            primary_detail, fallback_detail
-        )
+        self.warning = "No usable Wi-Fi interface found."
         return False
 
     async def start(self):
@@ -100,7 +107,10 @@ class WiFiCollector(BaseCollector):
             {
                 "interface": iface,
                 "method": "iw/iwlist",
-                "note": "Managed scan lists visible AP SSIDs but does not capture probe requests.",
+                "note": (
+                    "Managed scan lists visible AP SSIDs but does not capture "
+                    "probe requests."
+                ),
             },
         )
         while self._running:
@@ -243,13 +253,15 @@ class WiFiCollector(BaseCollector):
                 # A BSS line starts a new AP block. Flush the previous AP first.
                 if current:
                     networks.append(current)
+                timestamp_epoch = now_epoch()
                 current = {
                     "bssid": match.group(1).lower(),
                     "ssid": "",
                     "channel": None,
                     "encryption": "open",
                     "rssi": None,
-                    "timestamp": local_now(),
+                    "timestamp": local_now(timestamp_epoch),
+                    "timestamp_epoch": timestamp_epoch,
                     "scan_tool": "iw",
                 }
                 current["vendor_oui"] = self.vendor_for(current["bssid"])
@@ -306,13 +318,15 @@ class WiFiCollector(BaseCollector):
                 # Each Cell block corresponds to one visible access point.
                 if current:
                     networks.append(current)
+                timestamp_epoch = now_epoch()
                 current = {
                     "bssid": match.group(1).lower(),
                     "ssid": "",
                     "channel": None,
                     "encryption": "open",
                     "rssi": None,
-                    "timestamp": local_now(),
+                    "timestamp": local_now(timestamp_epoch),
+                    "timestamp_epoch": timestamp_epoch,
                     "scan_tool": "iwlist",
                 }
                 current["vendor_oui"] = self.vendor_for(current["bssid"])

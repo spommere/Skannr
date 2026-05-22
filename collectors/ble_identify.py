@@ -12,13 +12,13 @@ from collectors.base import STATE_OFFLINE, STATE_STOPPED
 
 
 DIS_CHARACTERISTICS = {
-    # Serial Number is intentionally omitted. Manufacturer/model/firmware are
-    # usually enough to identify a device without collecting unique serials.
     "manufacturer_name": "00002a29-0000-1000-8000-00805f9b34fb",
     "model_number": "00002a24-0000-1000-8000-00805f9b34fb",
+    "serial_number": "00002a25-0000-1000-8000-00805f9b34fb",
     "firmware_revision": "00002a26-0000-1000-8000-00805f9b34fb",
     "hardware_revision": "00002a27-0000-1000-8000-00805f9b34fb",
     "software_revision": "00002a28-0000-1000-8000-00805f9b34fb",
+    "pnp_id": "00002a50-0000-1000-8000-00805f9b34fb",
 }
 
 
@@ -27,7 +27,7 @@ class BLEIdentifyCollector(BLECollector):
 
     This collector is deliberately separate from passive BLE Scan. It makes an
     active GATT connection only when the user requests identification for one
-    MAC address, then reads non-sensitive Device Information Service fields.
+    MAC address, then reads selected Device Information Service fields.
     """
 
     config_key = "ble_identify"
@@ -162,7 +162,7 @@ class BLEIdentifyCollector(BLECollector):
             return client_cls(mac, timeout=timeout)
 
     async def read_device_information(self, client):
-        """Read non-sensitive DIS strings; do not read serial number."""
+        """Read the selected DIS strings exposed by the device."""
         fields = {}
         for name, uuid in DIS_CHARACTERISTICS.items():
             fields[name] = await self.read_string_characteristic(client, uuid)

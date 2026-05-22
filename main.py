@@ -20,8 +20,8 @@ from collections import deque
 from flask import Flask, Response, make_response, request, send_from_directory
 from flask_socketio import SocketIO
 
-from bus import EventBus, utc_now
-from collectors import load_collectors
+from bus import EventBus, local_now
+from collectors import load_actions, load_collectors
 from collectors.metadata import (
     browser_source_groups,
     browser_subtabs,
@@ -37,10 +37,11 @@ from log_utils import (
     current_jsonl_checkpoint,
     event_in_window,
     has_jsonl_checkpoint,
+    now_epoch,
+    record_time_epoch,
     read_incremental_jsonl_events,
     read_jsonl_events,
     resolve_window_days as resolve_log_window_days,
-    utc_epoch,
     view_window_options,
     window_metadata,
 )
@@ -75,6 +76,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 runtime = {
     "bus": None,
     "collectors": [],
+    "actions": {},
     "tasks": [],
     "loop": None,
     "config": None,
@@ -129,7 +131,7 @@ def events():
         "skannr_event",
         {
             "collector": "system",
-            "timestamp": utc_now(),
+            "timestamp_epoch": now_epoch(),
             "type": "browser_connected",
             "severity": "info",
             "data": {"message": "Browser connection established"},
@@ -174,15 +176,15 @@ def ble_identify():
     mac = payload.get("mac")
     timeout = payload.get("timeout_sec")
     loop = runtime.get("loop")
-    collector = collector_by_key("ble_identify")
-    if not loop or not collector:
+    action = action_by_key("ble_identify")
+    if not loop or not action:
         return {
             "ok": False,
-            "error": "BLE Identify collector is not available",
+            "error": "BLE Identify action is not available",
         }, 503
     if not mac:
         return {"ok": False, "error": "Missing BLE MAC address"}, 400
-    asyncio.run_coroutine_threadsafe(collector.identify(mac, timeout), loop)
+    asyncio.run_coroutine_threadsafe(action.identify(mac, timeout), loop)
     return {"ok": True}
 
 
@@ -347,7 +349,7 @@ def on_connect():
         "skannr_event",
         {
             "collector": "system",
-            "timestamp": utc_now(),
+            "timestamp_epoch": now_epoch(),
             "type": "browser_connected",
             "severity": "info",
             "data": {"message": "Browser connection established"},
@@ -375,6 +377,11 @@ def collector_by_key(key):
         if collector.config_key == key:
             return collector
     return None
+
+
+def action_by_key(key):
+    """Return an on-demand action object for an action key."""
+    return (runtime.get("actions") or {}).get(key)
 
 
 def format_sse(name, payload):
@@ -435,6 +442,7 @@ async def consume_events(bus):
                 "type": "finding",
                 "severity": finding["severity"],
                 "timestamp": finding["timestamp"],
+                "timestamp_epoch": finding.get("timestamp_epoch"),
                 "data": finding,
             }
             if persistence:
@@ -455,6 +463,7 @@ async def start_collectors(config, bus):
     loop = asyncio.get_event_loop()
     collectors = load_collectors(config, bus)
     runtime["collectors"] = collectors
+    runtime["actions"] = load_actions(config, bus)
     for collector in collectors:
         auto_start = bool(collector.config.get("auto_start", True))
         if not auto_start:
@@ -463,7 +472,7 @@ async def start_collectors(config, bus):
             # the user clicks Start.
             try:
                 collector.detect()
-                if str(collector.state).startswith("RUNNING"):
+                if collector.state == "ONLINE":
                     collector.state = "STOPPED"
             except Exception as exc:
                 collector.state = "OFFLINE"
@@ -496,7 +505,7 @@ async def start_collectors(config, bus):
             "severity": "info",
             "data": {
                 "message": "Skannr event bus is online",
-                "timestamp": utc_now(),
+                "timestamp_epoch": now_epoch(),
             },
         }
     )
@@ -598,6 +607,7 @@ def bootstrap_findings():
                     "type": "finding",
                     "severity": summary["severity"],
                     "timestamp": summary["timestamp"],
+                    "timestamp_epoch": summary.get("timestamp_epoch"),
                     "data": summary,
                 }
             )
@@ -667,14 +677,16 @@ def read_findings_history(window_days):
     for event in read_jsonl_events(log_dir, "findings", window_days):
         records_read += 1
         if event.get("type") == "finding" and event.get("data"):
-            findings.append(normalize_finding_source(event["data"]))
+            findings.append(event["data"])
     findings.sort(
-        key=lambda item: utc_epoch(item.get("timestamp")) or 0, reverse=True
+        key=lambda item: record_time_epoch(item, "timestamp") or 0,
+        reverse=True,
     )
-    generated_at = utc_now()
+    generated_at_epoch = now_epoch()
+    generated_at = local_now(generated_at_epoch)
     return {
         "generated_at": generated_at,
-        "generated_at_epoch": time.time(),
+        "generated_at_epoch": generated_at_epoch,
         "window": view_window_metadata(window_days),
         "files_read": files_read,
         "records_read": records_read,
@@ -708,7 +720,9 @@ def refresh_findings_history(window_days):
         summary["checkpoint"] = current_jsonl_checkpoint(
             configured_log_dir(), ("findings",)
         )
-        summary["generated_at"] = utc_now()
+        generated_at_epoch = now_epoch()
+        summary["generated_at"] = local_now(generated_at_epoch)
+        summary["generated_at_epoch"] = generated_at_epoch
         summary["incremental_records_read"] = 0
     else:
         summary = build_findings_summary()
@@ -724,13 +738,15 @@ def build_findings_summary():
     for event in read_jsonl_events(log_dir, "findings", None):
         records_read += 1
         if event.get("type") == "finding" and event.get("data"):
-            findings.append(normalize_finding_source(event["data"]))
+            findings.append(event["data"])
     findings.sort(
-        key=lambda item: utc_epoch(item.get("timestamp")) or 0, reverse=True
+        key=lambda item: record_time_epoch(item, "timestamp") or 0,
+        reverse=True,
     )
+    generated_at_epoch = now_epoch()
     return {
-        "generated_at": utc_now(),
-        "generated_at_epoch": time.time(),
+        "generated_at": local_now(generated_at_epoch),
+        "generated_at_epoch": generated_at_epoch,
         "window": view_window_metadata(None),
         "state_path": findings_history_path(),
         "files_read": count_jsonl_files(log_dir, "findings"),
@@ -753,14 +769,16 @@ def update_findings_summary(previous):
     ):
         records_read += 1
         if event.get("type") == "finding" and event.get("data"):
-            findings.append(normalize_finding_source(event["data"]))
+            findings.append(event["data"])
     findings.sort(
-        key=lambda item: utc_epoch(item.get("timestamp")) or 0, reverse=True
+        key=lambda item: record_time_epoch(item, "timestamp") or 0,
+        reverse=True,
     )
+    generated_at_epoch = now_epoch()
     summary.update(
         {
-            "generated_at": utc_now(),
-            "generated_at_epoch": time.time(),
+            "generated_at": local_now(generated_at_epoch),
+            "generated_at_epoch": generated_at_epoch,
             "window": view_window_metadata(None),
             "state_path": findings_history_path(),
             "files_read": count_jsonl_files(configured_log_dir(), "findings"),
@@ -785,16 +803,106 @@ def display_findings_summary(summary, window_days):
             item
             for item in findings
             if event_in_window(
-                {"timestamp": item.get("timestamp"), "data": item}, window_days
+                {
+                    "timestamp": item.get("timestamp"),
+                    "timestamp_epoch": item.get("timestamp_epoch"),
+                    "data": item,
+                },
+                window_days,
             )
         ]
+    findings = filter_insight_recent_records(findings, use_last_seen=False)
     output["findings"] = findings
     output["window"] = view_window_metadata(window_days)
+    output["insights_window"] = insights_recent_window_metadata()
     output["materialized_window"] = (summary or {}).get(
         "window"
     ) or view_window_metadata(None)
     output["counts"] = count_findings(findings)
     return output
+
+
+def display_history_analysis(analysis, window_days):
+    """Return the browser-facing recent-event slice of history analysis.
+
+    HistoryAnalyzer persists all observations for the selected View window so a
+    later configuration change can expose more or less history without another
+    raw-log scan. The Insights tab, however, is a tactical event feed. It shows
+    only observations whose actual device activity is recent enough.
+    """
+    output = dict(analysis or {})
+    observations = list(output.get("observations") or [])
+    observations = filter_insight_recent_records(
+        observations, use_last_seen=True
+    )
+    output["observations"] = observations
+    output["window"] = view_window_metadata(window_days)
+    output["insights_window"] = insights_recent_window_metadata()
+    output["counts"] = count_observations(observations)
+    return output
+
+
+def filter_insight_recent_records(records, use_last_seen=True):
+    """Keep records that belong in the Insights recent event feed.
+
+    Findings are already point-in-time events, so their event timestamp is the
+    right cutoff field. History observations are regenerated on refresh and use
+    refresh time as their row timestamp; for those rows, last_seen_epoch is the
+    real activity time and prevents old behavior from reappearing as "new" just
+    because the analysis was rebuilt.
+    """
+    cutoff = insights_recent_cutoff_epoch()
+    if cutoff is None:
+        return list(records or [])
+    return [
+        item
+        for item in records or []
+        if record_is_recent_insight(item, use_last_seen, cutoff)
+    ]
+
+
+def record_is_recent_insight(record, use_last_seen, cutoff):
+    """Return True when a finding/observation is inside the Insights window."""
+    epoch = insight_activity_epoch(record, use_last_seen)
+    return epoch is not None and epoch >= cutoff
+
+
+def insight_activity_epoch(record, use_last_seen=True):
+    """Return the epoch used to decide whether an Insight row is recent."""
+    if use_last_seen:
+        epoch = record_time_epoch(record, "last_seen")
+        if epoch is not None:
+            return epoch
+    return record_time_epoch(record, "timestamp")
+
+
+def insights_recent_cutoff_epoch():
+    """Return the configured Insights cutoff epoch, or None for no cutoff."""
+    config = runtime.get("config") or {}
+    analysis_config = config.get("history_analysis") or {}
+    hours = analysis_config.get("insights_recent_hours", 6)
+    try:
+        hours = float(hours)
+    except (TypeError, ValueError):
+        hours = 6
+    if hours <= 0:
+        return None
+    return now_epoch() - int(hours * 3600)
+
+
+def insights_recent_window_metadata():
+    """Describe the short tactical window used by the Insights tab."""
+    config = runtime.get("config") or {}
+    analysis_config = config.get("history_analysis") or {}
+    hours = analysis_config.get("insights_recent_hours", 6)
+    try:
+        hours = float(hours)
+    except (TypeError, ValueError):
+        hours = 6
+    if hours <= 0:
+        return {"hours": None, "label": "All insight events"}
+    label = int(hours) if float(hours).is_integer() else hours
+    return {"hours": hours, "label": "Recent {} hours".format(label)}
 
 
 def count_findings(findings):
@@ -837,8 +945,8 @@ def build_derived_views(window_days="default", force=False):
             "history_analysis", load_cached_history_analysis, window_days
         )
         cached_derived_view("reports", load_cached_reports, window_days)
-    generated_at = utc_now()
-    generated_at_epoch = time.time()
+    generated_at_epoch = now_epoch()
+    generated_at = local_now(generated_at_epoch)
     return {
         "generated_at": generated_at,
         "generated_at_epoch": generated_at_epoch,
@@ -866,35 +974,6 @@ def add_refresh_metadata(summary, refreshed_at, refreshed_at_epoch):
     copy["refreshed_at"] = refreshed_at
     copy["refreshed_at_epoch"] = refreshed_at_epoch
     return copy
-
-
-def normalize_finding_source(finding):
-    """Map old system lifecycle findings back to their collector source.
-
-    Older persisted findings recorded collector state changes as source=system
-    even though their key already named the collector. Normalize on read so old
-    rows appear under the same collector subtab as newly generated rows.
-    """
-    finding = dict(finding or {})
-    if finding.get("source") != "system":
-        return finding
-    if finding.get("type") not in (
-        "collector_offline",
-        "collector_retrying",
-        "collector_stopped",
-    ):
-        return finding
-    known = set(
-        collector_keys(runtime.get("config") or {}, include_system=False)
-    )
-    attributes = finding.get("attributes") or {}
-    source = attributes.get("collector")
-    if not source:
-        key = str(finding.get("key") or "")
-        source = key.rsplit(":", 1)[-1] if ":" in key else ""
-    if source in known:
-        finding["source"] = source
-    return finding
 
 
 def device_history_path():
@@ -950,12 +1029,14 @@ def load_cached_findings_history(window_days):
 
 def empty_findings_history(window_days):
     """Return a browser-ready empty Findings summary when no cache exists."""
+    generated_at_epoch = now_epoch()
     return {
-        "generated_at": utc_now(),
-        "generated_at_epoch": time.time(),
+        "generated_at": local_now(generated_at_epoch),
+        "generated_at_epoch": generated_at_epoch,
         "cached": True,
         "empty": True,
         "window": view_window_metadata(window_days),
+        "insights_window": insights_recent_window_metadata(),
         "state_path": findings_history_path(),
         "files_read": 0,
         "records_read": 0,
@@ -969,7 +1050,10 @@ def load_cached_device_history(window_days):
     summary = read_json_file(device_history_path())
     if isinstance(summary, dict):
         summary.setdefault("window", view_window_metadata(None))
-        summary.setdefault("generated_at", utc_now())
+        summary.setdefault("generated_at_epoch", now_epoch())
+        summary.setdefault(
+            "generated_at", local_now(summary["generated_at_epoch"])
+        )
         output = DeviceHistoryBuilder(
             configured_log_dir(),
             state_path=device_history_path(),
@@ -982,8 +1066,10 @@ def load_cached_device_history(window_days):
 
 def empty_device_history(window_days):
     """Return a browser-ready Device History summary when no cache exists."""
+    generated_at_epoch = now_epoch()
     return {
-        "generated_at": utc_now(),
+        "generated_at": local_now(generated_at_epoch),
+        "generated_at_epoch": generated_at_epoch,
         "cached": True,
         "empty": True,
         "log_dir": configured_log_dir(),
@@ -1002,7 +1088,10 @@ def load_cached_history_analysis(window_days):
     analysis = read_json_file(history_analysis_path())
     if isinstance(analysis, dict):
         analysis.setdefault("window", view_window_metadata(None))
-        analysis.setdefault("generated_at", utc_now())
+        analysis.setdefault("generated_at_epoch", now_epoch())
+        analysis.setdefault(
+            "generated_at", local_now(analysis["generated_at_epoch"])
+        )
         analysis.setdefault("observations", [])
         analysis.setdefault(
             "counts", count_observations(analysis.get("observations") or [])
@@ -1013,17 +1102,20 @@ def load_cached_history_analysis(window_days):
             empty["cached_window"] = analysis.get("window")
             empty["empty_reason"] = "Refresh insights for this view window"
             return empty
-        return analysis
+        return display_history_analysis(analysis, window_days)
     return empty_history_analysis(window_days)
 
 
 def empty_history_analysis(window_days):
     """Return an empty analysis snapshot when no persisted analysis exists."""
+    generated_at_epoch = now_epoch()
     return {
-        "generated_at": utc_now(),
+        "generated_at": local_now(generated_at_epoch),
+        "generated_at_epoch": generated_at_epoch,
         "cached": True,
         "empty": True,
         "window": view_window_metadata(window_days),
+        "insights_window": insights_recent_window_metadata(),
         "state_path": history_analysis_path(),
         "observations": [],
         "counts": {"total": 0, "warning": 0, "info": 0},
@@ -1035,7 +1127,10 @@ def load_cached_reports(window_days):
     reports = read_json_file(reports_path())
     if isinstance(reports, dict):
         reports.setdefault("window", view_window_metadata(None))
-        reports.setdefault("generated_at", utc_now())
+        reports.setdefault("generated_at_epoch", now_epoch())
+        reports.setdefault(
+            "generated_at", local_now(reports["generated_at_epoch"])
+        )
         reports.setdefault("reports", [])
         reports.setdefault(
             "counts", count_reports(reports.get("reports") or [])
@@ -1052,8 +1147,10 @@ def load_cached_reports(window_days):
 
 def empty_reports(window_days):
     """Return an empty report bundle when no generated report exists."""
+    generated_at_epoch = now_epoch()
     return {
-        "generated_at": utc_now(),
+        "generated_at": local_now(generated_at_epoch),
+        "generated_at_epoch": generated_at_epoch,
         "cached": True,
         "empty": True,
         "window": view_window_metadata(window_days),
@@ -1109,8 +1206,10 @@ def refresh_history_analysis(window_days="default"):
         # the current cached history belongs to another View window.
         history = refresh_device_history(window_days, update_analysis=False)
     if history is None:
+        generated_at_epoch = now_epoch()
         return {
-            "generated_at": utc_now(),
+            "generated_at": local_now(generated_at_epoch),
+            "generated_at_epoch": generated_at_epoch,
             "observations": [],
             "counts": {"total": 0, "warning": 0, "info": 0},
         }
@@ -1118,6 +1217,7 @@ def refresh_history_analysis(window_days="default"):
     analyzer = HistoryAnalyzer(config.get("history_analysis", {}))
     analysis = analyzer.analyze(history)
     analysis["window"] = view_window_metadata(window_days)
+    analysis["insights_window"] = insights_recent_window_metadata()
     state_path = history.get("state_path") or os.path.join(
         "logs", "device_history", "device_history.json"
     )
@@ -1129,8 +1229,10 @@ def refresh_history_analysis(window_days="default"):
         save_analysis(analysis_path, analysis)
     except OSError as exc:
         logging.exception("failed to persist history analysis: %s", exc)
-    runtime["history_analysis"] = analysis
-    return analysis
+    runtime["history_analysis"] = display_history_analysis(
+        analysis, window_days
+    )
+    return runtime["history_analysis"]
 
 
 def refresh_reports(window_days="default"):
@@ -1230,9 +1332,6 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Skannr monitoring dashboard")
     project_dir = os.path.dirname(os.path.abspath(__file__))
     default_config = os.path.join(project_dir, "skannr.yaml")
-    legacy_config = os.path.join(project_dir, "spectra.yaml")
-    if not os.path.exists(default_config) and os.path.exists(legacy_config):
-        default_config = legacy_config
     parser.add_argument(
         "--config", default=default_config, help="Path to skannr.yaml"
     )

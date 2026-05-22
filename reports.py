@@ -9,10 +9,16 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 import json
 import os
-import time
 
-from bus import utc_now
-from log_utils import utc_epoch, window_metadata, window_since_epoch
+from bus import local_now
+from log_utils import (
+    format_epoch,
+    now_epoch,
+    record_time_epoch,
+    timestamp_epoch,
+    window_metadata,
+    window_since_epoch,
+)
 
 
 DEFAULT_REPORT_CONFIG = {
@@ -40,10 +46,13 @@ class ReportsBuilder:
         self.config.update(config or {})
         self.window_days = window_days
         self._counter = 0
+        self._generated_at_epoch = None
 
     def build(self, history):
         """Return a report bundle for Bluetooth, Wi-Fi scan, and monitor data."""
-        generated_at = utc_now()
+        generated_at_epoch = now_epoch()
+        self._generated_at_epoch = generated_at_epoch
+        generated_at = local_now(generated_at_epoch)
         # Reports never read raw JSONL directly. The Refresh path in main.py
         # first updates Device History, then hands the summary to this builder.
         wifi = (history or {}).get("wifi") or {}
@@ -64,12 +73,13 @@ class ReportsBuilder:
             key=lambda item: (
                 self.severity_rank(item["severity"]),
                 item.get("score", 0),
-                item.get("last_seen") or "",
+                item.get("last_seen_epoch") or 0,
             ),
             reverse=True,
         )
         return {
             "generated_at": generated_at,
+            "generated_at_epoch": generated_at_epoch,
             "history_generated_at": (history or {}).get("generated_at"),
             "window": window_metadata(self.window_days),
             "reports": reports,
@@ -77,7 +87,7 @@ class ReportsBuilder:
         }
 
     def ble_reports(self, devices, timestamp):
-        """Summarize recurring, long, strong, and new Bluetooth presence."""
+        """Summarize Bluetooth presence as one profile row per device/cluster."""
         reports = []
         contexts = [self.ble_context(device) for device in devices]
         private_groups = defaultdict(list)
@@ -106,7 +116,6 @@ class ReportsBuilder:
         for context in contexts:
             device = context["device"]
             mac = context["mac"]
-            label = context["label"]
             sessions = context["sessions"]
             days = context["days"]
             hours = context["hours"]
@@ -114,98 +123,128 @@ class ReportsBuilder:
             longest = context["longest"]
             signal_max = context["signal_max"]
             spans = context["presence_spans"]
-            evidence = self.ble_evidence(
-                device,
-                sessions,
-                days,
-                hours,
-                start_hours,
-                spans,
-            )
             private_grouped = mac in grouped_private_macs
+            finding_labels = []
 
             if sessions and len(days) >= int(
                 self.config["ble_recurring_min_days"]
             ):
-                # This summarizes repeated presence by day/hour, which is more
-                # useful for longitudinal review than a fast-scrolling insight.
-                hour_text = self.common_hour_text(hours)
-                reports.append(
-                    self.report(
-                        timestamp,
-                        "info",
-                        "bluetooth",
-                        "ble_recurring_presence",
-                        "Recurring Bluetooth presence",
-                        "{} was present on {} day(s), most often during {}".format(
-                            label, len(days), hour_text
-                        ),
-                        evidence,
-                        65 + min(len(days), 14),
-                        device.get("last_seen"),
-                    )
-                )
+                finding_labels.append("Recurring presence")
 
             if longest >= float(self.config["ble_long_presence_sec"]):
-                reports.append(
-                    self.report(
-                        timestamp,
-                        "warning",
-                        "bluetooth",
-                        "ble_long_presence",
-                        "Long Bluetooth presence",
-                        "{} stayed nearby for about {}".format(
-                            label, self.duration_text(longest)
-                        ),
-                        evidence,
-                        82,
-                        device.get("last_seen"),
-                    )
-                )
+                finding_labels.append("Long presence")
 
             if (
                 not private_grouped
                 and signal_max is not None
                 and signal_max >= float(self.config["ble_strong_rssi"])
             ):
-                # Avoid separate strong-signal rows for addresses already folded
-                # into a randomized/private-address cluster.
-                reports.append(
-                    self.report(
-                        timestamp,
-                        "info",
-                        "bluetooth",
-                        "ble_strong_presence",
-                        "Strong Bluetooth signal in report window",
-                        "{} reached {} dBm".format(label, int(signal_max)),
-                        evidence,
-                        55,
-                        device.get("last_seen"),
-                    )
-                )
+                finding_labels.append("Strong nearby signal")
 
             if (
                 self.is_new_recent(device, timestamp)
+                and not private_grouped
                 and not context["private_candidate"]
             ):
-                # New private/randomized addresses are noisy, so only named or
-                # static-looking devices get individual "new" report rows.
-                reports.append(
-                    self.report(
-                        timestamp,
-                        "info",
-                        "bluetooth",
-                        "ble_new_recent",
-                        "New named/static Bluetooth device",
-                        "{} was first seen recently at {}".format(
-                            label, device.get("first_seen") or "unknown time"
-                        ),
-                        evidence,
-                        58,
-                        device.get("last_seen"),
-                    )
+                finding_labels.append("New named/static device")
+            if not finding_labels:
+                continue
+
+            score = self.score_ble_profile(context, finding_labels)
+            severity = self.severity_for_score(score)
+            evidence = self.with_evidence(
+                self.ble_evidence(
+                    device,
+                    sessions,
+                    days,
+                    hours,
+                    start_hours,
+                    spans,
+                ),
+                {
+                    "findings": finding_labels,
+                    "longest_session_sec": int(longest),
+                },
+            )
+            reports.append(
+                self.report(
+                    timestamp,
+                    severity,
+                    "bluetooth",
+                    "ble_device_profile",
+                    "Bluetooth device profile",
+                    self.ble_profile_summary(context, finding_labels),
+                    evidence,
+                    score,
+                    device.get("last_seen"),
+                    subject=self.bluetooth_subject(device, mac),
                 )
+            )
         return reports
+
+    def score_ble_profile(self, context, finding_labels):
+        """Return 0-100 attention score for one stable Bluetooth profile.
+
+        Score is an "operator attention" rank, not a probability that the
+        device is malicious. BLE profiles become more important when a device
+        stays nearby for a long time, repeats across days, follows a predictable
+        schedule, is still active, is physically close by RSSI, or is newly seen.
+        The weights are additive so combined weak signals can outrank a single
+        low-value rule, while the final cap keeps the scale readable.
+        """
+        score = 0
+        longest = float(context.get("longest") or 0)
+        days_seen = len(context.get("days") or [])
+        signal_max = context.get("signal_max")
+        active = bool((context.get("device") or {}).get("active_session"))
+
+        # Duration is the strongest BLE signal because a long nearby presence is
+        # usually more actionable than a brief advertisement burst.
+        if longest >= 8 * 3600:
+            score += 50
+        elif longest >= 4 * 3600:
+            score += 40
+        elif longest >= float(self.config["ble_long_presence_sec"]):
+            score += 25
+
+        # Recurrence matters, but less than duration: repeated days suggest a
+        # pattern worth reviewing even when each individual visit is short.
+        if days_seen >= 5:
+            score += 35
+        elif days_seen >= 3:
+            score += 25
+        elif days_seen >= int(self.config["ble_recurring_min_days"]):
+            score += 15
+
+        # Stable start/activity windows make the row more intelligence-like:
+        # "shows up around this time" is more useful than just "seen before".
+        if days_seen >= int(self.config["ble_recurring_min_days"]):
+            if context.get("start_hours"):
+                score += 10
+            if context.get("hours"):
+                score += 10
+
+        # Active devices should float up because the operator can still act on
+        # them now, while stale rows can stay lower unless other factors matter.
+        if active:
+            score += 15
+
+        # RSSI is treated as proximity. Very strong BLE is rare enough to rank
+        # highly, but weak far-away devices should not dominate the report.
+        if signal_max is not None:
+            if signal_max >= -45:
+                score += 30
+            elif signal_max >= -55:
+                score += 20
+            elif signal_max >= -70:
+                score += 10
+
+        # A new named/static device gets attention because it is more likely to
+        # represent one physical device than an unnamed private address.
+        if "New named/static device" in finding_labels:
+            score += 30
+
+        return min(score, 100)
 
     def ble_context(self, device):
         """Precompute Bluetooth fields used by several report policies."""
@@ -214,7 +253,7 @@ class ReportsBuilder:
         days = self.presence_days(sessions)
         hours = self.session_hour_counts(sessions)
         start_hours = self.hour_counts(
-            [session.get("start") for session in sessions]
+            [record_time_epoch(session, "start") for session in sessions]
         )
         longest = max(
             [float(session.get("duration_sec") or 0) for session in sessions]
@@ -244,6 +283,73 @@ class ReportsBuilder:
             ),
         }
 
+    def ble_profile_summary(self, context, finding_labels):
+        """Return a readable one-line summary for a stable BLE device."""
+        parts = []
+        longest = float(context.get("longest") or 0)
+        signal_max = context.get("signal_max")
+        sessions = context.get("sessions") or []
+        active = bool((context.get("device") or {}).get("active_session"))
+        if "New named/static device" in finding_labels:
+            visits = len(sessions)
+            if visits > 1:
+                parts.append(
+                    "New Bluetooth device, seen in {} visits".format(visits)
+                )
+            else:
+                parts.append("New Bluetooth device")
+        if "Recurring presence" in finding_labels:
+            days = len(context.get("days") or [])
+            parts.append("recurring presence across {} day(s)".format(days))
+        if "Long presence" in finding_labels:
+            phrase = "nearby for about {}".format(self.duration_text(longest))
+            if active:
+                phrase += " and still present"
+            parts.append(phrase)
+        if "Strong nearby signal" in finding_labels and signal_max is not None:
+            parts.append("strong signal reached {} dBm".format(int(signal_max)))
+        summary = "; ".join(parts)
+        return summary[:1].upper() + summary[1:] + "." if summary else ""
+
+    def ble_private_cluster_summary(self, manufacturer, count, active):
+        """Return a readable one-line summary for a BLE private-address group."""
+        summary = "{} private/randomized BLE address(es)".format(count)
+        if active:
+            summary += "; {} still active".format(len(active))
+        if manufacturer:
+            summary = summary[0].upper() + summary[1:]
+        return summary + "."
+
+    def bluetooth_subject(self, device, mac):
+        """Return the identity string shown once in the Reports Subject column."""
+        parts = []
+        names = [
+            str(name).strip()
+            for name in (device.get("names") or [])
+            if str(name).strip()
+        ]
+        if names:
+            parts.append(names[0])
+        if mac:
+            parts.append(mac)
+        manufacturer = (
+            device.get("manufacturer_name")
+            or device.get("manufacturer")
+            or device.get("vendor_name")
+            or ""
+        )
+        if manufacturer:
+            parts.append(manufacturer)
+        return " - ".join(parts)
+
+    def bluetooth_cluster_subject(self, manufacturer, count):
+        """Return the subject for a private/randomized BLE address cluster."""
+        if manufacturer:
+            return "{} - {} private/randomized addresses".format(
+                manufacturer, count
+            )
+        return "{} private/randomized addresses".format(count)
+
     def ble_private_address_group_report(
         self, timestamp, manufacturer, members
     ):
@@ -259,96 +365,162 @@ class ReportsBuilder:
         )
         hour_counts = Counter()
         start_hour_counts = Counter()
-        spans = []
+        sessions = []
         signal_values = []
         for member in members:
             hour_counts.update(member["hours"])
             start_hour_counts.update(member["start_hours"])
-            spans.extend(member["presence_spans"])
+            sessions.extend(member["sessions"])
             value = member["signal_max"]
             if value is not None:
                 signal_values.append(value)
         signal_max = max(signal_values) if signal_values else None
-        last_seen = max(
-            (member["device"].get("last_seen") or "" for member in members),
-            default="",
+        first_seen_member = min(
+            members,
+            key=lambda member: record_time_epoch(member["device"], "first_seen")
+            or float("inf"),
+            default={},
         )
+        first_seen_device = first_seen_member.get("device") or {}
+        last_seen_member = max(
+            members,
+            key=lambda member: record_time_epoch(member["device"], "last_seen")
+            or 0,
+            default={},
+        )
+        last_seen_device = last_seen_member.get("device") or {}
+        last_seen = last_seen_device.get("last_seen") or ""
         evidence = {
             "manufacturer": manufacturer,
             "address_count": len(members),
             "active_addresses": len(active),
+            "findings": ["Private/randomized address cluster"],
             "sample_macs": macs[:12],
             "days_seen": all_days,
             "presence_hours": self.hour_labels(hour_counts),
             "common_hours": self.common_hours(hour_counts),
             "common_start_hours": self.common_hours(start_hour_counts),
-            "presence_spans": spans[:8],
+            "presence_spans": self.session_spans(sessions),
             "signal_max": int(signal_max) if signal_max is not None else "",
+            "first_seen": self.display_time(first_seen_device, "first_seen"),
+            "first_seen_epoch": record_time_epoch(
+                first_seen_device, "first_seen"
+            ),
             "last_seen": last_seen,
+            "last_seen_epoch": record_time_epoch(last_seen_device, "last_seen"),
         }
-        signal_text = (
-            "; strongest {} dBm".format(int(signal_max))
-            if signal_max is not None
-            else ""
+        score = self.score_ble_private_cluster(
+            len(members), len(active), signal_max
         )
         return self.report(
             timestamp,
-            "info",
+            self.severity_for_score(score),
             "bluetooth",
             "ble_private_address_cluster",
-            "Bluetooth randomized/private address cluster",
-            "{} had {} unnamed BLE address(es) in the report window{}; most often {}".format(
-                manufacturer,
-                len(members),
-                signal_text,
-                self.common_hour_text(hour_counts),
+            "Bluetooth private-address cluster",
+            self.ble_private_cluster_summary(
+                manufacturer, len(members), active
             ),
             evidence,
-            68 + min(len(members), 20),
+            score,
             last_seen,
+            subject=self.bluetooth_cluster_subject(manufacturer, len(members)),
         )
 
+    def score_ble_private_cluster(
+        self, address_count, active_count, signal_max
+    ):
+        """Return attention score for a BLE private/randomized address cluster.
+
+        Private-address clusters are summarized by manufacturer because each
+        individual address is weak identity evidence. The cluster still deserves
+        attention when address churn is large, some addresses are active now, or
+        the strongest signal is nearby. The cap is slightly below stable devices
+        because the row is less specific unless proximity/activity is strong.
+        """
+        score = 0
+        # Large address counts indicate churn density in the selected window.
+        if address_count >= 100:
+            score += 35
+        elif address_count >= 50:
+            score += 25
+        elif address_count >= 10:
+            score += 15
+        # Currently active rotating addresses are more actionable than a purely
+        # historical cluster.
+        if active_count:
+            score += 10
+        # Strong cluster RSSI suggests at least one nearby physical device.
+        if signal_max is not None:
+            if signal_max >= -45:
+                score += 30
+            elif signal_max >= -55:
+                score += 20
+        return min(score, 95)
+
+    def wifi_ap_profile_summary(self, ap, findings, signal_max):
+        """Return the final summary sentence for one Wi-Fi AP profile."""
+        parts = []
+        if "New access point" in findings:
+            parts.append("new access point")
+        if "Strong signal" in findings:
+            if signal_max is not None:
+                parts.append(
+                    "strong signal reached {} dBm".format(int(signal_max))
+                )
+            else:
+                parts.append("strong signal")
+        if "Wi-Fi AP encryption varied" in findings:
+            parts.append("security changed during the report window")
+        if "Wi-Fi AP security detail varied" in findings:
+            parts.append("security detail varied during the report window")
+        if "Multiple channels" in findings:
+            parts.append("seen on multiple channels")
+        if not parts:
+            return "Access point activity summarized."
+        sentence = "; ".join(parts)
+        return sentence[:1].upper() + sentence[1:] + "."
+
+    def wifi_ssid_profile_summary(self, ssid, bssids, vendors, encryption):
+        """Return the final summary sentence for an SSID-level Wi-Fi profile."""
+        vendor_text = ""
+        if vendors:
+            vendor_text = " from {}".format(", ".join(vendors[:3]))
+            if len(vendors) > 3:
+                vendor_text += " and {} more".format(len(vendors) - 3)
+        security_text = ""
+        if encryption:
+            security_text = " using {}".format(", ".join(encryption))
+        return "{} was observed on {} BSSID(s){}{}.".format(
+            ssid,
+            len(bssids),
+            vendor_text,
+            security_text,
+        )
+
+    def wifi_ap_subject(self, ap):
+        """Return identity for the Reports Subject column."""
+        ssid = ap.get("ssid") or "blank SSID"
+        bssid = ap.get("bssid") or ""
+        vendor = ap.get("vendor_name") or ap.get("vendor_prefix") or ""
+        return " - ".join(part for part in (ssid, bssid, vendor) if part)
+
     def wifi_ap_reports(self, aps, timestamp):
-        """Summarize AP changes and longer-window Wi-Fi scan patterns."""
+        """Summarize Wi-Fi as AP profiles plus SSID-level profiles."""
         reports = []
         by_ssid = defaultdict(list)
         for ap in aps:
             by_ssid[ap.get("ssid") or "(blank)"].append(ap)
-            label = self.ap_label(ap)
             signal_max = self.to_number(ap.get("signal_max"))
             evidence = self.wifi_ap_evidence(ap)
+            findings = []
+            forced_warning = False
             if self.is_new_recent(ap, timestamp):
-                reports.append(
-                    self.report(
-                        timestamp,
-                        "info",
-                        "wifi",
-                        "wifi_ap_new_recent",
-                        "New Wi-Fi access point",
-                        "{} was first seen recently at {}".format(
-                            label, ap.get("first_seen") or "unknown time"
-                        ),
-                        evidence,
-                        55,
-                        ap.get("last_seen"),
-                    )
-                )
+                findings.append("New access point")
             if signal_max is not None and signal_max >= float(
                 self.config["wifi_strong_rssi"]
             ):
-                reports.append(
-                    self.report(
-                        timestamp,
-                        "info",
-                        "wifi",
-                        "wifi_ap_strong_in_window",
-                        "Strong Wi-Fi access point in report window",
-                        "{} reached {} dBm".format(label, int(signal_max)),
-                        evidence,
-                        50,
-                        ap.get("last_seen"),
-                    )
-                )
+                findings.append("Strong signal")
             encryptions = self.normalized_wifi_encryption_values(
                 ap.get("encryption") or []
             )
@@ -356,40 +528,34 @@ class ReportsBuilder:
             if variation:
                 # Report security drift only after canonicalization suppresses
                 # parser wording differences such as WPA2 versus WPA2/RSN.
-                reports.append(
-                    self.report(
-                        timestamp,
-                        variation["severity"],
-                        "wifi",
-                        variation["type"],
-                        variation["title"],
-                        "{} used encryption values {}".format(
-                            label, ", ".join(encryptions)
-                        ),
-                        self.with_evidence(
-                            evidence, {"encryption": encryptions}
-                        ),
-                        variation["score"],
-                        ap.get("last_seen"),
-                    )
+                findings.append(variation["title"])
+                forced_warning = variation["severity"] == "warning"
+                evidence = self.with_evidence(
+                    evidence, {"encryption": encryptions}
                 )
             if len(ap.get("channels") or []) > 1:
+                findings.append("Multiple channels")
+            if findings:
+                score = self.score_wifi_ap_profile(
+                    ap, findings, signal_max, encryptions
+                )
+                severity = (
+                    "warning"
+                    if forced_warning
+                    else self.severity_for_score(score)
+                )
                 reports.append(
                     self.report(
                         timestamp,
-                        "info",
+                        severity,
                         "wifi",
-                        "wifi_ap_channel_varied",
-                        "Wi-Fi AP seen on multiple channels",
-                        "{} was seen on channels {}".format(
-                            label,
-                            ", ".join(
-                                str(item) for item in ap.get("channels") or []
-                            ),
-                        ),
-                        evidence,
-                        45,
+                        "wifi_ap_profile",
+                        "Wi-Fi access point profile",
+                        self.wifi_ap_profile_summary(ap, findings, signal_max),
+                        self.with_evidence(evidence, {"findings": findings}),
+                        score,
                         ap.get("last_seen"),
+                        subject=self.wifi_ap_subject(ap),
                     )
                 )
 
@@ -399,16 +565,48 @@ class ReportsBuilder:
             ):
                 continue
             bssids = [ap.get("bssid") for ap in ssid_aps if ap.get("bssid")]
+            last_seen_ap = max(
+                ssid_aps,
+                key=lambda ap: record_time_epoch(ap, "last_seen") or 0,
+            )
+            vendors = sorted(
+                set(
+                    ap.get("vendor_name") or ap.get("vendor_prefix") or ""
+                    for ap in ssid_aps
+                    if ap.get("vendor_name") or ap.get("vendor_prefix")
+                )
+            )
+            encryption = sorted(
+                set(
+                    value
+                    for ap in ssid_aps
+                    for value in self.normalized_wifi_encryption_values(
+                        ap.get("encryption") or []
+                    )
+                    if value
+                )
+            )
+            findings = ["Multiple BSSIDs"]
+            if any(
+                "locally administered" in vendor.lower() for vendor in vendors
+            ):
+                findings.append("Locally administered/randomized BSSIDs")
+            score = self.score_wifi_ssid_profile(
+                ssid_aps, bssids, vendors, encryption
+            )
             reports.append(
                 self.report(
                     timestamp,
-                    "info",
+                    self.severity_for_score(score),
                     "wifi",
-                    "wifi_ssid_multiple_bssids_report",
-                    "SSID has multiple BSSIDs in report window",
-                    "'{}' was seen on {} BSSIDs".format(ssid, len(bssids)),
+                    "wifi_ssid_profile",
+                    "Wi-Fi SSID profile",
+                    self.wifi_ssid_profile_summary(
+                        ssid, bssids, vendors, encryption
+                    ),
                     {
                         "ssid": ssid,
+                        "findings": findings,
                         "bssids": bssids,
                         "channels": sorted(
                             set(
@@ -417,15 +615,128 @@ class ReportsBuilder:
                                 for v in (ap.get("channels") or [])
                             )
                         ),
+                        "vendors": vendors,
+                        "encryption": encryption,
                     },
-                    48,
-                    max(
-                        (ap.get("last_seen") or "" for ap in ssid_aps),
-                        default="",
-                    ),
+                    score,
+                    last_seen_ap.get("last_seen"),
+                    subject="{} - {} BSSIDs".format(ssid, len(bssids)),
                 )
             )
         return reports
+
+    def score_wifi_ap_profile(self, ap, findings, signal_max, encryptions):
+        """Return 0-100 attention score for one Wi-Fi AP/BSSID profile.
+
+        Wi-Fi AP score combines novelty, proximity, security posture, radio
+        drift, and persistence. It is intentionally not an "evil twin" score:
+        normal strong home APs may rank high as important context, while weak
+        security or security drift can independently push severity to warning.
+        """
+        score = 0
+        # New APs deserve attention, but not as much as weak security or very
+        # strong physical proximity.
+        if "New access point" in findings:
+            score += 25
+        # Stronger RSSI means the AP is likely nearby. Very strong APs are
+        # pushed up because they are physically relevant to the observer.
+        if signal_max is not None:
+            if signal_max >= -25:
+                score += 45
+            elif signal_max >= -40:
+                score += 35
+            elif signal_max >= -55:
+                score += 20
+            elif signal_max >= -70:
+                score += 10
+        values = set(encryptions or [])
+        # Weak security dominates AP score. Meaningful encryption variation is
+        # also important; generic WPA2/WPA3 parser detail is filtered earlier.
+        if values & {"open", "WEP/unknown", "WPA"}:
+            score += 50
+        elif "Wi-Fi AP encryption varied" in findings:
+            score += 35
+        elif "Wi-Fi AP security detail varied" in findings:
+            score += 20
+        # A BSSID appearing on multiple channels is unusual enough to note, but
+        # not enough by itself to make a high-priority report.
+        if "Multiple channels" in findings:
+            score += 15
+        active = bool(ap.get("active_session"))
+        if active:
+            score += 10
+        # APs continuously observed for hours are useful context and should
+        # sort above brief appearances with the same other findings.
+        longest = self.longest_session_seconds(self.device_sessions(ap))
+        if longest >= 8 * 3600:
+            score += 25
+        elif longest >= 4 * 3600:
+            score += 15
+        return min(score, 100)
+
+    def score_wifi_ssid_profile(self, ssid_aps, bssids, vendors, encryption):
+        """Return 0-100 attention score for an SSID-level Wi-Fi profile.
+
+        SSID score is about network-name behavior, not one radio. Multiple
+        BSSIDs are normal for mesh/extender systems, so same-vendor/same-security
+        SSIDs stay moderate. Scores rise when there are many BSSIDs, vendor
+        diversity, locally administered/randomized BSSIDs, mixed security, broad
+        channel/band spread, or a very strong member.
+        """
+        score = 0
+        count = len(bssids)
+        # More BSSIDs means more network surface, but this is intentionally
+        # moderate so normal multi-band mesh systems do not look alarming.
+        if count >= 6:
+            score += 30
+        elif count >= 3:
+            score += 20
+        elif count >= 2:
+            score += 10
+        # Multiple vendors for one SSID is more suspicious than same-vendor
+        # multi-BSSID behavior.
+        if len(vendors) > 1:
+            score += 25
+        # Locally administered/randomized BSSIDs are worth surfacing for SSIDs,
+        # especially when combined with many BSSIDs or vendor diversity.
+        if any("locally administered" in vendor.lower() for vendor in vendors):
+            score += 15
+        values = set(encryption or [])
+        # Mixed security on one SSID is a higher-value signal than uniform WPA2.
+        if values & {"open", "WEP/unknown", "WPA"} and len(values) > 1:
+            score += 35
+        elif len(values) > 1:
+            score += 20
+        channels = sorted(
+            {
+                str(channel)
+                for ap in ssid_aps
+                for channel in (ap.get("channels") or [])
+            }
+        )
+        bands = {self.band_for_channel(channel) for channel in channels}
+        bands.discard("")
+        # A spread across bands/channels is normal for mesh, but helps rank the
+        # SSID profile when combined with other signals.
+        if len(bands) > 1:
+            score += 15
+        elif len(channels) > 1:
+            score += 10
+        strongest = max(
+            (
+                self.to_number(ap.get("signal_max"))
+                for ap in ssid_aps
+                if self.to_number(ap.get("signal_max")) is not None
+            ),
+            default=None,
+        )
+        # Very strong members make the SSID physically relevant nearby.
+        if strongest is not None:
+            if strongest >= -40:
+                score += 25
+            elif strongest >= -55:
+                score += 15
+        return min(score, 100)
 
     def wifi_client_reports(self, clients, timestamp):
         """Summarize monitor-mode client/probe/deauth activity when present."""
@@ -491,7 +802,9 @@ class ReportsBuilder:
                         "wifi_client_new_recent",
                         "New Wi-Fi client activity",
                         "{} was first seen recently at {}".format(
-                            mac, client.get("first_seen") or "unknown time"
+                            mac,
+                            self.display_time(client, "first_seen")
+                            or "unknown time",
                         ),
                         evidence,
                         55,
@@ -511,21 +824,46 @@ class ReportsBuilder:
         evidence,
         score,
         last_seen,
+        subject="",
     ):
         """Build one normalized report row."""
         self._counter += 1
+        last_seen_epoch = record_time_epoch(evidence or {}, "last_seen")
+        last_seen_display = (
+            format_epoch(last_seen_epoch)
+            if last_seen_epoch is not None
+            else last_seen or ""
+        )
         return {
             "id": "{}-{}".format(timestamp, self._counter),
             "timestamp": timestamp,
+            "timestamp_epoch": self._generated_at_epoch
+            or timestamp_epoch(timestamp),
             "severity": severity,
             "source": source,
             "type": report_type,
             "title": title,
+            "subject": subject
+            or self.default_report_subject(source, evidence or {}),
             "summary": summary,
             "evidence": evidence or {},
             "score": score,
-            "last_seen": last_seen or "",
+            "last_seen": last_seen_display,
+            "last_seen_epoch": last_seen_epoch,
         }
+
+    def default_report_subject(self, source, evidence):
+        """Return a concise subject for report rows without custom subjects."""
+        if source == "wifi":
+            if evidence.get("ssid") and evidence.get("bssid"):
+                return "{} - {}".format(evidence["ssid"], evidence["bssid"])
+            if evidence.get("ssid"):
+                return evidence["ssid"]
+            if evidence.get("bssid"):
+                return evidence["bssid"]
+        if source == "wifi_monitor" and evidence.get("mac"):
+            return evidence["mac"]
+        return ""
 
     def ble_evidence(
         self,
@@ -544,8 +882,10 @@ class ReportsBuilder:
             or device.get("manufacturer")
             or device.get("vendor_name")
             or "",
-            "first_seen": device.get("first_seen") or "",
-            "last_seen": device.get("last_seen") or "",
+            "first_seen": self.display_time(device, "first_seen"),
+            "first_seen_epoch": record_time_epoch(device, "first_seen"),
+            "last_seen": self.display_time(device, "last_seen"),
+            "last_seen_epoch": record_time_epoch(device, "last_seen"),
             "sessions": len(sessions),
             "active_session": bool(device.get("active_session")),
             "days_seen": days,
@@ -562,14 +902,16 @@ class ReportsBuilder:
         sessions = self.sessions_in_window(self.device_sessions(ap))
         hours = self.session_hour_counts(sessions)
         start_hours = self.hour_counts(
-            [session.get("start") for session in sessions]
+            [record_time_epoch(session, "start") for session in sessions]
         )
         return {
             "ssid": ap.get("ssid") or "",
             "bssid": ap.get("bssid") or "",
             "vendor": ap.get("vendor_name") or ap.get("vendor_prefix") or "",
-            "first_seen": ap.get("first_seen") or "",
-            "last_seen": ap.get("last_seen") or "",
+            "first_seen": self.display_time(ap, "first_seen"),
+            "first_seen_epoch": record_time_epoch(ap, "first_seen"),
+            "last_seen": self.display_time(ap, "last_seen"),
+            "last_seen_epoch": record_time_epoch(ap, "last_seen"),
             "channels": ap.get("channels") or [],
             "encryption": ap.get("encryption") or [],
             "signal_max": ap.get("signal_max"),
@@ -589,8 +931,10 @@ class ReportsBuilder:
             "vendor": client.get("vendor_name")
             or client.get("vendor_prefix")
             or "",
-            "first_seen": client.get("first_seen") or "",
-            "last_seen": client.get("last_seen") or "",
+            "first_seen": self.display_time(client, "first_seen"),
+            "first_seen_epoch": record_time_epoch(client, "first_seen"),
+            "last_seen": self.display_time(client, "last_seen"),
+            "last_seen_epoch": record_time_epoch(client, "last_seen"),
             "probed_ssids": client.get("ssids") or [],
             "probe_count": client.get("probe_count") or 0,
             "association_count": client.get("association_count") or 0,
@@ -603,6 +947,13 @@ class ReportsBuilder:
         merged = dict(evidence or {})
         merged.update(extra or {})
         return merged
+
+    def display_time(self, record, field):
+        """Format a history timestamp from its epoch companion when present."""
+        epoch = record_time_epoch(record, field)
+        if epoch is not None:
+            return format_epoch(epoch)
+        return (record or {}).get(field) or ""
 
     def device_sessions(self, device):
         """Return closed sessions plus the current open session, if any."""
@@ -646,10 +997,7 @@ class ReportsBuilder:
 
     def clip_session_to_window(self, session, since):
         """Return a session copy if any observed portion overlaps the window."""
-        start = utc_epoch((session or {}).get("start"))
-        end = utc_epoch(
-            (session or {}).get("end") or (session or {}).get("start")
-        )
+        start, end = self.session_bounds(session)
         if start is None or end is None or end < since:
             return None
         clipped = dict(session)
@@ -662,8 +1010,7 @@ class ReportsBuilder:
         """Return a session copy with duration filled when older data omitted it."""
         copied = dict(session or {})
         if copied.get("duration_sec") is None:
-            start = utc_epoch(copied.get("start"))
-            end = utc_epoch(copied.get("end") or copied.get("start"))
+            start, end = self.session_bounds(copied)
             if start is not None and end is not None:
                 copied["duration_sec"] = max(0, int(end - start))
         return copied
@@ -727,10 +1074,10 @@ class ReportsBuilder:
     def session_spans(self, sessions, limit=8):
         """Return recent local presence spans for report evidence."""
         spans = []
+        sessions = self.merge_overlapping_sessions(sessions)
         ordered = sorted(
             sessions or [],
-            key=lambda item: utc_epoch(item.get("end") or item.get("start"))
-            or 0,
+            key=lambda item: self.session_bounds(item)[1] or 0,
             reverse=True,
         )
         for session in ordered[:limit]:
@@ -738,6 +1085,49 @@ class ReportsBuilder:
             if span:
                 spans.append(span)
         return spans
+
+    def merge_overlapping_sessions(self, sessions):
+        """Collapse overlapping sessions before rendering report evidence.
+
+        Device History keeps active sessions separate from closed sessions, and
+        randomized BLE reports group multiple addresses together. Both cases can
+        otherwise produce several evidence spans with the same end time. Reports
+        should show the covered presence intervals, not every overlapping
+        internal session fragment.
+        """
+        normalized = []
+        for session in sessions or []:
+            start, end = self.session_bounds(session)
+            if start is None or end is None:
+                continue
+            item = dict(session)
+            item["_start_epoch"] = start
+            item["_end_epoch"] = end
+            normalized.append(item)
+        normalized.sort(
+            key=lambda item: (item["_start_epoch"], item["_end_epoch"])
+        )
+
+        merged = []
+        for session in normalized:
+            if not merged or session["_start_epoch"] > merged[-1]["_end_epoch"]:
+                merged.append(session)
+                continue
+            current = merged[-1]
+            if session["_end_epoch"] > current["_end_epoch"]:
+                current["_end_epoch"] = session["_end_epoch"]
+                current["end_epoch"] = session["_end_epoch"]
+                current["end"] = format_epoch(session["_end_epoch"])
+            current["active"] = bool(
+                current.get("active") or session.get("active")
+            )
+            current["approximate"] = bool(
+                current.get("approximate") or session.get("approximate")
+            )
+        for session in merged:
+            session.pop("_start_epoch", None)
+            session.pop("_end_epoch", None)
+        return merged
 
     def session_span_text(self, session):
         """Format one BLE session as a compact local date/time span."""
@@ -765,10 +1155,8 @@ class ReportsBuilder:
 
     def session_bounds(self, session):
         """Return epoch start/end for one session, tolerating missing end."""
-        start = utc_epoch((session or {}).get("start"))
-        end = utc_epoch(
-            (session or {}).get("end") or (session or {}).get("start")
-        )
+        start = record_time_epoch(session, "start")
+        end = record_time_epoch(session, "end") or start
         if start is None or end is None:
             return None, None
         if end < start:
@@ -793,8 +1181,9 @@ class ReportsBuilder:
         threshold = float(self.config.get("new_device_window_sec", 3600))
         if threshold <= 0:
             return False
-        first = utc_epoch(item.get("first_seen"))
-        generated = utc_epoch(timestamp) or time.time()
+        first = record_time_epoch(item, "first_seen")
+        generated = self._generated_at_epoch or timestamp_epoch(timestamp)
+        generated = generated or now_epoch()
         return first is not None and 0 <= generated - first <= threshold
 
     def normalized_wifi_encryption_values(self, values):
@@ -860,7 +1249,7 @@ class ReportsBuilder:
         """Count local hour buckets for recurring-presence summaries."""
         counts = Counter()
         for value in timestamps:
-            epoch = utc_epoch(value)
+            epoch = timestamp_epoch(value)
             if epoch is None:
                 continue
             counts[datetime.fromtimestamp(epoch).hour] += 1
@@ -918,7 +1307,7 @@ class ReportsBuilder:
 
     def day_name(self, timestamp):
         """Return a local weekday label for one timestamp."""
-        epoch = utc_epoch(timestamp)
+        epoch = timestamp_epoch(timestamp)
         if epoch is None:
             return ""
         return datetime.fromtimestamp(epoch).strftime("%a")
@@ -1020,6 +1409,39 @@ class ReportsBuilder:
         if hours:
             return "{}h".format(hours)
         return "{}m".format(max(1, minutes))
+
+    def longest_session_seconds(self, sessions):
+        """Return longest observed session duration for scoring."""
+        return max(
+            [
+                float(
+                    self.session_with_duration(session).get("duration_sec") or 0
+                )
+                for session in sessions or []
+            ]
+            or [0]
+        )
+
+    def band_for_channel(self, channel):
+        """Return a coarse Wi-Fi band label for report scoring."""
+        try:
+            number = int(str(channel).strip())
+        except (TypeError, ValueError):
+            return ""
+        if 1 <= number <= 14:
+            return "2.4"
+        if number >= 30:
+            return "5"
+        return ""
+
+    def severity_for_score(self, score):
+        """Promote high-attention profiles to warning severity.
+
+        A warning here means "high attention" rather than confirmed malicious
+        behavior. Specific security rules can still force warning before this
+        helper is used.
+        """
+        return "warning" if int(score or 0) >= 75 else "info"
 
     def counts(self, reports):
         """Compute report counters for the UI."""

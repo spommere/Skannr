@@ -169,6 +169,8 @@ main {
 
 .filter-bar {
   display: flex;
+  flex-wrap: wrap;
+  align-items: end;
   gap: 10px;
   margin: 14px 0;
 }
@@ -186,6 +188,42 @@ main {
   padding: 6px 8px;
   font-size: 14px;
   background: #fff;
+}
+
+.source-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: min(100%, 520px);
+  padding: 6px 0;
+}
+
+.source-filter::before {
+  content: "Source";
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  margin-right: 2px;
+}
+
+.source-filter-button {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.source-filter-button.active {
+  border-color: var(--accent);
+  background: #e7f2f3;
+  color: var(--accent);
+  font-weight: 650;
 }
 
 .status-strip {
@@ -312,13 +350,42 @@ table {
   white-space: nowrap;
 }
 
+.reports-table .report-col-score {
+  min-width: 48px;
+  width: 48px;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .reports-table .report-col-last-seen {
   white-space: nowrap;
 }
 
 .reports-table .report-col-summary,
 .reports-table .report-col-evidence {
-  min-width: 260px;
+  min-width: 235px;
+}
+
+.evidence-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 3px;
+  margin: 0;
+}
+
+.evidence-list dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.evidence-list dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--text);
 }
 
 .collector-health-table th:nth-child(5),

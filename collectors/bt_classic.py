@@ -14,9 +14,15 @@ import subprocess
 from collectors.base import (
     BaseCollector,
     STATE_OFFLINE,
+    STATE_ONLINE,
     STATE_RETRYING,
-    STATE_RUNNING_TIER1,
-    STATE_RUNNING_TIER2,
+)
+from collectors.hardware import (
+    availability_records,
+    bluetooth_adapter_exists,
+    bluetooth_adapters,
+    configured_candidates,
+    sort_bluetooth_adapters,
 )
 from oui_lookup import vendor_name, vendor_prefix
 
@@ -39,47 +45,42 @@ class BluetoothClassicCollector(BaseCollector):
         r"^\s*([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s+(.+?)\s*$"
     )
 
+    @classmethod
+    def hardware_status(cls, config):
+        """Return Classic Bluetooth adapter and scanner executable status."""
+        discovered = bluetooth_adapters()
+        configured = configured_candidates(
+            config, "adapters"
+        ) or sort_bluetooth_adapters(discovered, config)
+        return {
+            "adapters": availability_records(
+                configured, discovered, bluetooth_adapter_exists
+            ),
+            "hcitool": bool(shutil.which("hcitool")),
+            "bluetoothctl": bool(shutil.which("bluetoothctl")),
+            "auto_start": config.get("auto_start", False),
+        }
+
     def detect(self):
-        """Pick the configured adapter tier and verify a scanner executable."""
+        """Select the first available Bluetooth adapter candidate."""
         if not shutil.which("hcitool") and not shutil.which("bluetoothctl"):
             self.active_hardware = None
             self.state = STATE_OFFLINE
             self.warning = "Neither hcitool nor bluetoothctl was found in PATH."
             return False
 
-        preferred = self.config.get("preferred_adapter", "hci1")
-        fallback = self.config.get("fallback_adapter", "hci0")
-        primary_default = "test -d /sys/class/bluetooth/{} || hciconfig {} >/dev/null 2>&1".format(
-            preferred, preferred
-        )
-        fallback_default = "test -d /sys/class/bluetooth/{} || hciconfig {} >/dev/null 2>&1 || bluetoothctl list | grep -q 'Controller '".format(
-            fallback, fallback
-        )
-        primary_ok, primary_detail = self.validate_tier(
-            "primary", primary_default
-        )
-        if primary_ok:
-            self.active_hardware = preferred
-            self.state = STATE_RUNNING_TIER1
-            self.warning = None
-            return True
-
-        fallback_ok, fallback_detail = self.validate_tier(
-            "fallback", fallback_default
-        )
-        if fallback_ok:
-            self.active_hardware = fallback
-            self.state = STATE_RUNNING_TIER2
-            self.warning = "Using fallback Bluetooth adapter {}; primary validation failed: {}".format(
-                fallback, primary_detail
-            )
-            return True
-
+        candidates = configured_candidates(
+            self.config, "adapters"
+        ) or sort_bluetooth_adapters(bluetooth_adapters(), self.config)
+        for adapter in candidates:
+            if bluetooth_adapter_exists(adapter):
+                self.active_hardware = adapter
+                self.state = STATE_ONLINE
+                self.warning = None
+                return True
         self.active_hardware = None
         self.state = STATE_OFFLINE
-        self.warning = "No usable Bluetooth adapter. Primary validation: {}; fallback validation: {}".format(
-            primary_detail, fallback_detail
-        )
+        self.warning = "No usable Bluetooth adapter found."
         return False
 
     async def start(self):
@@ -95,16 +96,9 @@ class BluetoothClassicCollector(BaseCollector):
             "scanner_started",
             {
                 "adapter": self.active_hardware,
-                "tier": self.state,
                 "mode": "classic",
             },
         )
-        if self.state == STATE_RUNNING_TIER2:
-            await self.emit(
-                "hardware_fallback",
-                {"adapter": self.active_hardware, "warning": self.warning},
-                "warning",
-            )
 
         seen = {}
         interval = float(self.config.get("scan_interval_sec", 30))
@@ -276,12 +270,19 @@ class BluetoothClassicCollector(BaseCollector):
 
     def prepare_adapter(self):
         """Best-effort wake-up before inquiry."""
-        adapter = self.active_hardware or self.config.get(
-            "fallback_adapter", "hci0"
-        )
+        adapter = self.selected_adapter()
         self.command_succeeds(["rfkill", "unblock", "bluetooth"])
         self.command_succeeds(["hciconfig", adapter, "up"])
         self.command_succeeds(["bluetoothctl", "power", "on"])
+
+    def selected_adapter(self):
+        """Return the adapter currently in use, or a safe local default."""
+        candidates = (
+            configured_candidates(self.config, "adapters")
+            or sort_bluetooth_adapters(bluetooth_adapters(), self.config)
+            or ["hci0"]
+        )
+        return self.active_hardware or candidates[0]
 
     def command_succeeds(self, command):
         """Return False rather than failing startup for optional setup tools."""

@@ -6,38 +6,42 @@ retention windows, timestamp parsing, and how much raw JSONL has already been
 folded into materialized summaries.
 """
 
-import calendar
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
-def utc_epoch(timestamp):
-    """Parse Skannr timestamps into seconds since epoch.
+def now_epoch():
+    """Return the current local host epoch seconds.
 
-    New logs use local display time, while older logs used UTC ISO strings with
-    a trailing Z. Support both so existing history remains readable.
+    Epoch seconds are Skannr's internal time source. Display strings are derived
+    from this value only when writing UI-facing fields.
     """
+    return int(time.time())
+
+
+def format_epoch(epoch):
+    """Format epoch seconds using Skannr's local display timestamp format."""
+    try:
+        value = float(epoch)
+    except (TypeError, ValueError):
+        value = now_epoch()
+    return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def timestamp_epoch(timestamp):
+    """Return epoch seconds for numeric values or display timestamp strings."""
     if isinstance(timestamp, (int, float)):
-        return float(timestamp)
+        return int(float(timestamp))
     if not timestamp:
         return None
     text = str(timestamp).strip()
-    # Legacy Spectra/early Skannr logs used UTC ISO strings. Keep them readable
-    # so users do not need to delete old logs after an upgrade.
-    for pattern in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S+00:00"):
-        try:
-            return float(
-                calendar.timegm(datetime.strptime(text, pattern).timetuple())
-            )
-        except ValueError:
-            pass
-    # Current logs are local display timestamps. time.mktime() intentionally
-    # interprets them in the host timezone so browser rows match local time.
+    # time.mktime() intentionally interprets display timestamps in the host
+    # timezone so browser rows and derived summaries agree with local time.
     for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S %Z"):
         try:
-            return float(
+            return int(
                 time.mktime(datetime.strptime(text, pattern).timetuple())
             )
         except ValueError:
@@ -139,8 +143,7 @@ def window_since_epoch(window_days):
     """Convert a day count into a local-time epoch cutoff."""
     if window_days is None:
         return None
-    now = datetime.now().replace(microsecond=0)
-    return time.mktime((now - timedelta(days=float(window_days))).timetuple())
+    return now_epoch() - int(float(window_days) * 86400)
 
 
 def window_metadata(window_days):
@@ -148,11 +151,7 @@ def window_metadata(window_days):
     if window_days is None:
         return {"days": None, "label": "All retained logs", "since": None}
     since_epoch = window_since_epoch(window_days)
-    since = (
-        datetime.fromtimestamp(since_epoch)
-        .replace(microsecond=0)
-        .strftime("%Y-%m-%d %H:%M:%S")
-    )
+    since = format_epoch(since_epoch)
     label_days = (
         int(window_days) if float(window_days).is_integer() else window_days
     )
@@ -169,8 +168,7 @@ def event_in_window(event, window_days):
     if since_epoch is None:
         return True
     data = event.get("data") or {}
-    timestamp = event.get("timestamp") or data.get("timestamp")
-    epoch = utc_epoch(timestamp)
+    epoch = event_time_epoch(event) or timestamp_epoch(data.get("timestamp"))
     return epoch is not None and epoch >= since_epoch
 
 
@@ -207,8 +205,33 @@ def count_jsonl_files(log_dir, collector):
 
 
 def local_timestamp():
-    """Return Skannr's local display timestamp format."""
-    return datetime.now().replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+    """Return the current local display timestamp."""
+    return format_epoch(now_epoch())
+
+
+def event_time_epoch(event):
+    """Return an event's canonical epoch timestamp."""
+    data = (event or {}).get("data") or {}
+    for value in (
+        (event or {}).get("timestamp_epoch"),
+        data.get("timestamp_epoch"),
+        (event or {}).get("epoch"),
+        data.get("epoch"),
+    ):
+        epoch = timestamp_epoch(value)
+        if epoch is not None:
+            return epoch
+    return timestamp_epoch((event or {}).get("timestamp"))
+
+
+def record_time_epoch(record, field):
+    """Return a record field's epoch companion or parse its display value."""
+    if not isinstance(record, dict):
+        return None
+    epoch = timestamp_epoch(record.get("{}_epoch".format(field)))
+    if epoch is not None:
+        return epoch
+    return timestamp_epoch(record.get(field))
 
 
 def has_jsonl_checkpoint(summary):
@@ -221,11 +244,14 @@ def has_jsonl_checkpoint(summary):
 
 def empty_jsonl_checkpoint():
     """Create the generic offset-tracking structure for JSONL summaries."""
-    timestamp = local_timestamp()
+    epoch = now_epoch()
+    timestamp = format_epoch(epoch)
     return {
         "version": 1,
         "created_at": timestamp,
+        "created_at_epoch": epoch,
         "updated_at": timestamp,
+        "updated_at_epoch": epoch,
         "collectors": {},
     }
 
@@ -294,4 +320,6 @@ def read_incremental_jsonl_events(log_dir, collector, checkpoint):
             "size": size,
             "mtime": os.path.getmtime(path),
         }
-    checkpoint["updated_at"] = local_timestamp()
+    epoch = now_epoch()
+    checkpoint["updated_at"] = format_epoch(epoch)
+    checkpoint["updated_at_epoch"] = epoch

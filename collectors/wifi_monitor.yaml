@@ -5,10 +5,11 @@ description: On-demand monitor-mode Wi-Fi packet capture and channel hopping
 has_device_history: true
 enabled: true
 auto_start: false
-primary_validation: command -v iw >/dev/null 2>&1
-fallback_validation: none
 validation_timeout_sec: 10
+# auto chooses the best monitor-mode interface. ALFA/external USB adapters are
+# preferred when their metadata is visible through sysfs.
 interface: auto
+interfaces: []
 interface_regex: wlan|^mon
 bands:
 - '2.4'

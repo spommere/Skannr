@@ -9,8 +9,8 @@ import json
 import os
 from datetime import datetime
 
-from bus import utc_now
-from log_utils import utc_epoch
+from bus import local_now
+from log_utils import now_epoch, record_time_epoch, timestamp_epoch
 
 
 DEFAULT_ANALYSIS_CONFIG = {
@@ -41,10 +41,13 @@ class HistoryAnalyzer:
         self.config = DEFAULT_ANALYSIS_CONFIG.copy()
         self.config.update(config or {})
         self._counter = 0
+        self._generated_at_epoch = None
 
     def analyze(self, history):
         """Return ranked observations with concrete evidence and no LLM step."""
-        generated_at = utc_now()
+        generated_at_epoch = now_epoch()
+        self._generated_at_epoch = generated_at_epoch
+        generated_at = local_now(generated_at_epoch)
         observations = []
         # Device History is the only input here. That keeps analysis cheap after
         # the summary has been materialized and avoids another raw-log scan.
@@ -65,12 +68,13 @@ class HistoryAnalyzer:
             key=lambda item: (
                 self.severity_rank(item["severity"]),
                 item.get("score", 0),
-                item.get("timestamp", ""),
+                item.get("timestamp_epoch") or 0,
             ),
             reverse=True,
         )
         return {
             "generated_at": generated_at,
+            "generated_at_epoch": generated_at_epoch,
             "history_generated_at": history.get("generated_at"),
             "observations": observations,
             "counts": {
@@ -99,9 +103,7 @@ class HistoryAnalyzer:
             bssid = ap.get("bssid") or "unknown"
             source = self.wifi_source_for(ap)
             signal_max = self.to_number(ap.get("signal_max"))
-            duration = self.duration_seconds(
-                ap.get("first_seen"), ap.get("last_seen")
-            )
+            duration = self.record_duration_seconds(ap)
             evidence = self.wifi_ap_evidence(ap, ssid, bssid)
             if self.has_weak_crypto(encryptions):
                 # Open/WEP/legacy-WPA are actionable even if the AP is old.
@@ -490,9 +492,7 @@ class HistoryAnalyzer:
                         60,
                     )
                 )
-            duration = self.duration_seconds(
-                device.get("first_seen"), device.get("last_seen")
-            )
+            duration = self.record_duration_seconds(device)
             if duration >= float(self.config["ble_linger_sec"]):
                 observations.append(
                     self.observation(
@@ -557,11 +557,10 @@ class HistoryAnalyzer:
     def analyze_population(self, clients, timestamp):
         """Look for population-level Wi-Fi patterns."""
         observations = []
-        randomized = [
-            client.get("mac")
-            for client in clients
-            if client.get("randomized_mac")
+        randomized_clients = [
+            client for client in clients if client.get("randomized_mac")
         ]
+        randomized = [client.get("mac") for client in randomized_clients]
         if len(randomized) >= int(self.config["randomized_mac_count"]):
             source = (
                 "wifi_monitor"
@@ -571,6 +570,7 @@ class HistoryAnalyzer:
                 )
                 else "wifi"
             )
+            latest = self.latest_record(randomized_clients)
             observations.append(
                 self.observation(
                     timestamp,
@@ -581,7 +581,14 @@ class HistoryAnalyzer:
                     "{} locally administered client MACs are in device history".format(
                         len(randomized)
                     ),
-                    {"mac_count": len(randomized), "sample": randomized[:25]},
+                    {
+                        "mac_count": len(randomized),
+                        "sample": randomized[:25],
+                        "last_seen": (latest or {}).get("last_seen"),
+                        "last_seen_epoch": record_time_epoch(
+                            latest, "last_seen"
+                        ),
+                    },
                     75,
                 )
             )
@@ -603,6 +610,8 @@ class HistoryAnalyzer:
         return {
             "id": "{}-{}".format(timestamp, self._counter),
             "timestamp": timestamp,
+            "timestamp_epoch": self._generated_at_epoch
+            or self.to_epoch(timestamp),
             "severity": severity,
             "source": source,
             "type": obs_type,
@@ -612,6 +621,19 @@ class HistoryAnalyzer:
             "score": score,
             **self.activity_metadata(obs_type, evidence, timestamp),
         }
+
+    def latest_record(self, records):
+        """Return the record with the newest last_seen timestamp."""
+        newest = None
+        newest_epoch = None
+        for record in records or []:
+            epoch = record_time_epoch(record, "last_seen")
+            if epoch is None:
+                continue
+            if newest_epoch is None or epoch > newest_epoch:
+                newest = record
+                newest_epoch = epoch
+        return newest
 
     def wifi_ap_evidence(self, ap, ssid, bssid):
         """Return identity evidence common to Wi-Fi AP observations."""
@@ -624,7 +646,9 @@ class HistoryAnalyzer:
             or "",
             "vendor_name": ap.get("vendor_name") or "",
             "first_seen": ap.get("first_seen") or "",
+            "first_seen_epoch": record_time_epoch(ap, "first_seen"),
             "last_seen": ap.get("last_seen") or "",
+            "last_seen_epoch": record_time_epoch(ap, "last_seen"),
         }
 
     def wifi_client_evidence(self, client, mac):
@@ -637,7 +661,9 @@ class HistoryAnalyzer:
             or "",
             "vendor_name": client.get("vendor_name") or "",
             "first_seen": client.get("first_seen") or "",
+            "first_seen_epoch": record_time_epoch(client, "first_seen"),
             "last_seen": client.get("last_seen") or "",
+            "last_seen_epoch": record_time_epoch(client, "last_seen"),
         }
 
     def ble_evidence(self, device, mac):
@@ -654,7 +680,9 @@ class HistoryAnalyzer:
             "model_number": device.get("model_number") or "",
             "firmware_revision": device.get("firmware_revision") or "",
             "first_seen": device.get("first_seen") or "",
+            "first_seen_epoch": record_time_epoch(device, "first_seen"),
             "last_seen": device.get("last_seen") or "",
+            "last_seen_epoch": record_time_epoch(device, "last_seen"),
         }
 
     def with_extra_evidence(self, base, extra):
@@ -800,14 +828,20 @@ class HistoryAnalyzer:
             return {
                 "activity_state": "recurring",
                 "last_seen": (evidence or {}).get("last_seen"),
+                "last_seen_epoch": record_time_epoch(evidence, "last_seen"),
                 "age_minutes": None,
             }
         last_seen = (evidence or {}).get("last_seen")
-        age = self.age_minutes(last_seen, timestamp)
+        last_seen_epoch = record_time_epoch(evidence, "last_seen")
+        age = self.age_minutes(
+            last_seen_epoch or last_seen,
+            self._generated_at_epoch or timestamp,
+        )
         if age is None:
             return {
                 "activity_state": "unknown",
                 "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
                 "age_minutes": None,
             }
         state = (
@@ -822,6 +856,7 @@ class HistoryAnalyzer:
         return {
             "activity_state": state,
             "last_seen": last_seen,
+            "last_seen_epoch": last_seen_epoch,
             "age_minutes": int(age),
         }
 
@@ -851,10 +886,8 @@ class HistoryAnalyzer:
         min_sessions = int(self.config.get("ble_recurring_min_sessions", 3))
         if len(sessions) < min_sessions:
             return None
-        starts = [
-            self.minute_of_day(session.get("start")) for session in sessions
-        ]
-        ends = [self.minute_of_day(session.get("end")) for session in sessions]
+        starts = [self.minute_of_day(session, "start") for session in sessions]
+        ends = [self.minute_of_day(session, "end") for session in sessions]
         starts = [value for value in starts if value is not None]
         ends = [value for value in ends if value is not None]
         if len(starts) < min_sessions or len(ends) < min_sessions:
@@ -883,14 +916,16 @@ class HistoryAnalyzer:
             else 0,
         }
 
-    def minute_of_day(self, timestamp):
+    def minute_of_day(self, record, field=None):
         """Convert a timestamp into local minute-of-day for pattern grouping."""
-        for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
-            try:
-                parsed = datetime.strptime(str(timestamp), pattern)
-                return parsed.hour * 60 + parsed.minute
-            except ValueError:
-                pass
+        epoch = (
+            record_time_epoch(record, field)
+            if field
+            else timestamp_epoch(record)
+        )
+        if epoch is not None:
+            parsed = datetime.fromtimestamp(epoch)
+            return parsed.hour * 60 + parsed.minute
         return None
 
     def cluster_minutes(self, values, window):
@@ -942,7 +977,7 @@ class HistoryAnalyzer:
 
     def is_new(self, item, timestamp):
         """Return true when first_seen is within the configured recent window."""
-        first_seen = self.to_epoch(item.get("first_seen"))
+        first_seen = record_time_epoch(item, "first_seen")
         now = self.to_epoch(timestamp)
         if first_seen is None or now is None:
             return False
@@ -952,6 +987,14 @@ class HistoryAnalyzer:
         """Return observed duration in seconds for Skannr timestamps."""
         first = self.to_epoch(first_seen)
         last = self.to_epoch(last_seen)
+        if first is None or last is None or last < first:
+            return 0
+        return last - first
+
+    def record_duration_seconds(self, record):
+        """Return duration from a history record's epoch time bounds."""
+        first = record_time_epoch(record, "first_seen")
+        last = record_time_epoch(record, "last_seen")
         if first is None or last is None or last < first:
             return 0
         return last - first
@@ -976,8 +1019,8 @@ class HistoryAnalyzer:
         return int(number) if number.is_integer() else number
 
     def to_epoch(self, timestamp):
-        """Parse Skannr local or legacy UTC timestamps into epoch seconds."""
-        return utc_epoch(timestamp)
+        """Return epoch seconds for internal time calculations."""
+        return timestamp_epoch(timestamp)
 
     def severity_rank(self, severity):
         """Sort warnings above informational observations."""
