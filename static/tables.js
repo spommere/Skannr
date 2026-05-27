@@ -80,18 +80,23 @@ function renderTable(id, items, cellBuilder, options) {
 function renderHistoryTable(id, items, cellBuilder, searchInput) {
   const tbody = document.getElementById(id);
   tbody.innerHTML = "";
-  items
-    .filter((item) => rowMatchesSearch(cellBuilder(item), searchInput))
-    .slice(0, uiNumber("max_history_rows"))
-    .forEach((item) => {
-      const tr = document.createElement("tr");
-      cellBuilder(item).forEach((value) => {
-        const td = document.createElement("td");
-        td.textContent = value;
-        tr.appendChild(td);
-      });
-      tbody.appendChild(tr);
+  const maxRows = uiNumber("max_history_rows");
+  const rows = [];
+  for (const item of items) {
+    const cells = cellBuilder(item);
+    if (!rowMatchesSearch(cells, searchInput)) continue;
+    rows.push(cells);
+    if (rows.length >= maxRows) break;
+  }
+  rows.forEach((cells) => {
+    const tr = document.createElement("tr");
+    cells.forEach((value) => {
+      const td = document.createElement("td");
+      td.textContent = value;
+      tr.appendChild(td);
     });
+    tbody.appendChild(tr);
+  });
 }
 
 function rowMatchesSearch(values, input) {

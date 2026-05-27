@@ -18,6 +18,7 @@ logs/
 # Local machine configuration
 skannr.yaml
 VERSION_HISTORY.md
+VERSION_PLAN.md
 
 # Packaged archives
 *.tar

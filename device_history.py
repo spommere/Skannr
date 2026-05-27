@@ -947,6 +947,7 @@ class DeviceHistoryBuilder:
                 "pnp_id",
                 "classic_class",
                 "classic_clock_offset",
+                "service_uuids",
             ):
                 if not record.get(field) and old.get(field):
                     record[field] = old[field]

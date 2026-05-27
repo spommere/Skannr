@@ -19,8 +19,7 @@ from log_utils import normalize_retention_days
 # overlays any user edits in memory on later runs.
 DEFAULT_CONFIG = {
     "skannr": {
-        "host": "127.0.0.1",
-        "port": 5000,
+        "listeners": ["127.0.0.1:5004"],
         "log_level": "INFO",
     },
     "persistence": {
@@ -117,9 +116,7 @@ def collector_config_dir(config_path):
     configured = os.path.join(project_dir_for_config(config_path), "collectors")
     if os.path.isdir(configured):
         return configured
-    return os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "collectors"
-    )
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "collectors")
 
 
 def load_collector_configs(config_path):
@@ -169,6 +166,17 @@ def load_config(path):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as fh:
             loaded = yaml.safe_load(fh) or {}
+        if "listeners" in loaded:
+            raise ValueError(
+                "listeners must be nested under skannr.listeners, "
+                "not at the top level"
+            )
+        skannr = loaded.get("skannr") or {}
+        if "host" in skannr or "port" in skannr:
+            raise ValueError(
+                "skannr.host/skannr.port are no longer supported; "
+                'use skannr.listeners such as ["127.0.0.1:5004"]'
+            )
         legacy_collectors = loaded.pop("collectors", {}) or {}
         deep_update(config, loaded)
     else:
@@ -179,9 +187,7 @@ def load_config(path):
         save_config(path, config)
     config["collectors"] = load_collector_configs(path)
     deep_update(config["collectors"], legacy_collectors)
-    config["persistence"]["filesystem"][
-        "retention_days"
-    ] = normalize_retention_days(
+    config["persistence"]["filesystem"]["retention_days"] = normalize_retention_days(
         config["persistence"]["filesystem"].get("retention_days"),
         DEFAULT_CONFIG["persistence"]["filesystem"]["retention_days"],
     )

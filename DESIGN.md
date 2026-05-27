@@ -288,9 +288,22 @@ Device History contribution:
 - seen/update/lost counts
 - presence sessions, including active sessions persisted across refreshes
 
-The live Bluetooth table decodes common Bluetooth SIG service UUIDs for display.
-The raw UUID values remain in Device History so vendor-specific services are
-not lost.
+The live Bluetooth table keeps BLE advertisement fields semantically separate
+while presenting a compact operator view. The Identity display combines the
+advertised name with labeled manufacturer-data company information, for example
+`N62N1 | Mfr: AR Timing (0x0201)`. The raw advertised name, manufacturer-data
+company ID, and advertised UUID list remain distinct in persisted records for
+later drilldown.
+
+Skannr decodes common Bluetooth SIG UUIDs for display. It has a small built-in
+table for common service UUIDs such as `0x180A` Device Information, and can
+also load optional offline UUID assigned-number files from
+`collectors/member_uuids.txt`, `collectors/service_uuids.txt`, and
+`collectors/characteristic_uuids.txt`. This is separate from
+`company_identifiers.txt`, which resolves manufacturer-data company IDs.
+Standard service UUID labels and member/vendor UUID labels are displayed in
+Services / UUIDs fields. Member UUIDs are labeled explicitly, for example
+`Member UUID FEAF: Nest Labs Inc`. Unknown UUIDs remain visible as raw values.
 
 ### BLE Identify (`ble_identify`)
 
@@ -674,6 +687,10 @@ Bluetooth stable-device scoring:
 - Proximity: `+10` for RSSI at least `-70`, `+20` for at least `-55`, `+30` for
   at least `-45`.
 - New named/static device: `+30`.
+- Recency adjustment: `+15` when last seen within 24 hours, `+5` when last seen
+  within 1-3 days, `-15` when last seen within 3-7 days, and `-30` when older
+  than 7 days. This keeps stale but historically interesting rows visible while
+  letting current activity sort higher.
 
 Bluetooth private-address cluster scoring:
 
@@ -681,6 +698,7 @@ Bluetooth private-address cluster scoring:
   `+35` for at least 100.
 - Current activity: `+10` if any private address in the cluster is still active.
 - Proximity: `+20` for RSSI at least `-55`, `+30` for at least `-45`.
+- Recency adjustment uses the same last-seen age rule as stable Bluetooth rows.
 - Cluster score is capped at 95 because identity is weaker than a stable named
   device.
 
@@ -770,8 +788,26 @@ Bluetooth company lookup:
 
 - `collectors/company_identifiers.txt`: `https://www.bluetooth.com/specifications/assigned-numbers/company-identifiers/`
 
-When lookup files are missing or do not contain a prefix/identifier, Skannr
-shows the raw OUI or company ID.
+Bluetooth UUID lookup:
+
+- `collectors/member_uuids.txt`: Bluetooth SIG member/vendor UUID assignments,
+  such as `0xFEAF` for Nest Labs Inc.
+- `collectors/service_uuids.txt`: standard GATT service UUID assignments, such
+  as `0x180A` for Device Information.
+- `collectors/characteristic_uuids.txt`: standard GATT characteristic UUID
+  assignments, such as `0x2A25` for Serial Number String.
+
+Skannr reads these optional files in the copied Bluetooth SIG YAML-like format,
+for example:
+
+```yaml
+uuids:
+ - uuid: 0xFEAF
+   name: Nest Labs Inc
+```
+
+When lookup files are missing or do not contain a prefix/identifier/UUID, Skannr
+shows the raw OUI, company ID, or Bluetooth UUID.
 
 Skannr does not update these files automatically.
 
@@ -799,17 +835,31 @@ For automatic startup, Skannr can run under systemd. Running as root is the
 simplest setup because Wi-Fi monitor mode, packet capture, Bluetooth adapters,
 and RTL-SDR devices often need elevated privileges or device permissions.
 
-Remote access is controlled by `skannr.host`:
+Remote access is controlled by `skannr.listeners`, a YAML list of quoted
+endpoint strings:
 
-- `127.0.0.1`: local-only IPv4
-- `0.0.0.0`: all IPv4 interfaces
-- `::`: all IPv6 interfaces
-- a specific IPv4 or IPv6 address: bind only there
+- `"127.0.0.1:5004"`: local-only IPv4
+- `"0.0.0.0:5004"`: all IPv4 interfaces
+- `"[::]:5006"`: all IPv6 interfaces
+- `"[specific IPv6 address]:5006"`: bind only that IPv6 address
+
+One entry is valid; two entries are useful for simultaneous IPv4 and IPv6
+access. Each enabled endpoint is bound before serving starts. The recommended
+dual-stack configuration uses separate ports so behavior does not depend on
+whether the OS allows IPv4-mapped IPv6 sockets. Endpoint strings should be
+quoted, and IPv6 literals must use brackets:
+
+```yaml
+skannr:
+  listeners:
+    - "0.0.0.0:5004"
+    - "[::]:5006"
+```
 
 IPv6 literal browser URLs require brackets:
 
 ```text
-http://[200:...:abcd]:5000/
+http://[200:...:abcd]:5006/
 ```
 
 Skannr serves plain HTTP. HTTPS, authentication, and reverse proxy integration

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import queue
+import re
 import signal
 import threading
 import time
@@ -19,6 +20,8 @@ from collections import deque
 
 from flask import Flask, Response, make_response, request, send_from_directory
 from flask_socketio import SocketIO
+import yaml
+from werkzeug.serving import make_server
 
 from bus import EventBus, local_now
 from collectors import load_actions, load_collectors
@@ -90,6 +93,7 @@ runtime = {
     "history_analysis": None,
     "findings_history": None,
     "reports": None,
+    "web_servers": [],
 }
 
 
@@ -105,9 +109,7 @@ def disable_browser_cache(response):
 @app.route("/")
 def index():
     """Serve the single-page dashboard."""
-    response = make_response(
-        send_from_directory(app.static_folder, "index.html")
-    )
+    response = make_response(send_from_directory(app.static_folder, "index.html"))
     return response
 
 
@@ -221,15 +223,112 @@ def view_metadata():
                 "step_khz": config.get("collectors", {})
                 .get("rtlsdr", {})
                 .get("step_khz"),
-                "gain": config.get("collectors", {})
-                .get("rtlsdr", {})
-                .get("gain"),
+                "gain": config.get("collectors", {}).get("rtlsdr", {}).get("gain"),
                 "threshold_db": config.get("collectors", {})
                 .get("rtlsdr", {})
                 .get("threshold_db"),
             },
         },
+        "bluetooth_uuid_names": bluetooth_uuid_names(),
     }
+
+
+def bluetooth_uuid_names():
+    """Load optional offline Bluetooth UUID names for browser decoding.
+
+    Company identifiers are manufacturer-data IDs and are handled by the BLE
+    collector. This lookup covers Bluetooth UUID assigned-number files such as
+    member_uuids.txt, where values like 0xFEAF identify a vendor/member UUID
+    advertised in the service UUID list.
+    """
+    names = {}
+    directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "collectors")
+    for basename in (
+        "member_uuids",
+        "service_uuids",
+        "characteristic_uuids",
+    ):
+        for extension in (".txt", ".yaml", ".yml"):
+            path = os.path.join(directory, "{}{}".format(basename, extension))
+            names.update(load_bluetooth_uuid_file(path))
+    return names
+
+
+def load_bluetooth_uuid_file(path):
+    """Parse one optional Bluetooth SIG UUID mapping file."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return {}
+    parsed = bluetooth_uuid_names_from_yaml(text)
+    return parsed or bluetooth_uuid_names_from_text(text)
+
+
+def bluetooth_uuid_names_from_yaml(text):
+    """Return UUID-name pairs from YAML-shaped SIG assigned-number exports."""
+    try:
+        loaded = yaml.safe_load(text) or []
+    except yaml.YAMLError:
+        return {}
+    if isinstance(loaded, dict):
+        loaded = (
+            loaded.get("uuids")
+            or loaded.get("service_uuids")
+            or loaded.get("member_uuids")
+            or loaded.get("characteristic_uuids")
+            or loaded.get("values")
+            or []
+        )
+    if not isinstance(loaded, list):
+        return {}
+    names = {}
+    for item in loaded:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("uuid", item.get("value"))
+        name = item.get("name")
+        short_id = normalize_bluetooth_uuid_key(value)
+        if short_id and name:
+            names[short_id] = str(name)
+    return names
+
+
+def bluetooth_uuid_names_from_text(text):
+    """Fallback parser for copied SIG text that is only YAML-like."""
+    names = {}
+    current_uuid = None
+    for line in (text or "").splitlines():
+        uuid_match = re.search(
+            r"\b(?:uuid|value):\s*['\"]?(0x[0-9a-fA-F]+|[0-9a-fA-F]{4})",
+            line,
+        )
+        if uuid_match:
+            current_uuid = normalize_bluetooth_uuid_key(uuid_match.group(1))
+        name_match = re.search(r"\bname:\s*(.+)$", line)
+        if current_uuid and name_match:
+            name = name_match.group(1).strip().strip("'\"")
+            if name:
+                names[current_uuid] = name
+                current_uuid = None
+    return names
+
+
+def normalize_bluetooth_uuid_key(value):
+    """Normalize 16-bit Bluetooth UUID values to lower-case four hex digits."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return "{:04x}".format(int(text, 0))
+    except ValueError:
+        compact = re.sub(r"[^0-9a-fA-F]", "", text).lower()
+        if len(compact) == 4:
+            return compact
+        match = re.match(r"^0000([0-9a-f]{4})", compact)
+        return match.group(1) if match else ""
 
 
 def derived_response(callback):
@@ -294,9 +393,7 @@ def findings_history():
 def findings_history_refresh():
     """Compatibility route: refresh the full derived-data bundle."""
     return derived_response(
-        lambda: build_derived_views(requested_window_days(), force=True)[
-            "findings"
-        ]
+        lambda: build_derived_views(requested_window_days(), force=True)["findings"]
     )
 
 
@@ -330,9 +427,7 @@ def reports():
 def reports_refresh():
     """Compatibility route: refresh the full derived-data bundle."""
     return derived_response(
-        lambda: build_derived_views(requested_window_days(), force=True)[
-            "reports"
-        ]
+        lambda: build_derived_views(requested_window_days(), force=True)["reports"]
     )
 
 
@@ -386,9 +481,7 @@ def action_by_key(key):
 
 def format_sse(name, payload):
     """Format one named Server-Sent Event record."""
-    return "event: {}\ndata: {}\n\n".format(
-        name, json.dumps(payload, sort_keys=True)
-    )
+    return "event: {}\ndata: {}\n\n".format(name, json.dumps(payload, sort_keys=True))
 
 
 def enqueue_sse(client, name, payload):
@@ -421,8 +514,7 @@ async def consume_events(bus):
         # Periodic status/channel-hop events are derived state. Persisting every
         # copy would bury the useful radio/BLE/Wi-Fi observations.
         high_rate_state_event = (
-            event.get("collector") == "system"
-            and event.get("type") == "system_status"
+            event.get("collector") == "system" and event.get("type") == "system_status"
         ) or (
             event.get("collector") == "wifi_monitor"
             and event.get("type") == "monitor_channel_changed"
@@ -617,9 +709,7 @@ def bootstrap_findings():
 
 def requested_window_days():
     """Resolve the requested dashboard log window from query/body/config."""
-    payload = (
-        request.get_json(silent=True) if request.method == "POST" else None
-    )
+    payload = request.get_json(silent=True) if request.method == "POST" else None
     raw = request.args.get("days")
     if raw is None and payload:
         raw = payload.get("days")
@@ -693,16 +783,10 @@ def read_findings_history(window_days):
         "findings": findings,
         "counts": {
             "total": len(findings),
-            "warning": sum(
-                1 for item in findings if item.get("severity") == "warning"
-            ),
-            "info": sum(
-                1 for item in findings if item.get("severity") == "info"
-            ),
+            "warning": sum(1 for item in findings if item.get("severity") == "warning"),
+            "info": sum(1 for item in findings if item.get("severity") == "info"),
             "error": sum(
-                1
-                for item in findings
-                if item.get("severity") in ("error", "alert")
+                1 for item in findings if item.get("severity") in ("error", "alert")
             ),
         },
     }
@@ -782,8 +866,7 @@ def update_findings_summary(previous):
             "window": view_window_metadata(None),
             "state_path": findings_history_path(),
             "files_read": count_jsonl_files(configured_log_dir(), "findings"),
-            "records_read": int(summary.get("records_read") or 0)
-            + records_read,
+            "records_read": int(summary.get("records_read") or 0) + records_read,
             "incremental_records_read": records_read,
             "checkpoint": checkpoint,
             "findings": findings,
@@ -832,9 +915,7 @@ def display_history_analysis(analysis, window_days):
     """
     output = dict(analysis or {})
     observations = list(output.get("observations") or [])
-    observations = filter_insight_recent_records(
-        observations, use_last_seen=True
-    )
+    observations = filter_insight_recent_records(observations, use_last_seen=True)
     output["observations"] = observations
     output["window"] = view_window_metadata(window_days)
     output["insights_window"] = insights_recent_window_metadata()
@@ -909,9 +990,7 @@ def count_findings(findings):
     """Return severity counters for materialized Finding rows."""
     return {
         "total": len(findings),
-        "warning": sum(
-            1 for item in findings if item.get("severity") == "warning"
-        ),
+        "warning": sum(1 for item in findings if item.get("severity") == "warning"),
         "info": sum(1 for item in findings if item.get("severity") == "info"),
         "error": sum(
             1 for item in findings if item.get("severity") in ("error", "alert")
@@ -938,9 +1017,7 @@ def build_derived_views(window_days="default", force=False):
         cached_derived_view(
             "findings_history", load_cached_findings_history, window_days
         )
-        cached_derived_view(
-            "device_history", load_cached_device_history, window_days
-        )
+        cached_derived_view("device_history", load_cached_device_history, window_days)
         cached_derived_view(
             "history_analysis", load_cached_history_analysis, window_days
         )
@@ -978,23 +1055,17 @@ def add_refresh_metadata(summary, refreshed_at, refreshed_at_epoch):
 
 def device_history_path():
     """Return the persisted Device History summary path."""
-    return os.path.join(
-        configured_log_dir(), "device_history", "device_history.json"
-    )
+    return os.path.join(configured_log_dir(), "device_history", "device_history.json")
 
 
 def findings_history_path():
     """Return the materialized Findings summary path."""
-    return os.path.join(
-        configured_log_dir(), "device_history", "findings_history.json"
-    )
+    return os.path.join(configured_log_dir(), "device_history", "findings_history.json")
 
 
 def history_analysis_path():
     """Return the persisted history-analysis summary path."""
-    return os.path.join(
-        configured_log_dir(), "device_history", "history_analysis.json"
-    )
+    return os.path.join(configured_log_dir(), "device_history", "history_analysis.json")
 
 
 def reports_path():
@@ -1051,9 +1122,7 @@ def load_cached_device_history(window_days):
     if isinstance(summary, dict):
         summary.setdefault("window", view_window_metadata(None))
         summary.setdefault("generated_at_epoch", now_epoch())
-        summary.setdefault(
-            "generated_at", local_now(summary["generated_at_epoch"])
-        )
+        summary.setdefault("generated_at", local_now(summary["generated_at_epoch"]))
         output = DeviceHistoryBuilder(
             configured_log_dir(),
             state_path=device_history_path(),
@@ -1089,9 +1158,7 @@ def load_cached_history_analysis(window_days):
     if isinstance(analysis, dict):
         analysis.setdefault("window", view_window_metadata(None))
         analysis.setdefault("generated_at_epoch", now_epoch())
-        analysis.setdefault(
-            "generated_at", local_now(analysis["generated_at_epoch"])
-        )
+        analysis.setdefault("generated_at", local_now(analysis["generated_at_epoch"]))
         analysis.setdefault("observations", [])
         analysis.setdefault(
             "counts", count_observations(analysis.get("observations") or [])
@@ -1128,13 +1195,9 @@ def load_cached_reports(window_days):
     if isinstance(reports, dict):
         reports.setdefault("window", view_window_metadata(None))
         reports.setdefault("generated_at_epoch", now_epoch())
-        reports.setdefault(
-            "generated_at", local_now(reports["generated_at_epoch"])
-        )
+        reports.setdefault("generated_at", local_now(reports["generated_at_epoch"]))
         reports.setdefault("reports", [])
-        reports.setdefault(
-            "counts", count_reports(reports.get("reports") or [])
-        )
+        reports.setdefault("counts", count_reports(reports.get("reports") or []))
         reports["cached"] = True
         if not summary_matches_window(reports, window_days):
             empty = empty_reports(window_days)
@@ -1164,9 +1227,7 @@ def count_reports(reports):
     """Compute report counters for older cached files without counts."""
     return {
         "total": len(reports),
-        "warning": sum(
-            1 for item in reports if item.get("severity") == "warning"
-        ),
+        "warning": sum(1 for item in reports if item.get("severity") == "warning"),
         "info": sum(1 for item in reports if item.get("severity") == "info"),
     }
 
@@ -1175,12 +1236,8 @@ def count_observations(observations):
     """Compute analysis counters for older cached files without counts."""
     return {
         "total": len(observations),
-        "warning": sum(
-            1 for item in observations if item.get("severity") == "warning"
-        ),
-        "info": sum(
-            1 for item in observations if item.get("severity") == "info"
-        ),
+        "warning": sum(1 for item in observations if item.get("severity") == "warning"),
+        "info": sum(1 for item in observations if item.get("severity") == "info"),
     }
 
 
@@ -1221,17 +1278,13 @@ def refresh_history_analysis(window_days="default"):
     state_path = history.get("state_path") or os.path.join(
         "logs", "device_history", "device_history.json"
     )
-    analysis_path = os.path.join(
-        os.path.dirname(state_path), "history_analysis.json"
-    )
+    analysis_path = os.path.join(os.path.dirname(state_path), "history_analysis.json")
     analysis["state_path"] = analysis_path
     try:
         save_analysis(analysis_path, analysis)
     except OSError as exc:
         logging.exception("failed to persist history analysis: %s", exc)
-    runtime["history_analysis"] = display_history_analysis(
-        analysis, window_days
-    )
+    runtime["history_analysis"] = display_history_analysis(analysis, window_days)
     return runtime["history_analysis"]
 
 
@@ -1281,9 +1334,7 @@ async def shutdown_runtime():
                 "failed to stop collector %s: %s", collector.config_key, exc
             )
     pending = [
-        task
-        for task in runtime["tasks"]
-        if task is not current and not task.done()
+        task for task in runtime["tasks"] if task is not current and not task.done()
     ]
     for task in pending:
         task.cancel()
@@ -1300,9 +1351,7 @@ def stop_runtime(*_args):
     if loop and loop.is_running():
         future = asyncio.run_coroutine_threadsafe(shutdown_runtime(), loop)
         try:
-            future.result(
-                timeout=runtime_number("shutdown_timeout_sec", 10, minimum=1)
-            )
+            future.result(timeout=runtime_number("shutdown_timeout_sec", 10, minimum=1))
         except concurrent.futures.TimeoutError:
             logging.error("timed out waiting for collector shutdown")
     raise KeyboardInterrupt
@@ -1332,9 +1381,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Skannr monitoring dashboard")
     project_dir = os.path.dirname(os.path.abspath(__file__))
     default_config = os.path.join(project_dir, "skannr.yaml")
-    parser.add_argument(
-        "--config", default=default_config, help="Path to skannr.yaml"
-    )
+    parser.add_argument("--config", default=default_config, help="Path to skannr.yaml")
     return parser.parse_args()
 
 
@@ -1343,16 +1390,12 @@ def main():
     args = parse_args()
     config = load_config(args.config)
     runtime["config"] = config
-    runtime["event_log"] = deque(
-        maxlen=runtime_int("event_log_maxlen", 100, minimum=1)
-    )
+    runtime["event_log"] = deque(maxlen=runtime_int("event_log_maxlen", 100, minimum=1))
     runtime["findings"] = FindingsEngine(config.get("findings", {}))
     log_dir = configured_log_dir()
     os.makedirs(log_dir, exist_ok=True)
     logging.basicConfig(
-        level=getattr(
-            logging, config["skannr"]["log_level"].upper(), logging.INFO
-        ),
+        level=getattr(logging, config["skannr"]["log_level"].upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         handlers=[
             logging.FileHandler(os.path.join(log_dir, "skannr.log")),
@@ -1371,11 +1414,115 @@ def main():
     thread = threading.Thread(target=run_loop, args=(config,), daemon=True)
     thread.start()
 
-    host = str(config["skannr"]["host"])
-    port = int(config["skannr"]["port"])
+    run_web_listeners(config)
+
+
+def run_web_listeners(config):
+    """Start one or more dashboard listeners from skannr.yaml.
+
+    The only supported binding config is ``skannr.listeners``. The list may
+    contain one endpoint or several endpoints; separate IPv4/IPv6 ports avoid
+    depending on platform-specific IPv4-mapped IPv6 socket behavior.
+    """
+    listeners = configured_web_listeners(config)
+    logging.info(
+        "Resolved Skannr listener config: %s",
+        ", ".join(display_listen_url(item["host"], item["port"]) for item in listeners),
+    )
+    servers = [create_web_server(listener) for listener in listeners]
+    runtime["web_servers"] = servers
+
+    for server, listener in zip(servers[:-1], listeners[:-1]):
+        thread = threading.Thread(
+            target=serve_web_listener,
+            args=(server, listener),
+            daemon=True,
+        )
+        thread.start()
+    serve_web_listener(servers[-1], listeners[-1])
+
+
+def configured_web_listeners(config):
+    """Return normalized dashboard listener dictionaries."""
+    skannr_config = (config or {}).get("skannr") or {}
+    listeners = skannr_config.get("listeners") or []
+    normalized = []
+    for index, listener in enumerate(listeners, start=1):
+        if not isinstance(listener, str):
+            raise ValueError(
+                "skannr.listeners[{}] must be a quoted endpoint string".format(index)
+            )
+        normalized.append(parse_listener_endpoint(listener, index))
+    if normalized:
+        return normalized
+    raise ValueError("skannr.listeners must contain at least one enabled endpoint")
+
+
+def parse_listener_endpoint(endpoint, index):
+    """Parse one compact host:port listener entry from skannr.yaml."""
+    text = str(endpoint).strip()
+    if not text:
+        raise ValueError("skannr.listeners[{}] endpoint is empty".format(index))
+    if text.startswith("["):
+        close = text.find("]")
+        if close < 0 or close + 1 >= len(text) or text[close + 1] != ":":
+            raise ValueError(
+                "skannr.listeners[{}] IPv6 endpoints must use [addr]:port".format(index)
+            )
+        host = text[1:close]
+        port_text = text[close + 2 :]
+    elif text.count(":") == 1:
+        host, port_text = text.rsplit(":", 1)
+    else:
+        raise ValueError(
+            "skannr.listeners[{}] must be host:port; use [IPv6]:port for "
+            "IPv6 literals".format(index)
+        )
+    if not host:
+        raise ValueError("skannr.listeners[{}] host is empty".format(index))
+    return {"host": host, "port": parse_listener_port(port_text, index)}
+
+
+def parse_listener_port(port_value, index):
+    """Validate one configured listener TCP port."""
+    try:
+        port = int(port_value)
+    except (TypeError, ValueError):
+        raise ValueError("skannr.listeners[{}].port must be an integer".format(index))
+    if port < 1 or port > 65535:
+        raise ValueError(
+            "skannr.listeners[{}].port must be between 1 and 65535".format(index)
+        )
+    return port
+
+
+def create_web_server(listener):
+    """Bind one dashboard listener and return its Werkzeug server.
+
+    Binding every configured listener before serving any of them makes startup
+    deterministic: a bad address or busy port fails immediately instead of
+    hiding inside a background thread. This also avoids calling
+    Flask-SocketIO's lifecycle wrapper more than once in the same process.
+    """
+    host = str(listener["host"])
+    port = int(listener["port"])
     install_werkzeug_wildcard_ipv6_filter(host)
+    server = make_server(host, port, app, threaded=True)
     logging.info("Skannr listening on %s", display_listen_url(host, port))
-    socketio.run(app, host=host, port=port)
+    return server
+
+
+def serve_web_listener(server, listener):
+    """Run one blocking dashboard listener."""
+    try:
+        server.serve_forever()
+    except Exception as exc:
+        logging.exception(
+            "Skannr listener failed on %s: %s",
+            display_listen_url(listener["host"], listener["port"]),
+            exc,
+        )
+        raise
 
 
 def display_listen_url(host, port):

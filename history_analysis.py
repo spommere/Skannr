@@ -673,6 +673,7 @@ class HistoryAnalyzer:
             "names": self.list_values(device.get("names")),
             "manufacturer": device.get("manufacturer") or "",
             "manufacturer_name": device.get("manufacturer_name") or "",
+            "service_uuids": self.list_values(device.get("service_uuids")),
             "vendor_prefix": device.get("vendor_prefix") or "",
             "vendor_name": device.get("vendor_name") or "",
             "transports": self.list_values(device.get("transports")),

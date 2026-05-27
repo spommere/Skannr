@@ -43,6 +43,8 @@ let emptyDerivedRefreshRequestedAtMs = 0;
 let emptyDerivedRefreshAttempts = 0;
 let derivedRefreshMode = "";
 const transientCollectorBanners = new Map();
+const liveRenderTimers = new Map();
+const LIVE_RENDER_DELAY_MS = 500;
 const BLUETOOTH_SERVICE_NAMES = {
   "1800": "Generic Access",
   "1801": "Generic Attribute",
@@ -92,6 +94,7 @@ const BLUETOOTH_SERVICE_NAMES = {
   "fec7": "Apple Nearby",
   "fef3": "Google",
 };
+let bluetoothUuidNames = {};
 let uiConfig = {
   max_live_rows: 200,
   max_history_rows: 500,
@@ -144,7 +147,7 @@ if (viewWindowFilter) {
     findingsHistoryLoaded = false;
     emptyDerivedRefreshRequestedAtMs = 0;
     emptyDerivedRefreshAttempts = 0;
-    loadDerivedViews();
+    refreshDerivedViews("view");
   });
 }
 const insightsSeverityFilter = document.getElementById("insights-severity-filter");
@@ -194,9 +197,6 @@ if (btClassicStopButton) {
 document.querySelectorAll("[data-bluetooth-subtab]").forEach((button) => {
   button.addEventListener("click", () => showBluetoothSubtab(button.dataset.bluetoothSubtab));
 });
-setInterval(() => {
-  renderBleTable();
-}, 30000);
 const historyRefreshButton = document.getElementById("history-refresh");
 if (historyRefreshButton) {
   historyRefreshButton.addEventListener("click", () => refreshDerivedViews("manual"));
@@ -216,7 +216,6 @@ socket.on("skannr_event", handleEvent);
 buildSubtabs();
 loadCollectorMetadata();
 loadViewMetadata();
-setInterval(updateDerivedStatusLines, 60000);
 setInterval(renderLiveTables, 30000);
 ["focus", "pageshow", "online"].forEach((eventName) => {
   window.addEventListener(eventName, refreshAfterBrowserWake);
@@ -279,7 +278,18 @@ function setSocketState(text, cls) {
 
 function displayConnectionHost() {
   const host = window.location.hostname || "this host";
-  return host || "this host";
+  const port = window.location.port;
+  const displayHost = host.includes(":") ? `[${host}]` : host;
+  const endpoint = port ? `${displayHost}:${port}` : displayHost;
+  const family = connectionAddressFamily(host);
+  return family ? `${endpoint} (${family})` : endpoint;
+}
+
+function connectionAddressFamily(host) {
+  if (host.includes(":")) return "IPv6";
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return "IPv4";
+  if (host === "localhost") return "local";
+  return "";
 }
 
 function handleEvent(event) {
@@ -495,7 +505,50 @@ function renderDerivedViews(bundle) {
 }
 
 function renderLiveTables() {
+  pruneLiveScanRows();
   renderBleTable();
+}
+
+function scheduleLiveRender(key, renderer) {
+  if (liveRenderTimers.has(key)) return;
+  const timer = setTimeout(() => {
+    liveRenderTimers.delete(key);
+    renderer();
+  }, LIVE_RENDER_DELAY_MS);
+  liveRenderTimers.set(key, timer);
+}
+
+function pruneLiveScanRows() {
+  pruneRecentMap(
+    rows.ble,
+    "last_seen",
+    liveBluetoothRetentionMs(),
+    uiNumber("max_live_rows") * 5
+  );
+}
+
+function liveBluetoothRetentionMs() {
+  const recentSec = Math.max(uiNumber("bluetooth_live_recent_sec"), 60);
+  return recentSec * 1000;
+}
+
+function pruneRecentMap(map, timestampKey, maxAgeMs, maxItems) {
+  const now = Date.now();
+  const entries = [];
+  map.forEach((item, key) => {
+    const timestampMs = recordTimestampMs(item, timestampKey);
+    if (timestampMs && now - timestampMs > maxAgeMs) {
+      map.delete(key);
+      return;
+    }
+    entries.push([key, timestampMs || 0]);
+  });
+  if (entries.length <= maxItems) return;
+  entries.sort((left, right) => right[1] - left[1]);
+  const keep = new Set(entries.slice(0, maxItems).map(([key]) => key));
+  entries.forEach(([key]) => {
+    if (!keep.has(key)) map.delete(key);
+  });
 }
 
 function maybeRefreshEmptyDerivedViews(reason) {
@@ -573,7 +626,7 @@ function hydrateLiveScanTablesFromHistory(history) {
   });
 
   let bleChanged = false;
-  (bluetooth.devices || []).forEach((item) => {
+  (bluetooth.devices || []).filter(bleDeviceIsRecent).forEach((item) => {
     if (!item.mac) return;
     const current = rows.ble.get(item.mac) || {};
     rows.ble.set(item.mac, {
@@ -589,7 +642,7 @@ function hydrateLiveScanTablesFromHistory(history) {
   });
 
   if (wifiChanged) renderWifiTables();
-  if (bleChanged) renderBleTable();
+  if (bleChanged) scheduleLiveRender("ble", renderBleTable);
 }
 
 function latestArrayValue(values) {
@@ -705,6 +758,7 @@ function derivedRefreshLabel(mode) {
   return {
     automatic: "Automatic refresh",
     "catch-up": "Catch-up refresh",
+    view: "View refresh",
     manual: "Manual refresh"
   }[mode] || "Derived refresh";
 }
@@ -1129,6 +1183,7 @@ function loadViewMetadata() {
     })
     .catch(() => {
       // Keep the small static fallback selector if metadata is not available.
+      configureAutoDerivedRefresh();
       loadDerivedViews();
     });
 }
@@ -1138,6 +1193,10 @@ function applyDashboardMetadata(metadata) {
   if (metadata.ui) {
     uiConfig = {...uiConfig, ...metadata.ui};
   }
+  bluetoothUuidNames = {
+    ...BLUETOOTH_SERVICE_NAMES,
+    ...(metadata.bluetooth_uuid_names || {})
+  };
   configureAutoDerivedRefresh();
   applyRtlsdrDefaults((metadata.collectors || {}).rtlsdr || {});
 }
@@ -1213,7 +1272,8 @@ function renderBleEvent(event) {
     last_seen_epoch: event.timestamp_epoch
   };
   rows.ble.set(key, merged);
-  renderBleTable();
+  pruneLiveScanRows();
+  scheduleLiveRender("ble", renderBleTable);
   maybeRefreshEmptyDerivedViews("Bluetooth scan");
 }
 
@@ -1229,7 +1289,7 @@ function renderBleTable() {
   if (!devices.length) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 7;
+    td.colSpan = 6;
     td.textContent = "No recently seen BLE devices";
     tr.appendChild(td);
     tbody.appendChild(tr);
@@ -1239,9 +1299,8 @@ function renderBleTable() {
     const tr = document.createElement("tr");
     [
       item.mac,
-      bleDeviceName(item),
+      bleDeviceIdentity(item),
       formatSignal(item.rssi),
-      item.manufacturer || "",
       bluetoothServiceList(item.service_uuids),
       item.last_seen || ""
     ].forEach((value) => {
@@ -1270,8 +1329,7 @@ function bleDeviceIsRecent(item) {
 function bleDeviceMatchesSearch(item) {
   return rowMatchesSearch([
     item.mac,
-    bleDeviceName(item),
-    item.manufacturer,
+    bleDeviceIdentity(item),
     formatSignal(item.rssi),
     bluetoothServiceList(item.service_uuids),
     item.last_seen
@@ -1285,9 +1343,15 @@ function bluetoothServiceList(uuids) {
 function bluetoothServiceLabel(uuid) {
   const shortId = bluetoothAssignedNumber(uuid);
   if (!shortId) return customBluetoothUuidLabel(uuid);
-  const name = BLUETOOTH_SERVICE_NAMES[shortId.toLowerCase()];
+  if (bluetoothMemberUuid(shortId)) {
+    const label = `Member UUID ${shortId.toUpperCase()}`;
+    const name = bluetoothUuidNames[shortId.toLowerCase()];
+    return name ? `${label}: ${name}` : label;
+  }
+  const name = bluetoothUuidNames[shortId.toLowerCase()] ||
+    BLUETOOTH_SERVICE_NAMES[shortId.toLowerCase()];
   if (name) return `${name} (${shortId.toUpperCase()})`;
-  return shortId.length === 4 ? `Unknown service (${shortId.toUpperCase()})` : String(uuid || "");
+  return shortId.length === 4 ? `Unknown UUID (${shortId.toUpperCase()})` : String(uuid || "");
 }
 
 function bluetoothAssignedNumber(uuid) {
@@ -1312,7 +1376,7 @@ function customBluetoothUuidLabel(uuid) {
   const text = String(uuid || "").trim();
   if (!text) return "";
   const compact = text.replace(/[^0-9a-fA-F]/g, "");
-  if (compact.length > 8) return `Vendor service ${compact.slice(0, 8)}...`;
+  if (compact.length > 8) return `Vendor UUID ${compact.slice(0, 8)}...`;
   return text;
 }
 
@@ -1342,7 +1406,7 @@ function renderBtClassicEvent(event) {
       last_seen: event.timestamp,
       last_seen_epoch: event.timestamp_epoch
     });
-    renderBtClassicTable();
+    scheduleLiveRender("btClassic", renderBtClassicTable);
     maybeRefreshEmptyDerivedViews("Bluetooth classic scan");
   }
   if (event.type === "classic_device_lost") {
@@ -1353,7 +1417,7 @@ function renderBtClassicEvent(event) {
       last_seen_epoch: event.timestamp_epoch,
       state: "lost"
     });
-    renderBtClassicTable();
+    scheduleLiveRender("btClassic", renderBtClassicTable);
     maybeRefreshEmptyDerivedViews("Bluetooth classic scan");
   }
 }
@@ -1406,7 +1470,7 @@ function renderBleIdentifyEvent(event) {
     rows.bleIdentify = rows.bleIdentify.slice(0, uiNumber("max_live_rows"));
     mergeBleIdentifyResult(data, event.timestamp, event.timestamp_epoch);
     renderBleIdentifyTable();
-    renderBleTable();
+    scheduleLiveRender("ble", renderBleTable);
   } else if (event.type === "identify_failed" || event.type === "collector_offline") {
     setTransientCollectorBanner("ble_identify", event.type, data.reason || "Identify failed");
     rows.bleIdentify.unshift({
@@ -1444,16 +1508,43 @@ function compareBleIdentifyDevices(left, right) {
   return (left.mac || "").localeCompare(right.mac || "");
 }
 
-function bleDeviceName(item) {
-  const direct = bluetoothDisplayName(item.name, item.mac);
-  if (direct) return direct;
-  if (Array.isArray(item.names) && item.names.length) {
-    return item.names
-      .map((name) => bluetoothDisplayName(name, item.mac))
-      .filter(Boolean)
-      .join(", ");
-  }
-  return "";
+function bluetoothMemberUuid(shortId) {
+  return String(shortId || "").toLowerCase().startsWith("fe");
+}
+
+function bleDeviceIdentity(item) {
+  const device = item || {};
+  const direct = bluetoothDisplayName(device.name, device.mac);
+  const parts = [];
+  if (direct) parts.push(direct);
+  bluetoothDisplayNames(device.names, device.mac)
+    .filter((name) => name !== direct)
+    .forEach((name) => parts.push(name));
+  const manufacturer = bluetoothManufacturerIdentity(device);
+  if (manufacturer) parts.push(`Mfr: ${manufacturer}`);
+  return parts.join(" | ");
+}
+
+function bluetoothDisplayNames(names, mac) {
+  if (!Array.isArray(names)) return [];
+  const seen = new Set();
+  return names
+    .map((name) => bluetoothDisplayName(name, mac))
+    .filter(Boolean)
+    .filter((name) => {
+      const key = name.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function bluetoothManufacturerIdentity(item) {
+  const value = (item || {}).manufacturer_name ||
+    (item || {}).manufacturer ||
+    (item || {}).vendor_name ||
+    "";
+  return String(value).trim();
 }
 
 function bluetoothDisplayName(name, mac) {
@@ -1498,7 +1589,7 @@ function renderWifiEvent(event) {
       last_seen: event.timestamp,
       last_seen_epoch: event.timestamp_epoch
     });
-    renderWifiTables();
+    scheduleLiveRender("wifi", renderWifiTables);
     maybeRefreshEmptyDerivedViews("Wi-Fi scan");
   }
 }
@@ -1529,7 +1620,7 @@ function renderWifiMonitorEvent(event) {
       last_seen_epoch: event.timestamp_epoch
     });
     rows.monitorEvents = rows.monitorEvents.slice(0, uiNumber("max_live_rows"));
-    renderWifiMonitorTable();
+    scheduleLiveRender("wifiMonitor", renderWifiMonitorTable);
   }
 }
 
@@ -1612,8 +1703,8 @@ function renderDeviceHistory(history) {
   renderHistoryTable("history-bluetooth-devices", devices, (item) => [
     item.mac || "",
     (item.transports || []).join(", "),
-    bleDeviceName(item),
-    item.manufacturer_name || item.manufacturer || item.vendor_name || "",
+    bleDeviceIdentity(item),
+    bluetoothServiceList(item.service_uuids),
     item.model_number || "",
     item.serial_number || "",
     item.firmware_revision || "",
@@ -1873,6 +1964,8 @@ function bluetoothReportEvidenceItems(evidence) {
   if (observed) parts.push({label: "Observed", value: observed});
   const activity = bluetoothActivityText(evidence);
   if (activity) parts.push({label: "Activity", value: activity});
+  const services = bluetoothServiceList(evidence.service_uuids);
+  if (services) parts.push({label: "Services / UUIDs", value: services});
   if (signal && !foldedSignal) parts.push({label: "Signal", value: signal});
   if (evidence.sample_macs && evidence.sample_macs.length) {
     parts.push({label: "Samples", value: compactList(evidence.sample_macs, 6)});
@@ -2029,19 +2122,27 @@ function genericEvidenceItems(evidence, detail) {
     if (value === "" || value === null || value === undefined) return;
     if (!alwaysShowEvidenceKey(key) && evidenceValueAlreadyShown(value, detailText)) return;
     if (Array.isArray(value)) {
-      parts.push({label: key, value: value.join(", ")});
+      parts.push({label: evidenceLabel(key), value: value.join(", ")});
     } else {
-      parts.push({label: key, value: String(value)});
+      parts.push({label: evidenceLabel(key), value: String(value)});
     }
   });
   return parts;
 }
 
 function evidenceDisplayValue(evidence, key) {
+  if (key === "service_uuids") {
+    return bluetoothServiceList(evidence[key]);
+  }
   if ((key.endsWith("_seen") || key === "timestamp") && evidence[key]) {
     return evidence[key];
   }
   return evidence[key];
+}
+
+function evidenceLabel(key) {
+  if (key === "service_uuids") return "Services / UUIDs";
+  return key;
 }
 
 function alwaysShowEvidenceKey(key) {

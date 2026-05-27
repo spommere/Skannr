@@ -132,7 +132,7 @@
       <div id="history-bluetooth-panel" class="subpanel history-source-panel" data-source="bluetooth">
         <h3>Bluetooth Devices</h3>
         <table>
-          <thead><tr><th>MAC</th><th>Transport</th><th>Names</th><th>Manufacturer</th><th>Model</th><th>Serial</th><th>Firmware</th><th>PnP ID</th><th>First Seen</th><th>Last Seen</th><th>Signal</th><th>BLE Seen</th><th>BLE Updates</th><th>BLE Lost</th><th>Classic Seen</th><th>Sessions</th><th>Insights</th></tr></thead>
+          <thead><tr><th>MAC</th><th>Transport</th><th>Identity</th><th>Services / UUIDs</th><th>Model</th><th>Serial</th><th>Firmware</th><th>PnP ID</th><th>First Seen</th><th>Last Seen</th><th>Signal</th><th>BLE Seen</th><th>BLE Updates</th><th>BLE Lost</th><th>Classic Seen</th><th>Sessions</th><th>Insights</th></tr></thead>
           <tbody id="history-bluetooth-devices"></tbody>
         </table>
       </div>
@@ -190,11 +190,11 @@
         <div id="ble-banner" class="status-strip muted">Waiting for collector status</div>
         <div class="filter-bar">
           <label>Search
-            <input id="ble-search" type="search" placeholder="MAC, name, manufacturer, service">
+            <input id="ble-search" type="search" placeholder="MAC, identity, service UUID">
           </label>
         </div>
         <table>
-          <thead><tr><th>MAC</th><th>Name</th><th>RSSI</th><th>Manufacturer</th><th>Services</th><th>Last Seen</th><th>Action</th></tr></thead>
+          <thead><tr><th>MAC</th><th>Identity</th><th>RSSI</th><th>Services / UUIDs</th><th>Last Seen</th><th>Action</th></tr></thead>
           <tbody id="ble-devices"></tbody>
         </table>
         <h3>BLE Identify Activity</h3>

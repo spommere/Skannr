@@ -44,7 +44,7 @@ sudo "$SKANNR_DIR/.venv/bin/python" main.py
 Open:
 
 ```text
-http://127.0.0.1:5000/
+http://127.0.0.1:5004/
 ```
 
 The first run creates `skannr.yaml` if it does not already exist. Existing
@@ -105,36 +105,58 @@ sudo "$SKANNR_DIR/.venv/bin/python" "$SKANNR_DIR/main.py" --config "$SKANNR_DIR/
 
 ## Browser Access
 
-By default Skannr listens only on local IPv4:
+Skannr listens on the endpoints listed under `skannr.listeners`. YAML uses `-`
+for list items, so this is standard YAML sequence syntax. Put each endpoint in
+quotes; IPv4 often parses without quotes, but bracketed IPv6 does not:
 
 ```yaml
 skannr:
-  host: 127.0.0.1
-  port: 5000
+  listeners:
+    - "127.0.0.1:5004"
 ```
 
 For LAN IPv4 access:
 
 ```yaml
 skannr:
-  host: 0.0.0.0
-  port: 5000
+  listeners:
+    - "0.0.0.0:5004"
 ```
 
 For IPv6, including overlay networks such as Yggdrasil:
 
 ```yaml
 skannr:
-  host: "::"
-  port: 5000
+  listeners:
+    - "[::]:5006"
 ```
 
-Restart Skannr after changing `skannr.host`.
+Restart Skannr after changing `skannr.listeners`.
+
+To listen on one or more explicit endpoints, use `skannr.listeners`. One entry
+is valid; two entries are useful when you want IPv4 and IPv6 at the same time.
+Separate ports are the most reliable dual-stack configuration because same-port
+IPv4/IPv6 binding depends on OS socket defaults. Quote every endpoint string,
+and use brackets for IPv6 literals:
+
+```yaml
+skannr:
+  listeners:
+    - "0.0.0.0:5004"
+    - "[::]:5006"
+```
+
+Browser URLs for this example:
+
+```text
+http://<IPv4_ADDRESS>:5004/
+http://[IPv6_ADDRESS]:5006/
+```
 
 IPv6 literal browser URLs require brackets:
 
 ```text
-http://[200:...:abcd]:5000/
+http://[200:...:abcd]:5006/
 ```
 
 Skannr serves plain HTTP. If using Brave/Safari, make sure the browser has not
@@ -144,13 +166,13 @@ device also needs Yggdrasil connectivity or another route to that address.
 To verify the listener on the Skannr machine:
 
 ```bash
-ss -ltnp | grep 5000
+ss -ltnp | grep -E '5004|5006'
 ```
 
 To verify access from another machine:
 
 ```bash
-curl -g 'http://[IPv6_ADDRESS]:5000/collector_metadata'
+curl -g 'http://[IPv6_ADDRESS]:5006/collector_metadata'
 ```
 
 ## Run As A systemd Service
@@ -492,10 +514,18 @@ Bluetooth Classic.
 The live table shows only devices seen within `ui.bluetooth_live_recent_sec`
 seconds, default `600`. Older BLE rows remain in Device History and Reports
 but are hidden from the live table.
-The Services column decodes common Bluetooth SIG service UUIDs, such as
-`180A` to `Device Information`; vendor-specific UUIDs are left visible.
-The live table has one Search box that matches across MAC, name, manufacturer,
-RSSI, decoded services, and last-seen time.
+The Identity column combines the advertised BLE name with labeled manufacturer
+data, for example `N62N1 | Mfr: AR Timing (0x0201)`. The raw name,
+manufacturer-data company ID, and advertised UUIDs remain separate in the
+stored data for later drilldown.
+
+The Services / UUIDs column decodes common Bluetooth SIG UUIDs, such as `180A`
+to `Device Information`. Optional local UUID mapping files can also decode
+member/vendor UUIDs and label them explicitly, for example
+`Member UUID FEAF: Nest Labs Inc`.
+
+The live table has one Search box that matches across MAC, identity, RSSI,
+decoded services/UUIDs, and last-seen time.
 
 Default config:
 
@@ -623,6 +653,41 @@ Skannr to rebuild the in-memory lookup cache.
 The BLE company identifier file currently bundled in this scratch tree was
 sourced on 2026-05-18.
 
+## Bluetooth UUID Names
+
+Bluetooth company identifiers and Bluetooth UUIDs are different assigned-number
+spaces. `company_identifiers.txt` resolves manufacturer-data IDs. Advertised
+BLE service/member UUIDs are decoded separately.
+
+Skannr has a small built-in table for common service UUIDs such as:
+
+- `0x180A`: Device Information
+- `0x180F`: Battery
+- `0x1812`: Human Interface Device
+
+For broader offline decoding, place any of these optional Bluetooth SIG UUID
+files under `collectors/`:
+
+- `collectors/member_uuids.txt`
+- `collectors/service_uuids.txt`
+- `collectors/characteristic_uuids.txt`
+
+The files may use the copied Bluetooth SIG YAML-like format:
+
+```yaml
+uuids:
+ - uuid: 0xFEAF
+   name: Nest Labs Inc
+```
+
+When present, these mappings are sent to the browser. Standard service UUIDs
+are decoded in Services / UUIDs fields. Member/vendor UUIDs, such as `FEAF`,
+are also decoded there, but labeled as member UUIDs, for example
+`Member UUID FEAF: Nest Labs Inc`. Manufacturer data stays in the Bluetooth
+Identity display as a labeled `Mfr:` part and is not conflated with advertised
+service/member UUIDs.
+Reload the browser after adding or replacing one of these files.
+
 ## Package For Another Machine
 
 Create a portable archive from the parent of the checkout directory without the
@@ -658,11 +723,11 @@ Check the configured bind address:
 
 ```bash
 SKANNR_DIR=/path/to/skannr
-grep -n "host\\|port" "$SKANNR_DIR/skannr.yaml"
-ss -ltnp | grep 5000
+grep -n "host\\|port\\|listeners" "$SKANNR_DIR/skannr.yaml"
+ss -ltnp | grep -E '5004|5006'
 ```
 
-Use `host: 0.0.0.0` for IPv4 LAN access or `host: "::"` for IPv6 access.
+Use `"0.0.0.0:5004"` for IPv4 LAN access and `"[::]:5006"` for IPv6 access.
 Restart Skannr after changing the config.
 
 ### Brave Or Safari Changes HTTP To HTTPS
@@ -670,13 +735,13 @@ Restart Skannr after changing the config.
 Skannr serves plain HTTP. Use:
 
 ```text
-http://<host>:5000/
+http://<host>:5004/
 ```
 
 or:
 
 ```text
-http://[IPv6_ADDRESS]:5000/
+http://[IPv6_ADDRESS]:5006/
 ```
 
 Disable HTTPS upgrade features for the site if the browser keeps forcing

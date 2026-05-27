@@ -7,6 +7,26 @@ pre-1.0:
 - `0.2.0`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.1.7 - 2026-05-27
+
+- Replaced legacy `skannr.host` / `skannr.port` binding with required quoted
+  `skannr.listeners` endpoint strings, such as `"127.0.0.1:5004"` and
+  `"[::]:5006"`.
+- Removed default port `5000` from active config and listener documentation.
+- Added support for one or more configured listeners, including simultaneous
+  IPv4 and IPv6 endpoints.
+- Reworked listener startup so all configured endpoints bind before serving,
+  and startup fails clearly on malformed or misplaced listener config.
+- Made the browser connection badge show the actual connected endpoint, port,
+  and address family.
+- Improved Bluetooth display semantics with Identity and Services / UUIDs,
+  including offline member UUID decoding.
+- Reduced browser-side live table churn and stale BLE row retention.
+- Fixed View-window changes so Reports, Insights, and Device History refresh for
+  the selected window.
+- Added report-score recency adjustment so stale historical profiles no longer
+  keep the same rank indefinitely.
+
 ## 0.1.3 - 2026-05-22
 
 - Clarified the roles of Insights, Reports, and Device History.
