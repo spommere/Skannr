@@ -440,7 +440,7 @@ Skannr has four derived data products:
 - Insights
 - Reports
 
-The three dashboard-facing derived views have distinct responsibilities:
+The dashboard-facing derived views have distinct responsibilities:
 
 - Insights: recent event log, tactical/debuggable.
 - Reports: ranked intelligence summary, strategic/operator-facing.
@@ -458,14 +458,47 @@ minutes; `0` disables the automatic refresh. Status strips show the last
 refresh time and the next automatic refresh countdown. If the browser notices
 that the derived bundle is already stale, it starts an immediate catch-up
 refresh instead of waiting for the next scheduled interval. Refresh failures
-remain visible until a later refresh succeeds. Browser wake/focus events reload
-the derived views from the backend so a sleeping client can catch up to Pis
-that continued collecting.
+remain visible until a later refresh succeeds. Browser refresh requests use
+`ui.derived_refresh_timeout_sec` so a stuck request releases the UI in-flight
+state and allows the next automatic/manual refresh attempt to be scheduled.
+Browser wake/focus events reload the derived views from the backend so a
+sleeping client can catch up to Pis that continued collecting.
+If a refresh takes longer than the stale threshold, the browser still waits for
+the normal automatic interval after completion instead of immediately starting
+another stale catch-up refresh. This prevents continuous refresh loops on slow
+Pis or large materialized summaries.
+The backend accepts only one forced derived refresh at a time. A second refresh
+request joins the active refresh and waits through `/derived_views/status`
+instead of starting a competing rebuild.
+Normal derived-bundle loads also check `/derived_views/status` before reading
+cached summaries. If a forced refresh is active, the browser joins the active
+refresh and waits for completion instead of rendering older cached data.
+Each backend stage logs start/finish timings with an operator-facing phase
+number:
+
+- Phase 1/4, Device History: fold new raw log bytes into the materialized
+  device-history cache.
+- Phase 2/4, Insights analysis: derive recent tactical observations from
+  Device History.
+- Phase 3/4, Reports: build the ranked operator-facing intelligence summary.
+- Phase 4/4, Findings History: load and window persisted finding records.
+
+The `/derived_views/status` endpoint exposes the active refresh window, phase
+number, phase label, stage elapsed time, total elapsed time, and last completed
+refresh time. The browser polls that endpoint while a refresh is in flight so
+the status strip can distinguish a frontend stuck-state from a backend phase
+that is still running.
+Starting Skannr with `--debug` raises process logging to DEBUG and attempts to
+open a graphical terminal tailing `logs/skannr.log`. On headless or systemd
+deployments the same debug output remains available in the log file.
 When live Wi-Fi/Bluetooth rows arrive, or collector status shows scan events
 have already happened while Device History is still empty, the browser treats
 that as evidence that raw scan data exists and starts a throttled catch-up
 refresh. This covers the fresh-log case where the first page load sees empty
-cached derived summaries before scans have been materialized.
+cached derived summaries before scans have been materialized. Catch-up
+refreshes share the same post-refresh cooldown used by automatic refreshes, so
+slow Pis do not immediately start another catch-up cycle after a refresh has
+completed.
 Successful derived refreshes also rehydrate the live Wi-Fi Scan and BLE Scan
 tables from Device History so missed browser events do not leave the scan tabs
 showing stale rows when newer materialized data exists. The BLE Scan table is
@@ -478,10 +511,10 @@ remain the Skannr-host strings from the event or derived summary.
 Manual or automatic refresh of any derived tab refreshes the whole bundle in
 dependency order:
 
-1. Findings History
-2. Device History
-3. History-based Insights
-4. Reports
+1. Device History
+2. History-based Insights
+3. Reports
+4. Findings History
 
 ### Findings
 
@@ -626,8 +659,12 @@ Current report families include:
 - long Bluetooth presence
 - strong Bluetooth signal in the report window
 - recently new named/static Bluetooth device
-- grouped unnamed BLE randomized/private addresses by manufacturer
+- grouped unnamed BLE randomized/private addresses by manufacturer,
+  advertised name, and advertised service/member UUID fingerprint
 - recently new Wi-Fi AP
+- recurring Wi-Fi AP/SSID presence from managed Wi-Fi Scan history
+- long or intermittent Wi-Fi AP presence windows
+- Wi-Fi AP RSSI swing over the selected window
 - strong Wi-Fi AP in the report window
 - Wi-Fi AP encryption variation
 - Wi-Fi AP channel variation
@@ -639,10 +676,12 @@ Current report families include:
 Bluetooth sessions are clipped to the selected report window so a last-24-hours
 report does not count hours before the window boundary.
 
-The Reports UI provides a Type filter over broad report families: security,
+The Reports UI provides a Type column over broad report families: security,
 presence, signal, new-device, behavior, identity, collector, and analysis. The
-small summary line above the table is derived from the currently visible rows,
-so it changes with source filtering, type filtering, and search text.
+small Reports summary line above the table is derived from the currently visible
+rows, so it changes with source filtering and search text. Confidence and
+Reasons columns expose evidence quality and compact reason tags before the
+operator reads the longer Evidence cell.
 Report evidence remains structured in JSON, but the browser renders it as
 source-aware operator text. Related details are folded together to keep rows
 readable: session state is part of `Observed`, Wi-Fi security is part of
@@ -655,16 +694,21 @@ Evidence cell is rendered as compact stacked label/value lines rather than a
 pipe-delimited log string.
 Bluetooth report generation is device-centric on the server side. Stable BLE
 MACs produce one device-profile row with a Subject, merged findings, summary,
-and behavioral evidence. Unnamed/private BLE address churn remains grouped as a
-manufacturer-level private-address cluster. The UI should render those server
-decisions rather than re-derive intelligence from raw evidence fields.
+and behavioral evidence. Unnamed/private BLE address churn is grouped by a
+coarse fingerprint made from manufacturer, useful advertised name, and advertised
+service/member UUIDs. The UI should render those server decisions rather than
+re-derive intelligence from raw evidence fields.
 Wi-Fi report generation uses the same server-side consolidation. AP-level
-findings such as new AP, strong signal, channel variation, and security
-variation are merged into one access-point profile per BSSID. SSID-level
-behavior, such as multiple BSSIDs or locally administered/randomized BSSID
-groups, is emitted as an SSID profile. The Subject column owns identity; Evidence
-describes radio/security, observation pattern/session state, signal, vendors,
-and BSSID lists as applicable.
+findings such as signal variation, recurring/long presence, channel variation,
+and security variation are first evaluated per BSSID. When an SSID profile
+already covers a multi-BSSID network, routine AP presence, signal, and radio
+context is folded into that SSID profile instead of producing one row per radio.
+Individual BSSID rows are retained mainly for warning-level security
+differences. SSID-level behavior, such as multiple BSSIDs, recurring SSID
+presence, or locally administered/randomized BSSID groups, is emitted as an SSID
+profile. The Subject column owns identity; Evidence describes radio/security,
+observation pattern/session state, signal, vendors, and BSSID counts. Full
+BSSID/radio lists belong in drilldown instead of the report row.
 
 #### Report Scoring
 
@@ -705,8 +749,12 @@ Bluetooth private-address cluster scoring:
 Wi-Fi AP/BSSID scoring:
 
 - New AP: `+25`.
+- Recurring AP presence: `+15`.
+- Long AP presence: `+20`.
+- Intermittent AP presence: `+10`.
 - Proximity: `+10` for RSSI at least `-70`, `+20` for at least `-55`, `+35` for
   at least `-40`, `+45` for at least `-25`.
+- RSSI swing: `+10` when the configured min/max swing threshold is met.
 - Security: `+50` for open/WEP/WPA, `+35` for meaningful encryption variation,
   `+20` for lower-value security-detail variation.
 - Radio drift: `+15` when one BSSID appears on multiple channels.
@@ -716,6 +764,7 @@ Wi-Fi AP/BSSID scoring:
 Wi-Fi SSID scoring:
 
 - BSSID count: `+10` for 2 BSSIDs, `+20` for 3-5, `+30` for 6 or more.
+- Recurring SSID presence: `+15`.
 - Vendor diversity: `+25` when one SSID spans multiple vendors.
 - Locally administered/randomized BSSIDs: `+15`.
 - Security diversity: `+35` for mixed weak/open and secured security, `+20` for
@@ -756,6 +805,20 @@ separate per-column selector controls.
 Device History omits System from its Source filter; System is not a device
 source.
 
+Reports, Device History, and live scan tables expose clickable identity fields
+for operator drilldown:
+
+- Bluetooth MAC opens the Bluetooth device detail view.
+- Wi-Fi SSID opens a grouped network detail view across all BSSIDs for that
+  SSID.
+- Wi-Fi BSSID opens one radio/AP detail view.
+
+The detail view is browser-side and uses the currently loaded Device History and
+Reports payloads. It shows identity, first/last seen, radio/security context,
+signal, session/count fields, related reports, and for SSIDs a BSSID radio
+table. This keeps the main Reports rows compact while still preserving the
+evidence needed to inspect a device or network.
+
 The header contains:
 
 - application title
@@ -766,6 +829,13 @@ The connection badge reflects the browser event stream. The view-window selector
 is populated from `skannr.yaml`, `retention_days`, and optional
 `view_window.default_days`. System Status uses concise availability wording for
 hardware and keeps software checks in a separate column.
+
+Collector tabs include compact status dots derived from the live collector
+status snapshot. Wi-Fi Scan, Wi-Fi Monitor, and RTL-SDR show one dot each.
+Bluetooth shows two dots: BLE Scan first, Bluetooth Classic second. A filled
+dot means `ONLINE`; a hollow dot means stopped, offline, retrying, or otherwise
+not online. Color is only a secondary cue, with tooltips and ARIA labels
+carrying the exact collector state.
 
 The dashboard uses local assets only. No CDN is required.
 

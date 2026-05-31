@@ -10,7 +10,7 @@
   <header>
     <div class="header-title">
       <h1>Skannr</h1>
-      <div id="app-version" class="badge muted">v0.1.3</div>
+      <div id="app-version" class="badge muted"></div>
       <div id="socket-state" class="badge muted">Disconnected</div>
     </div>
     <div class="header-actions">
@@ -27,10 +27,10 @@
     <button class="tab active" data-tab="insights">Insights</button>
     <button class="tab" data-tab="reports">Reports</button>
     <button class="tab" data-tab="history">Device History</button>
-    <button class="tab" data-tab="wifi">Wi-Fi Scan</button>
-    <button class="tab" data-tab="wifi_monitor">Wi-Fi Monitor</button>
-    <button class="tab" data-tab="bluetooth">Bluetooth</button>
-    <button class="tab" data-tab="rtlsdr">RTL-SDR</button>
+    <button class="tab" data-tab="wifi">Wi-Fi Scan <span class="tab-status-dots" data-status-tab="wifi"></span></button>
+    <button class="tab" data-tab="wifi_monitor">Wi-Fi Monitor <span class="tab-status-dots" data-status-tab="wifi_monitor"></span></button>
+    <button class="tab" data-tab="bluetooth">Bluetooth <span class="tab-status-dots" data-status-tab="bluetooth"></span></button>
+    <button class="tab" data-tab="rtlsdr">RTL-SDR <span class="tab-status-dots" data-status-tab="rtlsdr"></span></button>
     <button class="tab" data-tab="system">System Status</button>
   </nav>
 
@@ -76,19 +76,6 @@
       <div id="reports-status" class="status-strip muted">Waiting for reports</div>
       <div class="filter-bar">
         <div class="source-filter" data-subtab-group="reports" aria-label="Report source filter"></div>
-        <label>Type
-          <select id="reports-type-filter">
-            <option value="all">All</option>
-            <option value="security">Security</option>
-            <option value="presence">Presence</option>
-            <option value="signal">Signal</option>
-            <option value="new">New</option>
-            <option value="behavior">Behavior</option>
-            <option value="identity">Identity</option>
-            <option value="collector">Collector</option>
-            <option value="analysis">Analysis</option>
-          </select>
-        </label>
         <label>Search
           <input id="reports-search" type="search" placeholder="Filter visible columns">
         </label>
@@ -255,6 +242,19 @@
       </table>
     </section>
   </main>
+
+  <div id="detail-backdrop" class="detail-backdrop" hidden>
+    <aside class="detail-panel" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+      <div class="detail-head">
+        <div>
+          <div id="detail-kind" class="detail-kind">Detail</div>
+          <h2 id="detail-title">Detail</h2>
+        </div>
+        <button id="detail-close" class="action-button" type="button">Close</button>
+      </div>
+      <div id="detail-body" class="detail-body"></div>
+    </aside>
+  </div>
 
   <script src="/static/tables.js"></script>
   <script src="/static/app.js"></script>

@@ -7,7 +7,7 @@ const TABLE_SCHEMAS = {
     (item) => item.last_seen || ""
   ],
   btClassicDevices: [
-    (item) => item.mac || "",
+    (item) => detailLink(item.mac || "", "bluetooth-device", item.mac || ""),
     (item) => bluetoothDisplayName(item.name, item.mac),
     (item) => item.vendor_name || item.vendor_prefix || "",
     (item) => item.class || "",
@@ -39,8 +39,8 @@ const TABLE_SCHEMAS = {
     (item) => item.last_seen || ""
   ],
   wifiAccessPoints: [
-    (item) => item.ssid || "",
-    (item) => item.bssid || "",
+    (item) => detailLink(item.ssid || "(blank)", "wifi-ssid", item.ssid || "(blank)"),
+    (item) => detailLink(item.bssid || "", "wifi-bssid", item.bssid || ""),
     (item) => vendorLabel(item),
     (item) => channelFreq(item.channel, item.frequency_band),
     (item) => item.encryption || "",
@@ -70,7 +70,7 @@ function renderTable(id, items, cellBuilder, options) {
     const tr = document.createElement("tr");
     cellBuilder(item).forEach((value) => {
       const td = document.createElement("td");
-      td.textContent = value;
+      appendTableCellValue(td, value);
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
@@ -92,7 +92,7 @@ function renderHistoryTable(id, items, cellBuilder, searchInput) {
     const tr = document.createElement("tr");
     cells.forEach((value) => {
       const td = document.createElement("td");
-      td.textContent = value;
+      appendTableCellValue(td, value);
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
@@ -104,8 +104,28 @@ function rowMatchesSearch(values, input) {
   const needle = String(input.value || "").trim().toLowerCase();
   if (!needle) return true;
   return values.some((value) =>
-    String(value === null || value === undefined ? "" : value)
+    tableCellSearchText(value)
       .toLowerCase()
       .includes(needle)
   );
+}
+
+function appendTableCellValue(cell, value) {
+  if (value instanceof Node) {
+    cell.appendChild(value);
+    return;
+  }
+  if (value && value.node instanceof Node) {
+    cell.appendChild(value.node);
+    return;
+  }
+  cell.textContent = tableCellSearchText(value);
+}
+
+function tableCellSearchText(value) {
+  if (value instanceof Node) return value.textContent || "";
+  if (value && value.node instanceof Node) {
+    return value.text || value.node.textContent || "";
+  }
+  return String(value === null || value === undefined ? "" : value);
 }

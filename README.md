@@ -103,6 +103,18 @@ SKANNR_DIR=/path/to/skannr
 sudo "$SKANNR_DIR/.venv/bin/python" "$SKANNR_DIR/main.py" --config "$SKANNR_DIR/skannr.yaml"
 ```
 
+For live troubleshooting, start with `--debug`:
+
+```bash
+SKANNR_DIR=/path/to/skannr
+sudo "$SKANNR_DIR/.venv/bin/python" "$SKANNR_DIR/main.py" --debug
+```
+
+Debug mode raises log verbosity to `DEBUG` and writes to `logs/skannr.log`. If
+Skannr is started from a graphical desktop with a supported terminal available,
+it also opens a small live `tail -F` log window. Headless and systemd runs keep
+logging to `logs/skannr.log`; use `tail -f logs/skannr.log` from another shell.
+
 ## Browser Access
 
 Skannr listens on the endpoints listed under `skannr.listeners`. YAML uses `-`
@@ -251,12 +263,20 @@ The Reports section includes Bluetooth privacy-address grouping:
 reports:
   ble_private_address_group_min_count: 3
   new_device_window_sec: 3600
+  wifi_recurring_min_days: 2
+  wifi_long_presence_sec: 14400
+  wifi_intermit_min_sessions: 3
+  wifi_signal_swing_db: 15
 ```
 
-Unnamed/private BLE addresses at or above this count are summarized by
-manufacturer instead of being reported as separate new physical devices.
+Unnamed/private BLE addresses at or above this count are summarized by a coarse
+Bluetooth fingerprint: manufacturer, advertised name when useful, and advertised
+service/member UUIDs. This avoids treating every rotating BLE address as a
+separate physical device while still preserving the raw per-MAC Device History.
 `new_device_window_sec` controls how recent a first sighting must be before
 Reports call a Wi-Fi AP, Wi-Fi client, or named/static Bluetooth device "new".
+The Wi-Fi thresholds add managed-scan presence signals to Reports: recurring
+AP/SSID days, long AP presence, intermittent AP windows, and large RSSI swings.
 
 Changing YAML settings requires restarting Skannr so the browser receives the
 new metadata and collector configuration.
@@ -308,9 +328,10 @@ open. The default interval is 15 minutes:
 ```yaml
 ui:
   derived_auto_refresh_min: 15
+  derived_refresh_timeout_sec: 600
 ```
 
-The three derived views have different jobs:
+The derived views have different jobs:
 
 - Insights: recent event log, tactical/debuggable.
 - Reports: ranked intelligence summary, strategic/operator-facing.
@@ -332,21 +353,47 @@ Set `derived_auto_refresh_min: 0` to disable automatic derived refresh. The
 status line shows the last refresh time and the next automatic refresh countdown.
 If the browser wakes up with stale derived data, it starts an immediate catch-up
 refresh instead of waiting for the next interval. Refresh failures stay visible
-in the status line until a later refresh succeeds. The Manual Refresh button is
-still available when you want an immediate rebuild. Browser wake/focus events
-also reload the derived view from the backend, which helps after a laptop sleeps
+in the status line until a later refresh succeeds. A refresh request times out
+after `derived_refresh_timeout_sec` so a stuck backend request cannot leave the
+browser showing "refresh running" forever. The Manual Refresh button is still
+available when you want an immediate rebuild. Browser wake/focus events also
+reload the derived view from the backend, which helps after a laptop sleeps
 while the Pis keep collecting.
+If a refresh itself takes longer than the stale threshold, Skannr waits for the
+normal automatic interval after completion instead of immediately starting
+another catch-up refresh. This avoids a continuous refresh loop on slower
+systems or large materialized histories.
 
 After a fresh log cleanup, the browser may initially load empty cached derived
 summaries before the first scan events have been folded into Device History. If
 live Wi-Fi/Bluetooth rows arrive, or collector status shows scan events have
 already happened while Device History is still empty, the browser starts a
 throttled catch-up refresh instead of waiting for the normal automatic refresh
-interval.
+interval. Catch-up refreshes use the same post-refresh cooldown as automatic
+refreshes, so an empty cached load cannot start repeated catch-up refreshes
+immediately after a backend refresh finished.
 
 A successful derived refresh also backfills the live Wi-Fi Scan and BLE Scan
 tables from Device History. This keeps those scan rows current when the browser
 missed live events while the collectors and raw logs kept running.
+
+While a derived refresh is running, the browser polls `/derived_views/status`
+and shows the numbered backend phase in the status strip. Use the same phase
+numbers in `logs/skannr.log` when debugging a long refresh:
+
+- Phase 1/4, Device History: fold new raw log bytes into the materialized
+  device-history cache.
+- Phase 2/4, Insights analysis: derive recent tactical observations from
+  Device History.
+- Phase 3/4, Reports: build the ranked operator-facing intelligence summary.
+- Phase 4/4, Findings History: load and window persisted finding records.
+
+If refresh appears stuck, check which phase is still running and compare its
+elapsed time with the previous completed phase lines in `logs/skannr.log`.
+Normal derived-bundle loads also check `/derived_views/status` first. If the
+backend is already in one of these phases, the browser waits for that refresh
+to finish before loading `/derived_views`, so it does not render an older cached
+bundle with a stale refreshed timestamp.
 
 The BLE Scan table is a live/recent view. The browser periodically repaints it
 so devices age out after `ui.bluetooth_live_recent_sec` even if no new BLE event
@@ -367,16 +414,22 @@ Device History and Findings History are materialized summaries with JSONL
 checkpoints. After the first build, refresh normally reads only new raw-log
 bytes, not all old logs again.
 
-Reports has a Type filter for broad report families such as security, presence,
-signal, new-device, behavior, identity, collector, and analysis. The summary
-line above the table shows the most common report families in the current
-source-filter/type-filter/search view.
+Reports keeps a visible Type column for broad report families such as security,
+presence, signal, new-device, behavior, identity, collector, and analysis. The
+Reports summary line above the table shows the most common report families in
+the current source-filter/search view. Reports also include Confidence and
+Reasons columns so rows show evidence quality and compact reason tags without
+requiring the Evidence column to be parsed first.
 Bluetooth Reports are device-centric: stable BLE MACs are consolidated into one
 profile row per device, while unnamed/private BLE address rotation is summarized
-as manufacturer clusters.
-Wi-Fi Reports follow the same model: AP-level findings are consolidated into
-one profile row per BSSID, while SSID-level behavior such as multiple BSSIDs is
-reported as a separate SSID profile.
+as coarse manufacturer/name/service-UUID clusters.
+Wi-Fi Reports are SSID-centric when a network has several BSSIDs. SSID profiles
+summarize BSSID count, channels, bands, vendors, security, and strongest signal.
+Individual BSSID reports stay visible mainly when that radio has a warning-level
+security difference; routine presence, signal, and radio context belongs on the
+SSID profile to avoid one multi-BSSID network becoming many duplicate rows.
+Managed Wi-Fi Scan also contributes presence signals based on AP sessions,
+recurring days, long or intermittent AP presence, and RSSI swing.
 The Reports Evidence column is formatted as operator-readable context, for
 example `Pattern`, `Observed`, and `Radio`, instead of exposing raw internal
 field names such as `common_hours` or `presence_spans`. In the browser those
@@ -384,6 +437,13 @@ evidence items are rendered as stacked labeled lines for readability. Related
 context is folded together where it improves readability: session state is part
 of `Observed`, Wi-Fi security is part of `Radio`, and strong-signal findings
 carry their signal value on the `Findings` line.
+
+MAC, SSID, and BSSID values in Reports, Device History, and live scan tables are
+clickable detail links. Bluetooth MAC links open one device view. Wi-Fi SSID
+links open a grouped network view across all BSSIDs for that SSID. Wi-Fi BSSID
+links open the one-radio/AP view. The detail panel uses the currently loaded
+Device History and Reports data, so run Manual Refresh if the panel looks older
+than the live scan table.
 
 Device History does not include System in its Source filter because System
 events are not device histories. System events can still appear in Insights and

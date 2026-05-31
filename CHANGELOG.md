@@ -7,6 +7,41 @@ pre-1.0:
 - `0.2.0`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.1.9 - 2026-05-31
+
+- Kept Reports as the single intelligence report and removed the separate
+  Presence report surface. Presence, security, signal, identity, scanner, and
+  collector findings now share the same ranked Reports workflow.
+- Improved Reports evidence quality with Confidence and Reasons columns,
+  scanner-quality rows, tighter SSID/BSSID grouping, Wi-Fi managed-scan
+  presence findings, and BLE randomized/private-address grouping.
+- Reworked derived refresh coordination so browser reloads, wake/focus events,
+  manual refreshes, and automatic refreshes join one backend refresh instead of
+  creating competing work or stale UI states.
+- Added clearer derived-refresh diagnostics, including numbered phases,
+  backend worker timings, browser fetch/render diagnostics, and optional
+  `--debug` / `-debug` startup logging.
+- Fixed stale Reports and Device History timestamps after restart or refresh by
+  making cached loads detect unmaterialized raw logs, joining active catch-up
+  refreshes, and overlaying newest live Wi-Fi/Bluetooth observations before
+  publishing derived views.
+- Reduced derived-view refresh and browser load cost by compacting/gzipping
+  HTTP payloads, capping browser-bound Device History rows, suppressing
+  low-value stale anonymous BLE churn from Reports/Insights, compacting
+  materialized cache writes, and avoiding unnecessary large-cache rewrites.
+- Hardened materialized derived summaries with atomic writes, mixed-type
+  serialization/sorting fixes, coherent dependent-summary repair, and bounded
+  live-observation cache pruning.
+
+## 0.1.8 - 2026-05-28
+
+- Added collector status dots to the main collector tabs so Wi-Fi Scan,
+  Wi-Fi Monitor, Bluetooth, and RTL-SDR show online/offline state at a glance.
+- Added clickable drilldown views for Bluetooth MACs, Wi-Fi SSIDs, and Wi-Fi
+  BSSIDs from Reports, Device History, and live scan tables.
+- Made Wi-Fi Reports more SSID-centric by summarizing multi-BSSID networks in
+  one profile row and moving full BSSID/radio details into drilldown.
+
 ## 0.1.7 - 2026-05-27
 
 - Replaced legacy `skannr.host` / `skannr.port` binding with required quoted

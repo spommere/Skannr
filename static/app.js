@@ -1,4 +1,5 @@
 const socket = createLocalEventSocket();
+const CLIENT_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const rows = {
   signals: new Map(),
   ble: new Map(),
@@ -33,18 +34,37 @@ let latestHistoryAnalysis = null;
 let latestReports = null;
 let activeWindow = "default";
 let findingsHistoryLoaded = false;
-let derivedRefreshInFlight = false;
+const DERIVED_OPERATION = {
+  IDLE: "idle",
+  LOADING: "loading",
+  REFRESHING: "refreshing",
+  WAITING: "waiting"
+};
+const derivedCoordinator = {
+  operation: DERIVED_OPERATION.IDLE,
+  loadPromise: null,
+  loadRequestId: 0,
+  loadWindow: "",
+  loadScheduleTimer: null,
+  pendingLoadReason: "",
+  refreshRequestId: 0,
+  refreshMode: "",
+  statusPollTimer: null,
+  pollRecoverOnComplete: false,
+  statusText: ""
+};
 let autoDerivedRefreshTimer = null;
 let derivedStatusTicker = null;
 let nextAutoDerivedRefreshAtMs = null;
 let lastDerivedRefreshError = "";
+let lastDerivedRefreshCompletedAtMs = 0;
 let lastWakeRefreshAtMs = 0;
 let emptyDerivedRefreshRequestedAtMs = 0;
 let emptyDerivedRefreshAttempts = 0;
-let derivedRefreshMode = "";
 const transientCollectorBanners = new Map();
 const liveRenderTimers = new Map();
 const LIVE_RENDER_DELAY_MS = 500;
+const DERIVED_LOAD_DEBOUNCE_MS = 400;
 const BLUETOOTH_SERVICE_NAMES = {
   "1800": "Generic Access",
   "1801": "Generic Attribute",
@@ -98,12 +118,14 @@ let bluetoothUuidNames = {};
 let uiConfig = {
   max_live_rows: 200,
   max_history_rows: 500,
+  max_history_payload_rows: 1500,
   max_event_log_items: 100,
   max_rendered_findings: 1000,
   max_history_ssids: 8,
   bluetooth_live_recent_sec: 600,
   derived_stale_after_min: 15,
   derived_auto_refresh_min: 15,
+  derived_refresh_timeout_sec: 600,
   insights_recent_after_min: 30
 };
 
@@ -112,21 +134,99 @@ function fetchJson(url, options) {
     cache: "no-store",
     ...(options || {})
   };
-  return fetch(url, requestOptions).then((response) => {
-    const contentType = response.headers.get("content-type") || "";
-    const isJson = contentType.includes("application/json");
-    if (isJson) {
-      return response.json().then((payload) => {
+  return fetch(url, requestOptions)
+    .then((response) => {
+      const contentType = response.headers.get("content-type") || "";
+      const isJson = contentType.includes("application/json");
+      if (isJson) {
+        return response.json().then((payload) => {
+          if (!response.ok || payload.ok === false) {
+            throw new Error(payload.error || `HTTP ${response.status}`);
+          }
+          return payload;
+        });
+      }
+      return response.text().then((text) => {
+        const detail = String(text || "").replace(/\s+/g, " ").slice(0, 240);
+        throw new Error(`HTTP ${response.status}: ${detail || response.statusText}`);
+      });
+    })
+    .catch((error) => {
+      if (error && error.name === "AbortError") {
+        throw new Error(`timed out after ${Math.round((requestOptions._timeoutMs || 0) / 1000)} seconds`);
+      }
+      throw error;
+    })
+    .finally(() => {
+      clearRequestTimeout(requestOptions);
+    });
+}
+
+function fetchDerivedBundle(url, requestWindow) {
+  const started = performance.now();
+  return fetch(url, {cache: "no-store"})
+    .then((response) => {
+      const headersAt = performance.now();
+      const contentType = response.headers.get("content-type") || "";
+      const contentLength = response.headers.get("content-length") || "";
+      const encoding = response.headers.get("content-encoding") || "identity";
+      const jsonBytes = response.headers.get("x-skannr-json-bytes") || "";
+      return response.text().then((text) => {
+        const bodyAt = performance.now();
+        if (!contentType.includes("application/json")) {
+          const detail = String(text || "").replace(/\s+/g, " ").slice(0, 240);
+          throw new Error(`HTTP ${response.status}: ${detail || response.statusText}`);
+        }
+        let payload;
+        const parseStarted = performance.now();
+        try {
+          payload = JSON.parse(text);
+        } catch (error) {
+          uiDebug("derived_fetch_parse_failed", {
+            window: requestWindow,
+            status: response.status,
+            content_length: contentLength,
+            json_bytes: jsonBytes,
+            encoding,
+            chars: text.length,
+            error: errorMessage(error)
+          });
+          throw error;
+        }
+        const parsedAt = performance.now();
+        uiDebug("derived_fetch_timing", {
+          window: requestWindow,
+          status: response.status,
+          content_length: contentLength,
+          json_bytes: jsonBytes,
+          encoding,
+          chars: text.length,
+          headers_ms: Math.round(headersAt - started),
+          body_ms: Math.round(bodyAt - headersAt),
+          parse_ms: Math.round(parsedAt - parseStarted),
+          total_ms: Math.round(parsedAt - started)
+        });
         if (!response.ok || payload.ok === false) {
           throw new Error(payload.error || `HTTP ${response.status}`);
         }
         return payload;
       });
-    }
-    return response.text().then((text) => {
-      const detail = String(text || "").replace(/\s+/g, " ").slice(0, 240);
-      throw new Error(`HTTP ${response.status}: ${detail || response.statusText}`);
     });
+}
+
+function uiDebug(event, detail) {
+  const payload = {
+    client_id: CLIENT_SESSION_ID,
+    event,
+    detail: detail || {}
+  };
+  fetch("/ui_debug", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload),
+    keepalive: true
+  }).catch(() => {
+    // Browser diagnostics must never affect dashboard behavior.
   });
 }
 
@@ -174,10 +274,6 @@ const reportsSearch = document.getElementById("reports-search");
 if (reportsSearch) {
   reportsSearch.addEventListener("input", () => renderReports(latestReports || {}));
 }
-const reportsTypeFilter = document.getElementById("reports-type-filter");
-if (reportsTypeFilter) {
-  reportsTypeFilter.addEventListener("change", () => renderReports(latestReports || {}));
-}
 const wifiSearch = document.getElementById("wifi-search");
 if (wifiSearch) {
   wifiSearch.addEventListener("input", renderWifiTables);
@@ -223,6 +319,7 @@ setInterval(renderLiveTables, 30000);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refreshAfterBrowserWake();
 });
+setupDetailPanel();
 
 function createLocalEventSocket() {
   const handlers = new Map();
@@ -380,7 +477,6 @@ function renderReports(reportBundle) {
   tbody.innerHTML = "";
   rows.reports
     .filter(reportMatchesSubtab)
-    .filter(reportMatchesTypeFilter)
     .filter(reportMatchesSearch)
     .slice(0, uiNumber("max_rendered_findings"))
     .forEach((report) => {
@@ -390,6 +486,8 @@ function renderReports(reportBundle) {
         td.className = `report-col-${column.key}`;
         if (column.key === "evidence") {
           renderReportEvidenceCell(td, reportEvidenceItems(report));
+        } else if (column.key === "subject") {
+          appendTableCellValue(td, reportSubjectCell(report, column.value));
         } else {
           td.textContent = column.value;
         }
@@ -401,9 +499,24 @@ function renderReports(reportBundle) {
   updateReportsSummary(
     rows.reports
       .filter(reportMatchesSubtab)
-      .filter(reportMatchesTypeFilter)
       .filter(reportMatchesSearch)
   );
+}
+
+function reportIsPresenceReport(report) {
+  const type = String((report || {}).type || "").toLowerCase();
+  const evidence = (report || {}).evidence || {};
+  const findings = (evidence.findings || []).join(" ").toLowerCase();
+  const text = `${type} ${findings}`;
+  return text.includes("presence") ||
+    text.includes("recurring") ||
+    text.includes("long") ||
+    text.includes("cluster") ||
+    text.includes("private_address") ||
+    text.includes("private-address") ||
+    text.includes("new access point") ||
+    text.includes("new bluetooth") ||
+    text.includes("new named/static");
 }
 
 function renderReportsHeader() {
@@ -432,7 +545,9 @@ function reportColumns(report) {
   ];
   if (showReportsSourceColumn()) columns.push({key: "source", label: "Source", value: sourceLabel(report.source)});
   columns.push(
-    {key: "type", label: "Type", value: categoryForType(report.type || "report")},
+    {key: "type", label: "Type", value: reportTypeCategory(report)},
+    {key: "confidence", label: "Confidence", value: report.confidence || ""},
+    {key: "reasons", label: "Reasons", value: compactList(report.reason_tags || [], 6)},
     {key: "report", label: "Report", value: report.title || ""},
     {key: "subject", label: "Subject", value: report.subject || ""},
     {key: "summary", label: "Summary", value: report.summary || ""},
@@ -442,14 +557,240 @@ function reportColumns(report) {
   return columns;
 }
 
-function loadDerivedViews() {
-  fetchJson(`/derived_views${windowQuery()}`)
-    .then(renderDerivedViews)
-    .catch((error) => setDerivedStatus(`Derived views unavailable: ${error}`, "alert"));
+function reportSubjectCell(report, fallback) {
+  const target = detailTargetForReport(report);
+  const label = fallback || (target && target.key) || "";
+  if (!target || !target.key) return label;
+  return detailLink(label, target.type, target.key);
 }
 
-function windowQuery() {
-  return `?days=${encodeURIComponent(activeWindow || "default")}`;
+function detailTargetForReport(report) {
+  const evidence = (report || {}).evidence || {};
+  const source = String((report || {}).source || "").toLowerCase();
+  const type = String((report || {}).type || "").toLowerCase();
+  if (source === "bluetooth" || type.startsWith("ble_")) {
+    if (evidence.mac) return {type: "bluetooth-device", key: evidence.mac};
+    return null;
+  }
+  if (type === "wifi_ssid_profile" && evidence.ssid) {
+    return {type: "wifi-ssid", key: evidence.ssid};
+  }
+  if ((source === "wifi" || type.startsWith("wifi_ap")) && evidence.bssid) {
+    return {type: "wifi-bssid", key: evidence.bssid};
+  }
+  if ((source === "wifi" || type.includes("ssid")) && evidence.ssid) {
+    return {type: "wifi-ssid", key: evidence.ssid};
+  }
+  return null;
+}
+
+function derivedRefreshActive() {
+  return [
+    DERIVED_OPERATION.REFRESHING,
+    DERIVED_OPERATION.WAITING
+  ].includes(derivedCoordinator.operation);
+}
+
+function derivedLoadActive() {
+  return (
+    derivedCoordinator.operation === DERIVED_OPERATION.LOADING &&
+    derivedCoordinator.loadPromise
+  );
+}
+
+function setDerivedCoordinatorIdle() {
+  derivedCoordinator.operation = DERIVED_OPERATION.IDLE;
+  derivedCoordinator.refreshMode = "";
+  derivedCoordinator.statusText = "";
+  derivedCoordinator.pollRecoverOnComplete = false;
+}
+
+function cancelScheduledDerivedLoad() {
+  if (derivedCoordinator.loadScheduleTimer) {
+    clearTimeout(derivedCoordinator.loadScheduleTimer);
+    derivedCoordinator.loadScheduleTimer = null;
+  }
+  derivedCoordinator.pendingLoadReason = "";
+}
+
+function cancelActiveDerivedLoad(reason) {
+  cancelScheduledDerivedLoad();
+  if (!derivedCoordinator.loadPromise) return;
+  uiDebug("derived_load_cancelled", {
+    reason: reason || "",
+    previous_window: derivedCoordinator.loadWindow || ""
+  });
+  derivedCoordinator.loadRequestId += 1;
+  derivedCoordinator.loadPromise = null;
+  derivedCoordinator.loadWindow = "";
+  if (derivedCoordinator.operation === DERIVED_OPERATION.LOADING) {
+    derivedCoordinator.operation = DERIVED_OPERATION.IDLE;
+  }
+}
+
+function loadDerivedViews() {
+  uiDebug("derived_load_requested", {
+    window: activeWindow || "default",
+    operation: derivedCoordinator.operation,
+    mode: derivedCoordinator.refreshMode || ""
+  });
+  if (derivedRefreshActive()) {
+    uiDebug("derived_load_skipped_refreshing", derivedStatusSnapshot());
+    return Promise.resolve(null);
+  }
+  const requestWindow = activeWindow || "default";
+  if (derivedLoadActive()) {
+    if (derivedCoordinator.loadWindow === requestWindow) {
+      uiDebug("derived_load_joined_inflight", {
+        window: requestWindow
+      });
+      return derivedCoordinator.loadPromise;
+    }
+    uiDebug("derived_load_replacing_inflight", {
+      previous_window: derivedCoordinator.loadWindow || "",
+      request_window: requestWindow
+    });
+    derivedCoordinator.loadRequestId += 1;
+    derivedCoordinator.loadPromise = null;
+    derivedCoordinator.loadWindow = "";
+  }
+  derivedCoordinator.operation = DERIVED_OPERATION.LOADING;
+  const requestId = ++derivedCoordinator.loadRequestId;
+  derivedCoordinator.loadWindow = requestWindow;
+  const loadPromise = fetchJson("/derived_views/status")
+    .then((status) => {
+      if (requestId !== derivedCoordinator.loadRequestId) {
+        uiDebug("derived_load_ignored_status", {
+          request_window: requestWindow,
+          active_window: activeWindow || "default",
+          request_id: requestId,
+          latest_request_id: derivedCoordinator.loadRequestId
+        });
+        return null;
+      }
+      if (status && status.in_progress) {
+        uiDebug("derived_load_joined_refresh", status);
+        continuePollingActiveDerivedRefresh("Backend refresh", status);
+        return null;
+      }
+      uiDebug("derived_fetch_start", {window: requestWindow});
+      return fetchDerivedBundle(
+        `/derived_views${windowQuery(requestWindow)}`,
+        requestWindow
+      );
+    })
+    .then((bundle) => {
+      if (!bundle) return null;
+      uiDebug("derived_fetch_resolved", {
+        request_window: requestWindow,
+        active_window: activeWindow || "default",
+        request_id: requestId,
+        latest_request_id: derivedCoordinator.loadRequestId
+      });
+      if (requestId !== derivedCoordinator.loadRequestId) {
+        uiDebug("derived_load_ignored_bundle", {
+          request_window: requestWindow,
+          active_window: activeWindow || "default",
+          request_id: requestId,
+          latest_request_id: derivedCoordinator.loadRequestId
+        });
+        return null;
+      }
+      if (bundle.refresh_in_progress) {
+        uiDebug("derived_load_bundle_in_progress", bundle.status || {});
+        continuePollingActiveDerivedRefresh(
+          "Backend refresh",
+          bundle.status || {}
+        );
+        return null;
+      }
+      uiDebug("derived_load_received", safeDerivedBundleSummary(bundle));
+      renderDerivedViews(bundle);
+      return bundle;
+    })
+    .catch((error) => {
+      uiDebug("derived_load_failed", {
+        request_window: requestWindow,
+        request_id: requestId,
+        latest_request_id: derivedCoordinator.loadRequestId,
+        error: errorMessage(error)
+      });
+      if (requestId === derivedCoordinator.loadRequestId) {
+        setDerivedStatus(`Derived views unavailable: ${error}`, "alert");
+      }
+      return null;
+    })
+    .finally(() => {
+      if (derivedCoordinator.loadPromise === loadPromise) {
+        derivedCoordinator.loadPromise = null;
+        derivedCoordinator.loadWindow = "";
+        if (derivedCoordinator.operation === DERIVED_OPERATION.LOADING) {
+          derivedCoordinator.operation = DERIVED_OPERATION.IDLE;
+        }
+      }
+    });
+  derivedCoordinator.loadPromise = loadPromise;
+  return loadPromise;
+}
+
+function requestDerivedLoad(reason, options) {
+  const requestWindow = activeWindow || "default";
+  const immediate = Boolean((options || {}).immediate);
+  uiDebug("derived_load_queued", {
+    reason: reason || "",
+    window: requestWindow,
+    operation: derivedCoordinator.operation,
+    load_window: derivedCoordinator.loadWindow || "",
+    refresh_mode: derivedCoordinator.refreshMode || ""
+  });
+  if (derivedRefreshActive()) {
+    uiDebug("derived_load_deferred_refreshing", derivedStatusSnapshot());
+    return Promise.resolve(null);
+  }
+  if (derivedLoadActive() && derivedCoordinator.loadWindow === requestWindow) {
+    uiDebug("derived_load_joined_inflight", {
+      reason: reason || "",
+      window: requestWindow
+    });
+    return derivedCoordinator.loadPromise;
+  }
+  if (derivedLoadActive() && derivedCoordinator.loadWindow !== requestWindow) {
+    uiDebug("derived_load_superseded_inflight", {
+      reason: reason || "",
+      previous_window: derivedCoordinator.loadWindow || "",
+      request_window: requestWindow
+    });
+    derivedCoordinator.loadRequestId += 1;
+    derivedCoordinator.loadPromise = null;
+    derivedCoordinator.loadWindow = "";
+    if (derivedCoordinator.operation === DERIVED_OPERATION.LOADING) {
+      derivedCoordinator.operation = DERIVED_OPERATION.IDLE;
+    }
+  }
+  derivedCoordinator.pendingLoadReason = derivedCoordinator.pendingLoadReason
+    ? `${derivedCoordinator.pendingLoadReason}, ${reason || "request"}`
+    : (reason || "request");
+  if (derivedCoordinator.loadScheduleTimer) {
+    clearTimeout(derivedCoordinator.loadScheduleTimer);
+  }
+  const delay = immediate ? 0 : DERIVED_LOAD_DEBOUNCE_MS;
+  derivedCoordinator.loadScheduleTimer = setTimeout(runScheduledDerivedLoad, delay);
+  return Promise.resolve(null);
+}
+
+function runScheduledDerivedLoad() {
+  const reason = derivedCoordinator.pendingLoadReason || "scheduled";
+  derivedCoordinator.pendingLoadReason = "";
+  derivedCoordinator.loadScheduleTimer = null;
+  uiDebug("derived_load_coordinator_run", {
+    reason,
+    window: activeWindow || "default"
+  });
+  loadDerivedViews();
+}
+
+function windowQuery(windowValue) {
+  return `?days=${encodeURIComponent(windowValue || activeWindow || "default")}`;
 }
 
 function windowRequestOptions() {
@@ -461,47 +802,330 @@ function windowRequestOptions() {
 }
 
 function refreshDerivedViews(mode) {
-  const refreshMode = mode || "manual";
+  return runDerivedRefresh(mode || "manual", "Derived refresh failed");
+}
+
+function runDerivedRefresh(refreshMode, failurePrefix) {
   const label = derivedRefreshLabel(refreshMode);
-  if (derivedRefreshInFlight) {
+  if (derivedRefreshActive()) {
     setDerivedStatus(`${label} skipped; refresh already running`, "warning");
+    if (refreshMode === "automatic") scheduleAutoDerivedRefresh();
     return Promise.resolve(null);
   }
-  derivedRefreshInFlight = true;
-  derivedRefreshMode = refreshMode;
+  cancelActiveDerivedLoad("refresh starting");
+  derivedCoordinator.operation = DERIVED_OPERATION.REFRESHING;
+  const requestId = ++derivedCoordinator.refreshRequestId;
+  derivedCoordinator.refreshMode = refreshMode;
   nextAutoDerivedRefreshAtMs = null;
   setDerivedStatus(`${label} running`, "warning");
+  derivedCoordinator.statusText = `${label} running`;
   let failed = false;
-  return fetchJson("/derived_views/refresh", windowRequestOptions())
+  return refreshWhenBackendIdle(label, refreshMode)
     .then((bundle) => {
+      if (requestId !== derivedCoordinator.refreshRequestId) return;
+      if (!bundle) return;
+      if (bundle && bundle.refresh_in_progress) {
+        continuePollingActiveDerivedRefresh(label, bundle.status || {});
+        return;
+      }
       validateDerivedBundleShape(bundle);
       lastDerivedRefreshError = "";
       renderDerivedViews(bundle);
     })
     .catch((error) => {
+      if (requestId !== derivedCoordinator.refreshRequestId) return;
       failed = true;
-      lastDerivedRefreshError = `Derived refresh failed: ${error}`;
-      setDerivedStatus(`Derived refresh failed: ${error}`, "alert");
+      lastDerivedRefreshError = `${failurePrefix}: ${error}`;
+      derivedCoordinator.statusText = "";
+      setDerivedStatus(lastDerivedRefreshError, "alert");
     })
     .finally(() => {
-      derivedRefreshInFlight = false;
-      derivedRefreshMode = "";
+      if (requestId !== derivedCoordinator.refreshRequestId) return;
+      if (derivedCoordinator.operation === DERIVED_OPERATION.WAITING) return;
+      setDerivedCoordinatorIdle();
+      lastDerivedRefreshCompletedAtMs = Date.now();
+      stopDerivedStatusPolling();
       scheduleAutoDerivedRefresh();
       if (!failed) updateDerivedStatusLines();
     });
 }
 
+function refreshWhenBackendIdle(label, refreshMode) {
+  return fetchJson("/derived_views/status")
+    .then((status) => {
+      if (status && status.in_progress) {
+        continuePollingActiveDerivedRefresh(label, status);
+        return null;
+      }
+      if (backendRefreshRecentlyFinished(status, refreshMode)) {
+        lastDerivedRefreshCompletedAtMs = Number(status.last_finished_epoch) * 1000;
+        setDerivedCoordinatorIdle();
+        scheduleAutoDerivedRefresh();
+        requestDerivedLoad("recent backend refresh", {immediate: true});
+        return null;
+      }
+      const refreshPromise = fetchJson(
+        "/derived_views/refresh",
+        withTimeout(windowRequestOptions(), derivedRefreshTimeoutMs())
+      );
+      setTimeout(() => {
+        if (derivedCoordinator.operation === DERIVED_OPERATION.REFRESHING) {
+          startDerivedStatusPolling(label, false);
+        }
+      }, 1000);
+      return refreshPromise;
+    });
+}
+
+function backendRefreshRecentlyFinished(status, refreshMode) {
+  if (!status || !status.last_finished_epoch) return false;
+  if (refreshMode !== "automatic" && refreshMode !== "catch-up") return false;
+  const intervalMin = uiNonNegativeNumber("derived_auto_refresh_min");
+  if (intervalMin <= 0) return false;
+  const finishedMs = Number(status.last_finished_epoch) * 1000;
+  if (!Number.isFinite(finishedMs) || finishedMs <= 0) return false;
+  return Date.now() - finishedMs < intervalMin * 60000;
+}
+
+function continuePollingActiveDerivedRefresh(label, status) {
+  cancelActiveDerivedLoad("backend refresh active");
+  derivedCoordinator.operation = DERIVED_OPERATION.WAITING;
+  derivedCoordinator.refreshMode = "waiting";
+  lastDerivedRefreshError = "";
+  const text = derivedRefreshStatusText(label, status || {});
+  derivedCoordinator.statusText =
+    text || `${label} waiting for active backend refresh`;
+  setDerivedStatus(
+    derivedCoordinator.statusText,
+    "warning"
+  );
+  if (!derivedCoordinator.statusPollTimer || !derivedCoordinator.pollRecoverOnComplete) {
+    startDerivedStatusPolling(label, true);
+  }
+}
+
+function startDerivedStatusPolling(label, recoverOnComplete) {
+  stopDerivedStatusPolling();
+  derivedCoordinator.pollRecoverOnComplete = Boolean(recoverOnComplete);
+  pollDerivedRefreshStatus(label);
+  derivedCoordinator.statusPollTimer = setInterval(() => {
+    pollDerivedRefreshStatus(label);
+  }, 5000);
+}
+
+function stopDerivedStatusPolling() {
+  if (derivedCoordinator.statusPollTimer) {
+    clearInterval(derivedCoordinator.statusPollTimer);
+    derivedCoordinator.statusPollTimer = null;
+  }
+}
+
+function pollDerivedRefreshStatus(label) {
+  fetchJson("/derived_views/status")
+    .then((status) => {
+      if (!derivedRefreshActive()) return;
+      if (status && status.in_progress === false) {
+        if (derivedCoordinator.pollRecoverOnComplete) {
+          recoverCompletedDerivedRefresh(label);
+        } else {
+          stopDerivedStatusPolling();
+          derivedCoordinator.statusText = `${label} finishing`;
+          setDerivedStatus(derivedCoordinator.statusText, "warning");
+        }
+        return;
+      }
+      const text = derivedRefreshStatusText(label, status || {});
+      if (text) {
+        derivedCoordinator.statusText = text;
+        setDerivedStatus(text, "warning");
+      }
+    })
+    .catch(() => {
+      // Keep the original running/timeout status if the debug endpoint is not
+      // reachable; the main refresh request still owns success/failure state.
+    });
+}
+
+function recoverCompletedDerivedRefresh(label) {
+  derivedCoordinator.refreshRequestId += 1;
+  setDerivedCoordinatorIdle();
+  lastDerivedRefreshCompletedAtMs = Date.now();
+  stopDerivedStatusPolling();
+  setDerivedStatus(`${label} finished on backend; loading updated data`, "warning");
+  requestDerivedLoad("backend refresh completed", {immediate: true});
+  scheduleAutoDerivedRefresh();
+}
+
+function derivedRefreshStatusText(label, status) {
+  if (!status.in_progress) return "";
+  const parts = [`${label} running`];
+  if (status.phase_step && status.phase_total) {
+    parts.push(
+      `phase ${status.phase_step}/${status.phase_total}: ` +
+      `${status.stage_label || status.stage || "working"}`
+    );
+  } else if (status.stage) {
+    const stageElapsed = Number(status.stage_elapsed_sec || 0);
+    parts.push(
+      `backend stage: ${status.stage}${stageElapsed ? ` ${Math.round(stageElapsed)}s` : ""}`
+    );
+  }
+  if (status.phase_step && status.phase_total) {
+    const stageElapsed = Number(status.stage_elapsed_sec || 0);
+    if (stageElapsed) parts.push(`phase ${Math.round(stageElapsed)}s`);
+  }
+  const elapsed = Number(status.elapsed_sec || 0);
+  if (elapsed) parts.push(`total ${Math.round(elapsed)}s`);
+  return parts.join(" | ");
+}
+
+function withTimeout(options, timeoutMs) {
+  if (!window.AbortController || !timeoutMs) return options;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return {
+    ...options,
+    signal: controller.signal,
+    _timeoutTimer: timer,
+    _timeoutMs: timeoutMs
+  };
+}
+
+function clearRequestTimeout(options) {
+  if (options && options._timeoutTimer) clearTimeout(options._timeoutTimer);
+}
+
+function derivedRefreshTimeoutMs() {
+  const configuredSec = uiNonNegativeNumber("derived_refresh_timeout_sec");
+  const timeoutSec = configuredSec > 0 ? configuredSec : 600;
+  return timeoutSec * 1000;
+}
+
 function renderDerivedViews(bundle) {
-  renderFindingsHistory(bundle.findings || {});
-  renderDeviceHistory(bundle.device_history || {});
-  hydrateLiveScanTablesFromHistory(bundle.device_history || {});
-  renderHistoryAnalysis(bundle.history_analysis || {});
-  renderReports(bundle.reports || {});
-  renderCombinedInsights();
+  uiDebug("derived_render_start", safeDerivedBundleSummary(bundle));
+  clearStaleDerivedRefreshState();
+  const errors = [];
+  safelyRenderDerivedSection("Findings History", errors, () =>
+    renderFindingsHistory(bundle.findings || {})
+  );
+  safelyRenderDerivedSection("Device History", errors, () =>
+    renderDeviceHistory(bundle.device_history || {})
+  );
+  safelyRenderDerivedSection("Live scan hydration", errors, () =>
+    hydrateLiveScanTablesFromHistory(bundle.device_history || {})
+  );
+  safelyRenderDerivedSection("Insights analysis", errors, () =>
+    renderHistoryAnalysis(bundle.history_analysis || {})
+  );
+  safelyRenderDerivedSection("Reports", errors, () =>
+    renderReports(bundle.reports || {})
+  );
+  safelyRenderDerivedSection("Combined Insights", errors, renderCombinedInsights);
   if (derivedHistoryHasRows()) {
     emptyDerivedRefreshAttempts = 0;
   }
+  updateDerivedStatusLines();
+  if (errors.length) {
+    setDerivedStatus(`Derived view render issue: ${errors.join("; ")}`, "alert");
+  }
+  uiDebug("derived_render_done", {
+    errors,
+    status: derivedStatusSnapshot()
+  });
+  acknowledgeDerivedRender(bundle);
   maybeRefreshEmptyDerivedViews("derived views loaded");
+}
+
+function acknowledgeDerivedRender(bundle) {
+  const summary = derivedBundleSummary(bundle);
+  fetch("/derived_views/ack", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      client_id: CLIENT_SESSION_ID,
+      generated_at: summary.generated_at || "",
+      window: ((bundle || {}).window || {}).label || activeWindow || "default",
+      sections: {
+        findings: summary.findings,
+        observations: summary.observations,
+        reports: summary.reports,
+        wifi_aps: summary.history_aps,
+        wifi_clients: summary.history_clients,
+        bluetooth_devices: summary.history_bluetooth
+      }
+    }),
+    keepalive: true
+  }).catch(() => {
+    // Render acknowledgements are diagnostic only.
+  });
+}
+
+function derivedBundleSummary(bundle) {
+  const history = (bundle || {}).device_history || {};
+  const reports = (bundle || {}).reports || {};
+  const analysis = (bundle || {}).history_analysis || {};
+  const findings = (bundle || {}).findings || {};
+  const wifi = history.wifi || {};
+  const bluetooth = history.bluetooth || history.ble || {};
+  return {
+    generated_at: (bundle || {}).generated_at || "",
+    history_generated_at: history.generated_at || "",
+    reports_generated_at: reports.generated_at || "",
+    history_aps: (wifi.access_points || []).length,
+    history_clients: (wifi.clients || []).length,
+    history_bluetooth: (bluetooth.devices || []).length,
+    reports: (reports.reports || []).length,
+    observations: (analysis.observations || []).length,
+    findings: (findings.findings || []).length
+  };
+}
+
+function safeDerivedBundleSummary(bundle) {
+  try {
+    return derivedBundleSummary(bundle);
+  } catch (error) {
+    return {summary_error: errorMessage(error)};
+  }
+}
+
+function errorMessage(error) {
+  return error && error.message ? error.message : String(error);
+}
+
+function derivedStatusSnapshot() {
+  return {
+    insights: statusText("insights-status"),
+    reports: statusText("reports-status"),
+    history: statusText("history-status"),
+    operation: derivedCoordinator.operation,
+    refresh_mode: derivedCoordinator.refreshMode || "",
+    load_window: derivedCoordinator.loadWindow || ""
+  };
+}
+
+function statusText(id) {
+  const status = document.getElementById(id);
+  return status ? status.textContent : "";
+}
+
+function safelyRenderDerivedSection(label, errors, renderer) {
+  try {
+    renderer();
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    errors.push(`${label}: ${message}`);
+  }
+}
+
+function clearStaleDerivedRefreshState() {
+  if (!derivedRefreshActive()) {
+    derivedCoordinator.statusText = "";
+    return;
+  }
+  if (derivedCoordinator.operation !== DERIVED_OPERATION.WAITING) return;
+  setDerivedCoordinatorIdle();
+  stopDerivedStatusPolling();
+  scheduleAutoDerivedRefresh();
 }
 
 function renderLiveTables() {
@@ -552,9 +1176,15 @@ function pruneRecentMap(map, timestampKey, maxAgeMs, maxItems) {
 }
 
 function maybeRefreshEmptyDerivedViews(reason) {
-  if (derivedRefreshInFlight || derivedHistoryHasRows() || !liveScanRowsSeen()) {
+  if (
+    derivedRefreshActive() ||
+    derivedLoadActive() ||
+    derivedHistoryHasRows() ||
+    !liveScanRowsSeen()
+  ) {
     return;
   }
+  if (!catchUpRefreshAllowed()) return;
   if (emptyDerivedRefreshAttempts >= 3) return;
   const now = Date.now();
   if (now - emptyDerivedRefreshRequestedAtMs < 60000) return;
@@ -562,6 +1192,12 @@ function maybeRefreshEmptyDerivedViews(reason) {
   emptyDerivedRefreshAttempts += 1;
   setDerivedStatus(`Refreshing derived views after new scan data (${reason})`, "warning");
   setTimeout(() => refreshDerivedViews("catch-up"), 1000);
+}
+
+function catchUpRefreshAllowed() {
+  const intervalMin = uiNonNegativeNumber("derived_auto_refresh_min");
+  if (intervalMin <= 0 || !lastDerivedRefreshCompletedAtMs) return true;
+  return Date.now() - lastDerivedRefreshCompletedAtMs >= intervalMin * 60000;
 }
 
 function derivedHistoryHasRows() {
@@ -677,6 +1313,13 @@ function setReportsStatus(text, state) {
 }
 
 function updateDerivedStatusLines() {
+  if (derivedRefreshActive()) {
+    setDerivedStatus(
+      derivedCoordinator.statusText || autoRefreshText(),
+      "warning"
+    );
+    return;
+  }
   if (lastDerivedRefreshError) {
     const auto = autoRefreshText();
     setDerivedStatus(
@@ -690,7 +1333,9 @@ function updateDerivedStatusLines() {
     return;
   }
   if (latestFindingsHistory || latestHistoryAnalysis) updateInsightsStatus();
-  if (latestReports) updateReportsStatus(latestReports);
+  if (latestReports) {
+    updateReportsStatus(latestReports);
+  }
   if (latestDeviceHistory) updateDeviceHistoryStatus(latestDeviceHistory);
 }
 
@@ -764,8 +1409,8 @@ function derivedRefreshLabel(mode) {
 }
 
 function autoRefreshText() {
-  if (derivedRefreshInFlight) {
-    return `${derivedRefreshLabel(derivedRefreshMode).toLowerCase()} running`;
+  if (derivedRefreshActive()) {
+    return `${derivedRefreshLabel(derivedCoordinator.refreshMode).toLowerCase()} running`;
   }
   if (!nextAutoDerivedRefreshAtMs) return "";
   const remainingMs = nextAutoDerivedRefreshAtMs - Date.now();
@@ -805,47 +1450,29 @@ function scheduleAutoDerivedRefresh() {
 }
 
 function refreshDerivedViewsAutomatically() {
-  if (derivedRefreshInFlight) {
-    scheduleAutoDerivedRefresh();
-    return;
-  }
-  derivedRefreshInFlight = true;
-  derivedRefreshMode = "automatic";
-  nextAutoDerivedRefreshAtMs = null;
-  setDerivedStatus(`${derivedRefreshLabel(derivedRefreshMode)} running`, "warning");
-  let failed = false;
-  fetchJson("/derived_views/refresh", windowRequestOptions())
-    .then((bundle) => {
-      validateDerivedBundleShape(bundle);
-      lastDerivedRefreshError = "";
-      renderDerivedViews(bundle);
-    })
-    .catch((error) => {
-      failed = true;
-      lastDerivedRefreshError = `Automatic refresh failed: ${error}`;
-      setDerivedStatus(`Automatic refresh failed: ${error}`, "alert");
-    })
-    .finally(() => {
-      derivedRefreshInFlight = false;
-      derivedRefreshMode = "";
-      scheduleAutoDerivedRefresh();
-      if (!failed) updateDerivedStatusLines();
-    });
+  return runDerivedRefresh("automatic", "Automatic refresh failed");
 }
 
 function refreshAfterBrowserWake() {
   const now = Date.now();
-  if (now - lastWakeRefreshAtMs < 10000 || derivedRefreshInFlight) return;
+  if (now - lastWakeRefreshAtMs < 10000 || derivedRefreshActive()) return;
   lastWakeRefreshAtMs = now;
   renderLiveTables();
-  loadDerivedViews();
+  requestDerivedLoad("browser wake");
   updateDerivedStatusLines();
 }
 
 function shouldRunStaleDerivedRefresh() {
   const intervalMin = uiNonNegativeNumber("derived_auto_refresh_min");
   const staleMin = uiNonNegativeNumber("derived_stale_after_min");
-  if (intervalMin <= 0 || staleMin <= 0 || derivedRefreshInFlight) return false;
+  if (intervalMin <= 0 || staleMin <= 0 || derivedRefreshActive()) return false;
+  const refreshCooldownMs = intervalMin * 60000;
+  if (
+    lastDerivedRefreshCompletedAtMs &&
+    Date.now() - lastDerivedRefreshCompletedAtMs < refreshCooldownMs
+  ) {
+    return false;
+  }
   const lastRefreshMs = latestDerivedRefreshMs();
   if (!lastRefreshMs) return false;
   const ageMs = Date.now() - lastRefreshMs;
@@ -870,7 +1497,7 @@ function latestDerivedRefreshMs() {
 
 function summaryRefreshMs(summary) {
   if (!summary) return null;
-  const epoch = Number(summary.refreshed_at_epoch || summary.generated_at_epoch);
+  const epoch = Number(summary.generated_at_epoch || summary.refreshed_at_epoch);
   if (Number.isFinite(epoch) && epoch > 0) return epoch * 1000;
   return null;
 }
@@ -917,12 +1544,11 @@ function showInsightSourceColumn() {
 function updateReportsStatus(bundle) {
   const source = bundle || {};
   const window = source.window || {};
-  const refreshedAt = source.refreshed_at || source.generated_at;
-  const refreshedEpoch = source.refreshed_at_epoch || source.generated_at_epoch;
+  const refreshedAt = source.generated_at || source.refreshed_at;
+  const refreshedEpoch = source.generated_at_epoch || source.refreshed_at_epoch;
   const total = rows.reports.length;
   const visible = rows.reports
     .filter(reportMatchesSubtab)
-    .filter(reportMatchesTypeFilter)
     .filter(reportMatchesSearch);
   const warnings = rows.reports.filter((item) => item.severity === "warning").length;
   const newestSeen = latestSeenStatusText(visible, ["last_seen", "timestamp"]);
@@ -949,12 +1575,6 @@ function reportMatchesSubtab(report) {
   return sourceMatchesSubtab(report.source, mode);
 }
 
-function reportMatchesTypeFilter(report) {
-  const mode = reportsTypeFilter ? reportsTypeFilter.value : "all";
-  if (mode === "all") return true;
-  return reportFilterType(report) === mode;
-}
-
 function reportMatchesSearch(report) {
   return rowMatchesSearch(reportCells(report), reportsSearch);
 }
@@ -972,7 +1592,7 @@ function updateReportsSummary(visible) {
     return;
   }
   const counts = reports.reduce((acc, report) => {
-    const key = reportFilterType(report);
+    const key = reportTypeCategory(report);
     acc[key] = (acc[key] || 0) + 1;
     return acc;
   }, {});
@@ -983,9 +1603,10 @@ function updateReportsSummary(visible) {
   summary.textContent = `Top report types in this view: ${top.join(" | ")}`;
 }
 
-function reportFilterType(report) {
+function reportTypeCategory(report) {
   const text = String(report.type || "").toLowerCase();
   if (text.includes("new")) return "new";
+  if (reportIsPresenceReport(report)) return "presence";
   return categoryForType(text || "report");
 }
 
@@ -1170,7 +1791,7 @@ function loadViewMetadata() {
     .then((metadata) => {
       applyDashboardMetadata(metadata || {});
       if (!Array.isArray(metadata.options) || !metadata.options.length) {
-        loadDerivedViews();
+        requestDerivedLoad("metadata without view options");
         return;
       }
       const selected = activeWindow || metadata.active || "default";
@@ -1179,12 +1800,12 @@ function loadViewMetadata() {
       activeWindow = metadata.options.some((entry) => entry.value === selected) ? selected : (metadata.active || "default");
       viewWindowFilter.value = activeWindow;
       findingsHistoryLoaded = false;
-      loadDerivedViews();
+      requestDerivedLoad("view metadata loaded");
     })
     .catch(() => {
       // Keep the small static fallback selector if metadata is not available.
       configureAutoDerivedRefresh();
-      loadDerivedViews();
+      requestDerivedLoad("view metadata fallback");
     });
 }
 
@@ -1298,14 +1919,14 @@ function renderBleTable() {
   devices.forEach((item) => {
     const tr = document.createElement("tr");
     [
-      item.mac,
+      detailLink(item.mac || "", "bluetooth-device", item.mac || ""),
       bleDeviceIdentity(item),
       formatSignal(item.rssi),
       bluetoothServiceList(item.service_uuids),
       item.last_seen || ""
     ].forEach((value) => {
       const td = document.createElement("td");
-      td.textContent = value || "";
+      appendTableCellValue(td, value || "");
       tr.appendChild(td);
     });
     const actionCell = document.createElement("td");
@@ -1676,8 +2297,8 @@ function renderDeviceHistory(history) {
       : "No Wi-Fi client/probe history in this view. Wi-Fi Monitor must be running in monitor mode to collect clients, probes, deauth, and association frames.";
   }
   renderHistoryTable("history-wifi-aps", aps, (item) => [
-    item.ssid || "(blank)",
-    item.bssid || "",
+    detailLink(item.ssid || "(blank)", "wifi-ssid", item.ssid || "(blank)"),
+    detailLink(item.bssid || "", "wifi-bssid", item.bssid || ""),
     vendorLabel(item),
     item.first_seen || "",
     item.last_seen || "",
@@ -1701,7 +2322,9 @@ function renderDeviceHistory(history) {
     item.finding_count || 0
   ], historySearch);
   renderHistoryTable("history-bluetooth-devices", devices, (item) => [
-    item.mac || "",
+    item.grouped_randomized
+      ? `${item.randomized_group_count || 0} randomized`
+      : detailLink(item.mac || "", "bluetooth-device", item.mac || ""),
     (item.transports || []).join(", "),
     bleDeviceIdentity(item),
     bluetoothServiceList(item.service_uuids),
@@ -1716,7 +2339,7 @@ function renderDeviceHistory(history) {
     item.update_count || 0,
     item.lost_count || 0,
     item.classic_seen_count || 0,
-    (item.sessions || []).length,
+    sessionCount(item),
     item.finding_count || 0
   ], historySearch);
 }
@@ -1728,22 +2351,27 @@ function updateDeviceHistoryStatus(history) {
   const clients = wifi.clients || [];
   const devices = ble.devices || [];
   const window = history.window || {};
-  const refreshedAt = history.refreshed_at || history.generated_at;
+  const refreshedAt = history.generated_at || history.refreshed_at;
   const visible = [...aps, ...clients, ...devices];
-  const shown = visible.length;
+  const totalAps = Number(wifi.total_access_points || aps.length);
+  const totalClients = Number(wifi.total_clients || clients.length);
+  const totalBluetooth = Number(ble.total_devices || devices.length);
+  const totalShown = totalAps + totalClients + totalBluetooth;
+  const displayedShown = visible.length;
   const rawEvents = history.records_read || 0;
   const newestSeen = latestSeenStatusText(visible, ["last_seen", "timestamp"]);
-  const refreshedEpoch = history.refreshed_at_epoch || history.generated_at_epoch;
+  const refreshedEpoch = history.generated_at_epoch || history.refreshed_at_epoch;
   const normalState = derivedStatusState(refreshedAt, refreshedEpoch, "ok");
   setHistoryStatus(
     [
       derivedStatusPrefix(window, refreshedAt, refreshedEpoch),
       newestSeen,
-      `${shown} devices/APs shown`,
+      `${totalShown} devices/APs in view`,
+      displayedShown < totalShown ? `${displayedShown} loaded for display` : "",
       `${rawEvents} raw events processed`,
-      `${aps.length} APs`,
-      `${clients.length} Wi-Fi clients`,
-      `${devices.length} Bluetooth devices`
+      `${totalAps} APs`,
+      `${totalClients} Wi-Fi clients`,
+      `${totalBluetooth} Bluetooth devices`
     ].filter(Boolean).join(" | "),
     derivedDataStatusState(visible, ["last_seen", "timestamp"], normalState)
   );
@@ -1754,6 +2382,336 @@ function vendorLabel(item) {
   const prefix = item.vendor_prefix || item.vendor_oui;
   if (item.vendor_name && prefix) return `${item.vendor_name} (${prefix})`;
   return item.vendor_name || prefix || "";
+}
+
+function detailLink(label, type, key) {
+  const text = String(label || key || "");
+  if (!key) return text;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "detail-link";
+  button.textContent = text;
+  button.title = "Open detail view";
+  button.addEventListener("click", () => openDetail(type, key));
+  return {node: button, text};
+}
+
+function setupDetailPanel() {
+  const backdrop = document.getElementById("detail-backdrop");
+  const close = document.getElementById("detail-close");
+  if (!backdrop || !close) return;
+  close.addEventListener("click", closeDetail);
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) closeDetail();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !backdrop.hidden) closeDetail();
+  });
+}
+
+function openDetail(type, key) {
+  const backdrop = document.getElementById("detail-backdrop");
+  const title = document.getElementById("detail-title");
+  const kind = document.getElementById("detail-kind");
+  const body = document.getElementById("detail-body");
+  if (!backdrop || !title || !kind || !body) return;
+
+  const detail = buildDetail(type, key);
+  title.textContent = detail.title;
+  kind.textContent = detail.kind;
+  body.innerHTML = "";
+  detail.sections.forEach((section) => body.appendChild(section));
+  backdrop.hidden = false;
+}
+
+function closeDetail() {
+  const backdrop = document.getElementById("detail-backdrop");
+  if (backdrop) backdrop.hidden = true;
+}
+
+function buildDetail(type, key) {
+  if (type === "bluetooth-device") return buildBluetoothDetail(key);
+  if (type === "wifi-ssid") return buildWifiSsidDetail(key);
+  if (type === "wifi-bssid") return buildWifiBssidDetail(key);
+  return {
+    kind: "Detail",
+    title: String(key || "Unknown"),
+    sections: [detailMessage("No detail renderer is available for this item.")]
+  };
+}
+
+function buildBluetoothDetail(mac) {
+  const device = findBluetoothHistoryDevice(mac);
+  const reports = relatedReportsFor("bluetooth-device", mac);
+  if (!device) {
+    return missingDetail("Bluetooth Device", mac, reports);
+  }
+  return {
+    kind: "Bluetooth Device",
+    title: mac,
+    sections: [
+      detailSection("Identity", [
+        ["MAC", device.mac],
+        ["Transport", (device.transports || []).join(", ")],
+        ["Identity", bleDeviceIdentity(device)],
+        ["Services / UUIDs", bluetoothServiceList(device.service_uuids)],
+        ["Model", device.model_number],
+        ["Serial", device.serial_number],
+        ["Firmware", device.firmware_revision],
+        ["PnP ID", device.pnp_id]
+      ]),
+      detailSection("Observed", [
+        ["First Seen", device.first_seen],
+        ["Last Seen", device.last_seen],
+        ["Signal", signalRange(device)],
+        ["BLE Seen", device.seen_count],
+        ["BLE Updates", device.update_count],
+        ["BLE Lost", device.lost_count],
+        ["Classic Seen", device.classic_seen_count],
+        ["Sessions", sessionCount(device)],
+        ["Insights", device.finding_count]
+      ]),
+      reportsSection(reports)
+    ]
+  };
+}
+
+function buildWifiSsidDetail(ssid) {
+  const aps = wifiHistoryAccessPoints().filter((ap) =>
+    (ap.ssid || "(blank)") === (ssid || "(blank)")
+  );
+  const reports = relatedReportsFor("wifi-ssid", ssid || "(blank)");
+  if (!aps.length) return missingDetail("Wi-Fi SSID", ssid, reports);
+  const vendors = uniqueValues(aps.map(vendorLabel));
+  const channels = uniqueValues(aps.flatMap(wifiApChannels));
+  const encryption = uniqueValues(aps.flatMap(wifiApEncryption));
+  return {
+    kind: "Wi-Fi SSID",
+    title: ssid || "(blank)",
+    sections: [
+      detailSection("Network", [
+        ["SSID", ssid || "(blank)"],
+        ["BSSIDs", aps.length],
+        ["Vendors", vendors.join(", ")],
+        ["Channels / Freq", channelFreqList(channels)],
+        ["Encryption", encryption.join(", ")],
+        ["Strongest Signal", strongestSignalText(aps)]
+      ]),
+      detailApTable(aps),
+      reportsSection(reports)
+    ]
+  };
+}
+
+function buildWifiBssidDetail(bssid) {
+  const ap = findWifiHistoryAp(bssid);
+  const reports = relatedReportsFor("wifi-bssid", bssid);
+  if (!ap) return missingDetail("Wi-Fi BSSID", bssid, reports);
+  return {
+    kind: "Wi-Fi BSSID",
+    title: bssid,
+    sections: [
+      detailSection("Access Point", [
+        ["SSID", ap.ssid || "(blank)"],
+        ["BSSID", ap.bssid],
+        ["Vendor", vendorLabel(ap)],
+        ["Channels / Freq", channelFreqList(wifiApChannels(ap))],
+        ["Encryption", wifiApEncryption(ap).join(", ")],
+        ["Signal", signalRange(ap)]
+      ]),
+      detailSection("Observed", [
+        ["First Seen", ap.first_seen],
+        ["Last Seen", ap.last_seen],
+        ["Seen", ap.observations],
+        ["Sessions", sessionCount(ap)],
+        ["Insights", ap.finding_count]
+      ]),
+      reportsSection(reports)
+    ]
+  };
+}
+
+function missingDetail(kind, key, reports) {
+  return {
+    kind,
+    title: String(key || "Unknown"),
+    sections: [
+      detailMessage("No matching Device History row is loaded for this item."),
+      reportsSection(reports)
+    ]
+  };
+}
+
+function detailSection(title, rows) {
+  const section = document.createElement("section");
+  section.className = "detail-section";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  section.appendChild(heading);
+  const list = document.createElement("dl");
+  list.className = "detail-list";
+  rows
+    .filter((row) => row[1] !== "" && row[1] !== null && row[1] !== undefined)
+    .forEach(([label, value]) => {
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const detail = document.createElement("dd");
+      detail.textContent = String(value);
+      list.appendChild(term);
+      list.appendChild(detail);
+    });
+  section.appendChild(list);
+  return section;
+}
+
+function detailApTable(aps) {
+  const section = document.createElement("section");
+  section.className = "detail-section";
+  const heading = document.createElement("h3");
+  heading.textContent = "BSSID Radios";
+  section.appendChild(heading);
+  const table = document.createElement("table");
+  table.className = "detail-table detail-bssid-radios";
+  table.innerHTML = "<thead><tr><th>BSSID</th><th>Vendor</th><th>Channels / Freq</th><th>Encryption</th><th>Signal</th><th>Last Seen</th></tr></thead>";
+  const tbody = document.createElement("tbody");
+  aps
+    .slice()
+    .sort(compareWifiAccessPoints)
+    .forEach((ap) => {
+      const tr = document.createElement("tr");
+      [
+        detailLink(ap.bssid || "", "wifi-bssid", ap.bssid || ""),
+        vendorLabel(ap),
+        channelFreqList(wifiApChannels(ap)),
+        wifiApEncryption(ap).join(", "),
+        signalRange(ap),
+        ap.last_seen || ""
+      ].forEach((value) => {
+        const td = document.createElement("td");
+        appendTableCellValue(td, value);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+  table.appendChild(tbody);
+  section.appendChild(table);
+  return section;
+}
+
+function reportsSection(reports) {
+  const section = document.createElement("section");
+  section.className = "detail-section";
+  const heading = document.createElement("h3");
+  heading.textContent = "Related Reports";
+  section.appendChild(heading);
+  if (!reports.length) {
+    const message = document.createElement("div");
+    message.className = "status-strip muted";
+    message.textContent = "No related report rows in the current view.";
+    section.appendChild(message);
+    return section;
+  }
+  const table = document.createElement("table");
+  table.className = "detail-table detail-related-reports";
+  table.innerHTML = "<thead><tr><th>Score</th><th>Type</th><th>Report</th><th>Summary</th><th>Last Seen</th></tr></thead>";
+  const tbody = document.createElement("tbody");
+  reports.forEach((report) => {
+    const tr = document.createElement("tr");
+    [
+      report.score || 0,
+      categoryForType(report.type || "report"),
+      report.title || "",
+      report.summary || "",
+      report.last_seen || ""
+    ].forEach((value) => {
+      const td = document.createElement("td");
+      td.textContent = value;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  section.appendChild(table);
+  return section;
+}
+
+function detailMessage(text) {
+  const message = document.createElement("div");
+  message.className = "status-strip muted";
+  message.textContent = text;
+  return message;
+}
+
+function relatedReportsFor(type, key) {
+  const reports = (latestReports || {}).reports || [];
+  return reports.filter((report) => reportMatchesDetail(report, type, key));
+}
+
+function reportMatchesDetail(report, type, key) {
+  const evidence = (report || {}).evidence || {};
+  const reportType = String((report || {}).type || "").toLowerCase();
+  const normalizedKey = String(key || "").toLowerCase();
+  if (type === "bluetooth-device") {
+    return String(evidence.mac || "").toLowerCase() === normalizedKey ||
+      (evidence.sample_macs || []).some((mac) => String(mac).toLowerCase() === normalizedKey);
+  }
+  if (type === "wifi-bssid") {
+    const ap = findWifiHistoryAp(key);
+    return String(evidence.bssid || "").toLowerCase() === normalizedKey ||
+      (evidence.bssids || []).some((bssid) => String(bssid).toLowerCase() === normalizedKey) ||
+      (ap && reportType === "wifi_ssid_profile" && evidence.ssid &&
+        String(evidence.ssid || "(blank)").toLowerCase() ===
+          String(ap.ssid || "(blank)").toLowerCase());
+  }
+  if (type === "wifi-ssid") {
+    return String(evidence.ssid || "(blank)").toLowerCase() === normalizedKey;
+  }
+  return false;
+}
+
+function wifiHistoryAccessPoints() {
+  const wifi = (latestDeviceHistory || {}).wifi || {};
+  const historyAps = wifi.access_points || [];
+  return historyAps.length ? historyAps : [...rows.aps.values()];
+}
+
+function bluetoothHistoryDevices() {
+  const bluetooth = (latestDeviceHistory || {}).bluetooth ||
+    (latestDeviceHistory || {}).ble ||
+    {};
+  const historyDevices = bluetooth.devices || [];
+  if (historyDevices.length) return historyDevices;
+  const liveDevices = [...rows.ble.values()];
+  const classicDevices = [...rows.btClassic.values()];
+  return [...liveDevices, ...classicDevices];
+}
+
+function findWifiHistoryAp(bssid) {
+  const normalized = String(bssid || "").toLowerCase();
+  return wifiHistoryAccessPoints().find((ap) =>
+    String(ap.bssid || "").toLowerCase() === normalized
+  );
+}
+
+function findBluetoothHistoryDevice(mac) {
+  const normalized = String(mac || "").toLowerCase();
+  return bluetoothHistoryDevices().find((device) =>
+    String(device.mac || "").toLowerCase() === normalized
+  );
+}
+
+function uniqueValues(values) {
+  return [...new Set((values || [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))].sort();
+}
+
+function strongestSignalText(items) {
+  const values = (items || [])
+    .map((item) => Number(item.signal_max))
+    .filter((value) => !Number.isNaN(value));
+  if (!values.length) return "";
+  return `${Math.max(...values)} dBm`;
 }
 
 function setHistoryStatus(text, state) {
@@ -1771,11 +2729,37 @@ function ssidList(ssids, randomized) {
 }
 
 function signalRange(item) {
-  const latest = formatSignal(item.signal_latest);
+  const latest = formatSignal(
+    item.signal_latest !== undefined ? item.signal_latest : item.rssi
+  );
   const min = formatSignal(item.signal_min);
   const max = formatSignal(item.signal_max);
   if (!latest && !min && !max) return "";
   return `${latest} (${min}/${max})`;
+}
+
+function sessionCount(item) {
+  if (!item) return 0;
+  if (item.session_count !== undefined && item.session_count !== null) {
+    return Number(item.session_count) || 0;
+  }
+  return (item.sessions || []).length;
+}
+
+function wifiApChannels(ap) {
+  const item = ap || {};
+  if (Array.isArray(item.channels)) return item.channels;
+  if (item.channel !== undefined && item.channel !== null && item.channel !== "") {
+    return [item.channel];
+  }
+  return [];
+}
+
+function wifiApEncryption(ap) {
+  const value = (ap || {}).encryption;
+  if (Array.isArray(value)) return value;
+  if (value !== undefined && value !== null && value !== "") return [value];
+  return [];
 }
 
 function channelFreq(channel, explicitBand) {
@@ -1866,8 +2850,8 @@ function updateInsightsStatus() {
   const source = latestHistoryAnalysis || latestFindingsHistory || {};
   const window = source.window || {};
   const insightsWindow = source.insights_window || {};
-  const refreshedAt = source.refreshed_at || source.generated_at;
-  const refreshedEpoch = source.refreshed_at_epoch || source.generated_at_epoch;
+  const refreshedAt = source.generated_at || source.refreshed_at;
+  const refreshedEpoch = source.generated_at_epoch || source.refreshed_at_epoch;
   const total = rows.insights.length;
   const visible = rows.insights.filter(insightMatchesFilters).filter(insightMatchesSearch);
   const warnings = rows.insights.filter((item) => item.severity === "warning").length;
@@ -1896,8 +2880,8 @@ function categoryForType(type) {
   const text = String(type || "");
   if (text.includes("encryption") || text.includes("security") || text.includes("evil")) return "security";
   if (text.includes("strong") || text.includes("rssi") || text.includes("signal")) return "signal";
-  if (text.includes("presence") || text.includes("returned") || text.includes("lost") || text.includes("linger") || text.endsWith("_new")) return "presence";
-  if (text.includes("probe") || text.includes("deauth") || text.includes("randomized") || text.includes("recurring")) return "behavior";
+  if (text.includes("presence") || text.includes("returned") || text.includes("lost") || text.includes("linger") || text.includes("recurring") || text.includes("cluster") || text.endsWith("_new")) return "presence";
+  if (text.includes("probe") || text.includes("deauth") || text.includes("randomized")) return "behavior";
   if (text.includes("identity") || text.includes("identify")) return "identity";
   if (text.includes("collector") || text.includes("missing")) return "collector";
   return "analysis";
@@ -1986,13 +2970,14 @@ function bluetoothActivityText(evidence) {
 
 function wifiApReportEvidenceItems(evidence) {
   const parts = [];
-  const signal = signalRangeText(null, evidence.signal_max);
+  const signal = signalRangeText(null, evidence.signal_max || evidence.strongest_signal);
   const foldedSignal = findingsMentionStrongSignal(evidence.findings);
   const findings = findingsText(evidence.findings, signal, foldedSignal);
   if (findings) parts.push({label: "Findings", value: findings});
   const radio = [
     evidence.channels && evidence.channels.length ? `channels ${compactList(evidence.channels, 8)}` : "",
-    evidence.bssids && evidence.bssids.length ? `${evidence.bssids.length} BSSIDs` : "",
+    evidence.bands && evidence.bands.length ? `bands ${compactList(evidence.bands, 4)}` : "",
+    evidence.bssid_count ? `${evidence.bssid_count} BSSIDs` : "",
     evidence.encryption && evidence.encryption.length ? `security ${compactList(evidence.encryption, 6)}` : ""
   ].filter(Boolean).join("; ");
   if (radio) parts.push({label: "Radio", value: radio});
@@ -2004,9 +2989,6 @@ function wifiApReportEvidenceItems(evidence) {
   const observed = observedSessionText(evidence);
   if (observed) parts.push({label: "Observed", value: observed});
   if (signal && !foldedSignal) parts.push({label: "Signal", value: signal});
-  if (evidence.bssids && evidence.bssids.length) {
-    parts.push({label: "BSSIDs", value: compactList(evidence.bssids, 8)});
-  }
   return parts.length ? parts : genericEvidenceItems(evidence, "");
 }
 
@@ -2180,6 +3162,7 @@ function wifiApMatchesSearch(item) {
 
 function renderCollectorHealth(statuses) {
   latestCollectorStatuses = statuses || [];
+  renderCollectorTabStatusDots();
   const tbody = document.getElementById("collector-health");
   tbody.innerHTML = "";
   latestCollectorStatuses.forEach((item) => {
@@ -2224,6 +3207,34 @@ function renderCollectorHealth(statuses) {
     tbody.appendChild(tr);
   });
   maybeRefreshEmptyDerivedViews("collector events");
+}
+
+function renderCollectorTabStatusDots() {
+  const statusByKey = new Map((latestCollectorStatuses || []).map((item) => [item.key, item]));
+  setTabStatusDots("wifi", [statusByKey.get("wifi")]);
+  setTabStatusDots("wifi_monitor", [statusByKey.get("wifi_monitor")]);
+  setTabStatusDots("rtlsdr", [statusByKey.get("rtlsdr")]);
+  setTabStatusDots("bluetooth", [
+    statusByKey.get("ble"),
+    statusByKey.get("bt_classic")
+  ]);
+}
+
+function setTabStatusDots(tab, statuses) {
+  const container = document.querySelector(`[data-status-tab="${tab}"]`);
+  if (!container) return;
+  container.innerHTML = "";
+  (statuses || []).forEach((item) => {
+    const dot = document.createElement("span");
+    const online = item && item.state === "ONLINE";
+    const name = item ? (item.tab_label || item.name || item.key) : "Collector";
+    const state = item ? displayState(item.state) : "Unknown";
+    dot.className = `tab-status-dot ${online ? "online" : "offline"}`;
+    dot.title = `${name}: ${state}`;
+    dot.setAttribute("aria-label", `${name}: ${state}`);
+    dot.setAttribute("role", "img");
+    container.appendChild(dot);
+  });
 }
 
 function updateCollectorTabStatus(item) {

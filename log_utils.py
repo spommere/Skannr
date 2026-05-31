@@ -8,6 +8,7 @@ folded into materialized summaries.
 
 import json
 import os
+import tempfile
 import time
 from datetime import datetime
 
@@ -19,6 +20,40 @@ def now_epoch():
     from this value only when writing UI-facing fields.
     """
     return int(time.time())
+
+
+def save_json_atomic(path, payload, pretty=False, fsync=False):
+    """Write JSON by replacing the old file only after the new file is complete."""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    json_options = (
+        {"indent": 2, "sort_keys": True}
+        if pretty
+        else {"separators": (",", ":"), "sort_keys": False}
+    )
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=directory,
+            prefix=".{}.".format(os.path.basename(path)),
+            suffix=".tmp",
+            delete=False,
+        ) as fh:
+            temp_path = fh.name
+            json.dump(payload, fh, **json_options)
+            fh.flush()
+            if fsync:
+                os.fsync(fh.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 def format_epoch(epoch):

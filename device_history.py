@@ -23,6 +23,7 @@ from log_utils import (
     record_time_epoch,
     read_incremental_jsonl_events,
     read_jsonl_events,
+    save_json_atomic,
     timestamp_epoch,
     window_metadata,
 )
@@ -34,6 +35,7 @@ class DeviceHistoryBuilder:
 
     COLLECTORS = ("wifi", "wifi_monitor", "ble", "ble_identify", "bt_classic")
     WIFI_AP_SESSION_GAP_SEC = 300
+    BLE_STALE_SINGLE_SEEN_PRUNE_SEC = 3600
 
     def __init__(self, log_dir, state_path=None, window_days=None):
         self.log_dir = log_dir
@@ -52,6 +54,13 @@ class DeviceHistoryBuilder:
         materialized state. Older raw log content stays available for manual
         inspection but is not reread during normal startup/refresh.
         """
+        summary = self.build_summary(merge_previous=merge_previous)
+        if persist:
+            self.save_summary(summary)
+        return self.display_summary(summary, self.window_days)
+
+    def build_summary(self, merge_previous=True):
+        """Return the full materialized summary without persisting or filtering."""
         previous = self.load_persisted_summary() if merge_previous else None
         if previous and has_jsonl_checkpoint(previous):
             # Normal fast path: a modern summary already knows how far each
@@ -60,14 +69,8 @@ class DeviceHistoryBuilder:
                 not self.has_history_records(previous)
                 and self.raw_history_files_exist()
             ):
-                summary = self.full_build()
-                if persist:
-                    self.save_summary(summary)
-                return self.display_summary(summary, self.window_days)
-            summary = self.incremental_update(previous)
-            if persist:
-                self.save_summary(summary)
-            return self.display_summary(summary, self.window_days)
+                return self.full_build()
+            return self.incremental_update(previous)
         if previous and self.has_history_records(previous):
             # Older Skannr builds wrote a useful summary before checkpoints
             # existed. Trust that materialized state and start tracking new log
@@ -81,13 +84,8 @@ class DeviceHistoryBuilder:
             previous["generated_at_epoch"] = generated_at_epoch
             previous["cached"] = False
             previous["incremental_records_read"] = 0
-            if persist:
-                self.save_summary(previous)
-            return self.display_summary(previous, self.window_days)
-        summary = self.full_build()
-        if persist:
-            self.save_summary(summary)
-        return self.display_summary(summary, self.window_days)
+            return previous
+        return self.full_build()
 
     def full_build(self):
         """Parse current retained logs once to create the durable summary."""
@@ -645,7 +643,7 @@ class DeviceHistoryBuilder:
     def serialize_value(self, value):
         """Recursively convert sets inside records and open sessions to lists."""
         if isinstance(value, set):
-            return sorted(value)
+            return self.sorted_json_values(value)
         if isinstance(value, list):
             return [self.serialize_value(item) for item in value]
         if isinstance(value, dict):
@@ -653,6 +651,13 @@ class DeviceHistoryBuilder:
                 key: self.serialize_value(item) for key, item in value.items()
             }
         return value
+
+    def sorted_json_values(self, values):
+        """Sort mixed historical scalar values without cross-type comparisons."""
+        return sorted(
+            (self.serialize_value(item) for item in values),
+            key=lambda item: (type(item).__name__, str(item)),
+        )
 
     def load_persisted_summary(self):
         """Load the durable device-history file if it exists."""
@@ -692,10 +697,70 @@ class DeviceHistoryBuilder:
 
     def save_summary(self, summary):
         """Persist the merged summary so first_seen survives restarts."""
-        directory = os.path.dirname(self.state_path)
-        os.makedirs(directory, exist_ok=True)
-        with open(self.state_path, "w", encoding="utf-8") as fh:
-            json.dump(summary, fh, indent=2, sort_keys=True)
+        save_json_atomic(self.state_path, summary)
+
+    def prune_low_value_bluetooth_devices(self, summary):
+        """Drop stale anonymous one-off BLE addresses from the materialized cache."""
+        if not isinstance(summary, dict):
+            return summary, 0
+        bluetooth = summary.get("bluetooth") or summary.get("ble") or {}
+        devices = bluetooth.get("devices") or []
+        if not devices:
+            return summary, 0
+        generated_at = (
+            timestamp_epoch(summary.get("generated_at_epoch")) or now_epoch()
+        )
+        kept = []
+        pruned = 0
+        for device in devices:
+            if self.low_value_stale_bluetooth_device(device, generated_at):
+                pruned += 1
+            else:
+                kept.append(device)
+        if pruned:
+            summary.setdefault("ble", {})["devices"] = kept
+            summary.setdefault("bluetooth", {})["devices"] = kept
+            summary["pruned_bluetooth_devices"] = (
+                int(summary.get("pruned_bluetooth_devices") or 0) + pruned
+            )
+        return summary, pruned
+
+    def low_value_stale_bluetooth_device(self, device, generated_at_epoch):
+        """Return True for no-name private BLE rows that are cache noise."""
+        if not isinstance(device, dict):
+            return False
+        transports = set(str(item).lower() for item in device.get("transports") or [])
+        if "classic" in transports or "bt_classic" in transports:
+            return False
+        if self.clean_bluetooth_name_list(device.get("names")):
+            return False
+        if device.get("name") and self.clean_bluetooth_name(device.get("name")):
+            return False
+        for field in (
+            "manufacturer_name",
+            "model_number",
+            "serial_number",
+            "firmware_revision",
+            "hardware_revision",
+            "software_revision",
+            "pnp_id",
+            "service_uuids",
+        ):
+            if device.get(field):
+                return False
+        if int(device.get("seen_count") or 0) != 1:
+            return False
+        if int(device.get("update_count") or 0) > 0:
+            return False
+        if device.get("active_session"):
+            return False
+        last_seen = record_time_epoch(device, "last_seen")
+        if last_seen is None:
+            return False
+        return (
+            generated_at_epoch - last_seen
+            > self.BLE_STALE_SINGLE_SEEN_PRUNE_SEC
+        )
 
     def has_history_records(self, summary):
         """Return True when an older summary has useful materialized data."""
@@ -723,36 +788,41 @@ class DeviceHistoryBuilder:
 
     def display_summary(self, summary, window_days):
         """Return a windowed view derived from the materialized summary only."""
-        output = copy.deepcopy(summary)
-        # The materialized file is all-retained history. The View selector is a
-        # display-time filter over last_seen, not a request to rebuild raw logs.
-        output.setdefault("wifi", {}).setdefault("access_points", [])
-        output.setdefault("wifi", {}).setdefault("clients", [])
-        output.setdefault("ble", {}).setdefault("devices", [])
-        output.setdefault("bluetooth", {}).setdefault("devices", [])
-        if not output["ble"].get("devices") and output["bluetooth"].get(
-            "devices"
-        ):
-            output["ble"]["devices"] = output["bluetooth"]["devices"]
-        output["bluetooth"]["devices"] = output["ble"].get("devices") or []
+        # The materialized file can grow large over weeks of BLE/Wi-Fi history.
+        # A full deepcopy here made cached /derived_views loads expensive even
+        # when no raw logs were scanned. Build the display payload from shallow
+        # top-level metadata plus copied records that actually belong to the
+        # selected View window.
+        output = {
+            key: value
+            for key, value in (summary or {}).items()
+            if key not in ("wifi", "ble", "bluetooth")
+        }
+        source_wifi = (summary or {}).get("wifi") or {}
+        source_ble = (summary or {}).get("ble") or {}
+        source_bluetooth = (summary or {}).get("bluetooth") or {}
+        bluetooth_devices = (
+            source_ble.get("devices")
+            or source_bluetooth.get("devices")
+            or []
+        )
+        output["wifi"] = {
+            "access_points": self.display_records(
+                source_wifi.get("access_points") or [], window_days
+            ),
+            "clients": self.display_records(
+                source_wifi.get("clients") or [], window_days
+            ),
+        }
+        output["ble"] = {
+            "devices": self.display_records(bluetooth_devices, window_days),
+        }
+        output["bluetooth"] = {"devices": output["ble"]["devices"]}
         output["window"] = window_metadata(window_days)
         output["materialized_window"] = summary.get(
             "window"
         ) or window_metadata(None)
         output["raw_logs_incremental"] = True
-        if window_days is None:
-            self.enrich_wifi_vendor_names(output)
-            return output
-        output["wifi"]["access_points"] = self.records_in_window(
-            output["wifi"].get("access_points") or [], window_days
-        )
-        output["wifi"]["clients"] = self.records_in_window(
-            output["wifi"].get("clients") or [], window_days
-        )
-        output["ble"]["devices"] = self.records_in_window(
-            output["ble"].get("devices") or [], window_days
-        )
-        output["bluetooth"]["devices"] = output["ble"]["devices"]
         self.enrich_wifi_vendor_names(output)
         return output
 
@@ -777,6 +847,32 @@ class DeviceHistoryBuilder:
                 record["vendor_name"] = vendor_name(
                     record.get("mac") or record.get("vendor_oui")
                 )
+
+    def display_records(self, records, window_days):
+        """Return copied records visible in the selected dashboard window."""
+        filtered = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if window_days is not None and not self.record_in_window(
+                record, window_days
+            ):
+                continue
+            # Shallow-copy each returned record so display enrichment can add
+            # compatibility fields without mutating the persisted cache object.
+            filtered.append(dict(record))
+        return filtered
+
+    def record_in_window(self, record, window_days):
+        """Return True when a materialized record was seen in this window."""
+        if window_days is None:
+            return True
+        event = {
+            "timestamp": record.get("last_seen"),
+            "timestamp_epoch": record.get("last_seen_epoch"),
+            "data": record,
+        }
+        return event_in_window(event, window_days)
 
     def records_in_window(self, records, window_days):
         """Filter materialized records by last_seen without reading raw logs."""
@@ -994,7 +1090,7 @@ class DeviceHistoryBuilder:
             self.merge_time_fields(new, old)
             self.merge_signal_fields(new, old)
             for field in list_fields:
-                new[field] = sorted(
+                new[field] = self.sorted_json_values(
                     set(new.get(field) or []) | set(old.get(field) or [])
                 )
             for field in count_fields:

@@ -5,12 +5,10 @@ and evidence fields so results are reproducible and can be inspected without an
 LLM or a database.
 """
 
-import json
-import os
 from datetime import datetime
 
 from bus import local_now
-from log_utils import now_epoch, record_time_epoch, timestamp_epoch
+from log_utils import now_epoch, record_time_epoch, save_json_atomic, timestamp_epoch
 
 
 DEFAULT_ANALYSIS_CONFIG = {
@@ -28,6 +26,7 @@ DEFAULT_ANALYSIS_CONFIG = {
     "ble_lost_count": 3,
     "ble_recurring_min_sessions": 3,
     "ble_recurring_window_min": 30,
+    "ble_ignore_stale_single_seen_sec": 3600,
     "recent_activity_window_sec": 1800,
     "wifi_short_lived_sec": 900,
     "sensitive_ssids": [],
@@ -45,7 +44,7 @@ class HistoryAnalyzer:
 
     def analyze(self, history):
         """Return ranked observations with concrete evidence and no LLM step."""
-        generated_at_epoch = now_epoch()
+        generated_at_epoch = self.history_generated_epoch(history)
         self._generated_at_epoch = generated_at_epoch
         generated_at = local_now(generated_at_epoch)
         observations = []
@@ -76,6 +75,7 @@ class HistoryAnalyzer:
             "generated_at": generated_at,
             "generated_at_epoch": generated_at_epoch,
             "history_generated_at": history.get("generated_at"),
+            "history_generated_at_epoch": history.get("generated_at_epoch"),
             "observations": observations,
             "counts": {
                 "total": len(observations),
@@ -87,6 +87,14 @@ class HistoryAnalyzer:
                 ),
             },
         }
+
+    def history_generated_epoch(self, history):
+        """Use the Device History snapshot time as the analysis freshness time."""
+        try:
+            value = float((history or {}).get("generated_at_epoch"))
+        except (TypeError, ValueError):
+            return now_epoch()
+        return int(value) if value > 0 else now_epoch()
 
     def analyze_wifi_aps(self, aps, timestamp):
         """Look for AP patterns such as multiple BSSIDs, weak crypto, and channel drift."""
@@ -469,6 +477,8 @@ class HistoryAnalyzer:
         for device in devices:
             # Bluetooth history merges BLE, BLE Identify, and Classic transport
             # observations when they share an address.
+            if self.low_value_stale_ble_device(device):
+                continue
             mac = device.get("mac") or "unknown"
             name = ", ".join(self.list_values(device.get("names"))) or mac
             evidence = self.ble_evidence(device, mac)
@@ -553,6 +563,59 @@ class HistoryAnalyzer:
                     )
                 )
         return observations
+
+    def low_value_stale_ble_device(self, device):
+        """Suppress old one-off anonymous BLE rows from short-horizon Insights."""
+        if not isinstance(device, dict):
+            return True
+        transports = set(value.lower() for value in self.list_values(device.get("transports")))
+        if "classic" in transports or "bt_classic" in transports:
+            return False
+        if self.meaningful_bluetooth_names(device):
+            return False
+        for field in (
+            "model_number",
+            "serial_number",
+            "firmware_revision",
+            "hardware_revision",
+            "software_revision",
+            "pnp_id",
+        ):
+            if device.get(field):
+                return False
+        observations = (
+            int(device.get("seen_count") or 0)
+            + int(device.get("update_count") or 0)
+            + int(device.get("lost_count") or 0)
+            + int(device.get("classic_seen_count") or 0)
+            + int(device.get("classic_update_count") or 0)
+            + int(device.get("classic_lost_count") or 0)
+        )
+        if observations > 1:
+            return False
+        last_seen = record_time_epoch(device, "last_seen")
+        if last_seen is None:
+            return False
+        return (
+            self._generated_at_epoch - last_seen
+            > float(self.config["ble_ignore_stale_single_seen_sec"])
+        )
+
+    def meaningful_bluetooth_names(self, device):
+        """Return names that are more useful than an address echo."""
+        mac = str((device or {}).get("mac") or "").strip().lower().replace("-", ":")
+        names = self.list_values((device or {}).get("names"))
+        if (device or {}).get("name"):
+            names.append(str((device or {}).get("name")).strip())
+        useful = []
+        for name in names:
+            text = str(name or "").strip()
+            if not text:
+                continue
+            if text.lower().replace("-", ":") == mac:
+                continue
+            useful.append(text)
+        return sorted(set(useful))
 
     def analyze_population(self, clients, timestamp):
         """Look for population-level Wi-Fi patterns."""
@@ -1030,6 +1093,4 @@ class HistoryAnalyzer:
 
 def save_analysis(path, analysis):
     """Persist the latest analysis snapshot for offline inspection."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(analysis, fh, indent=2, sort_keys=True)
+    save_json_atomic(path, analysis)
