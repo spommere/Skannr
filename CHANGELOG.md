@@ -7,6 +7,29 @@ pre-1.0:
 - `0.2.0`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.2.0 - 2026-06-02
+
+- Migrated Skannr to a separated source/config/runtime layout. Python code and
+  bundled assets now live under `src/skannr/`, generic templates under
+  `config.example/`, local operator config under `config/`, requirements under
+  `requirements/`, and generated runtime state under `runtime/`.
+- Added Privacy reporting inside Reports and kept report score, confidence, and
+  reason provenance distinct for clearer counter-surveillance review.
+- Added an optional Rayhunter collector and derived intelligence integration.
+  Skannr now reads Rayhunter JSON/status endpoints with gzip support, records
+  normalized status/warning events, and renders parsed system/recording fields
+  in Reports and Insights without dumping raw HTML.
+- Simplified the Reports table by removing the visible Severity column,
+  widening Confidence and Reasons, and removing redundant Rayhunter endpoint
+  details from Subject, Summary, and Evidence.
+- Improved connection and system-status behavior. Successful HTTP responses now
+  mark the browser as connected even while live updates reconnect, and disabled
+  configured collectors remain visible as `DISABLED` System rows.
+- Removed the experimental environment-baseline / known-device workflow before
+  making it part of the operator surface.
+- Fixed the initial browser version badge so reloads wait for server metadata
+  instead of briefly showing an old hardcoded version.
+
 ## 0.1.9 - 2026-05-31
 
 - Kept Reports as the single intelligence report and removed the separate

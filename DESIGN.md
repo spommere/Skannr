@@ -52,17 +52,20 @@ broker, external web assets, or internet access at runtime.
 
 Skannr is a single Python process with these major components:
 
-- `main.py`: Flask routes, browser event stream, collector lifecycle, derived
+- `src/skannr/main.py`: Flask routes, browser event stream, collector lifecycle, derived
   view refresh orchestration, and process startup/shutdown.
-- `bus.py`: in-process asynchronous event bus.
-- `collectors/`: one Python module and one YAML file per collector.
-- `persistence/`: persistence backend interface and filesystem JSONL backend.
-- `findings.py`: live deterministic findings engine over collector events.
-- `device_history.py`: materialized Wi-Fi and Bluetooth device state.
-- `history_analysis.py`: deterministic Insights from Device History.
-- `reports.py`: slower longitudinal summaries from Device History.
-- `static/`: single-page browser dashboard.
-- `skannr.yaml`: global runtime, persistence, UI, and analysis configuration.
+- `src/skannr/bus.py`: in-process asynchronous event bus.
+- `src/skannr/collectors/`: collector Python modules and hardware probes.
+- `src/skannr/persistence/`: persistence backend interface and filesystem JSONL backend.
+- `src/skannr/findings.py`: live deterministic findings engine over collector events.
+- `src/skannr/device_history.py`: materialized Wi-Fi and Bluetooth device state.
+- `src/skannr/history_analysis.py`: deterministic Insights from Device History.
+- `src/skannr/reports.py`: slower longitudinal summaries from Device History.
+- `src/skannr/static/`: single-page browser dashboard.
+- `config.example/`: generic source-controlled configuration template.
+- `config/skannr.yaml`: local runtime, persistence, UI, and analysis configuration.
+- `config/collectors/*.yaml`: local collector-specific operator configuration.
+- `runtime/logs/`: raw JSONL logs and materialized derived-view state.
 
 Collectors run on an asyncio loop in a background thread. Flask serves the UI
 and handles browser requests in the main web server context. Collector events
@@ -77,11 +80,11 @@ The normal event path is:
 2. The collector calls `BaseCollector.emit()`.
 3. The event is published to `EventBus`.
 4. `main.consume_events()` receives the event.
-5. The event is written to `logs/<collector>/YYYY-MM-DD.jsonl`, except for
+5. The event is written to `runtime/logs/<collector>/YYYY-MM-DD.jsonl`, except for
    selected high-rate state events.
 6. The event is broadcast to connected browsers.
 7. `FindingsEngine.process()` may emit one or more finding events.
-8. Finding events are persisted under `logs/findings` and broadcast to browsers.
+8. Finding events are persisted under `runtime/logs/findings` and broadcast to browsers.
 9. Collector health and system status snapshots are broadcast.
 
 Browser updates use Server-Sent Events from `/events`. Socket.IO remains present
@@ -115,8 +118,9 @@ parse or reformat Skannr timestamps in the browser machine's timezone.
 
 ## 4. Configuration Model
 
-Global settings live in `skannr.yaml`. Collector-specific settings live in
-`collectors/<collector>.yaml`.
+Generic defaults live in `config.example/`. Local runtime settings live in
+`config/skannr.yaml`, and local collector-specific settings live in
+`config/collectors/<collector>.yaml`.
 
 The global file owns:
 
@@ -136,13 +140,14 @@ Collector YAML files own:
 - collector-specific interface/adapter candidate lists, scan intervals, and
   thresholds
 
-`config.load_config()` loads defaults from `config.py`, overlays `skannr.yaml`,
-loads collector YAML files, normalizes retention, resolves relative `log_dir`
-against the config directory, and asks each configured collector for its
-hardware/software probes for System Status.
+`config.load_config()` loads defaults from `src/skannr/config.py`, overlays
+`config/skannr.yaml`, loads collector YAML files, normalizes retention, resolves
+relative `log_dir` against the project root, and asks each configured collector
+for its hardware/software probes for System Status.
 
-The first run writes `skannr.yaml` only if it does not exist. Existing YAML is
-not rewritten on startup, so comments and user formatting are preserved.
+`install.sh` copies `config.example/` to `config/` when `config/skannr.yaml` is
+missing. Existing YAML is not rewritten on startup, so comments and user
+formatting are preserved.
 
 ## 5. Collector Model
 
@@ -298,8 +303,9 @@ later drilldown.
 Skannr decodes common Bluetooth SIG UUIDs for display. It has a small built-in
 table for common service UUIDs such as `0x180A` Device Information, and can
 also load optional offline UUID assigned-number files from
-`collectors/member_uuids.txt`, `collectors/service_uuids.txt`, and
-`collectors/characteristic_uuids.txt`. This is separate from
+`src/skannr/data/collectors/member_uuids.txt`,
+`src/skannr/data/collectors/service_uuids.txt`, and
+`src/skannr/data/collectors/characteristic_uuids.txt`. This is separate from
 `company_identifiers.txt`, which resolves manufacturer-data company IDs.
 Standard service UUID labels and member/vendor UUID labels are displayed in
 Services / UUIDs fields. Member UUIDs are labeled explicitly, for example
@@ -405,13 +411,13 @@ The current durable backend is filesystem JSONL.
 Raw events are written to:
 
 ```text
-logs/<collector>/YYYY-MM-DD.jsonl
+runtime/logs/<collector>/YYYY-MM-DD.jsonl
 ```
 
 Application logs are written to:
 
 ```text
-logs/skannr.log
+runtime/logs/skannr.log
 ```
 
 The filesystem backend rotates JSONL files on startup according to:
@@ -489,7 +495,7 @@ refresh time. The browser polls that endpoint while a refresh is in flight so
 the status strip can distinguish a frontend stuck-state from a backend phase
 that is still running.
 Starting Skannr with `--debug` raises process logging to DEBUG and attempts to
-open a graphical terminal tailing `logs/skannr.log`. On headless or systemd
+open a graphical terminal tailing `runtime/logs/skannr.log`. On headless or systemd
 deployments the same debug output remains available in the log file.
 When live Wi-Fi/Bluetooth rows arrive, or collector status shows scan events
 have already happened while Device History is still empty, the browser treats
@@ -534,7 +540,7 @@ emits normalized finding records for explicit conditions such as:
 - RTL-SDR signal detection
 - collector offline/retrying/stopped
 
-Findings are written back as events under `logs/findings`.
+Findings are written back as events under `runtime/logs/findings`.
 
 `findings_history.json` is the materialized view used by the dashboard. It is
 updated incrementally from new finding log bytes.
@@ -594,7 +600,7 @@ Current Bluetooth history tracks:
 The first full build reads retained logs once and writes:
 
 ```text
-logs/device_history/device_history.json
+runtime/logs/device_history/device_history.json
 ```
 
 After that, refresh uses JSONL byte-offset checkpoints and reads only newly
@@ -613,7 +619,7 @@ consolidation and long-term pattern interpretation belong in Reports.
 History observations are generated by `HistoryAnalyzer` and written to:
 
 ```text
-logs/device_history/history_analysis.json
+runtime/logs/device_history/history_analysis.json
 ```
 
 The persisted analysis file can cover the selected View window, but the
@@ -650,7 +656,7 @@ Reports are slower longitudinal summaries over the selected view window. They
 are generated by `ReportsBuilder` and written to:
 
 ```text
-logs/device_history/reports.json
+runtime/logs/device_history/reports.json
 ```
 
 Current report families include:
@@ -780,9 +786,9 @@ threshold, not a claim that the device or network is hostile.
 
 ## 9. Browser UI
 
-The UI is a single static page served from `static/index.html`. Most dashboard
-behavior lives in `static/app.js`; reusable table schemas/rendering live in
-`static/tables.js`.
+The UI is a single static page served from `src/skannr/static/index.html`. Most
+dashboard behavior lives in `src/skannr/static/app.js`; reusable table
+schemas/rendering live in `src/skannr/static/tables.js`.
 
 Top-level tabs:
 
@@ -826,7 +832,7 @@ The header contains:
 - view-window selector
 
 The connection badge reflects the browser event stream. The view-window selector
-is populated from `skannr.yaml`, `retention_days`, and optional
+is populated from `config/skannr.yaml`, `retention_days`, and optional
 `view_window.default_days`. System Status uses concise availability wording for
 hardware and keeps software checks in a separate column.
 
@@ -846,25 +852,25 @@ registry files are present.
 
 Wi-Fi vendor lookup:
 
-- `collectors/oui.txt`: `https://standards-oui.ieee.org/oui/oui.txt`
-- `collectors/mam.txt`: `https://standards-oui.ieee.org/oui28/mam.txt`
-- `collectors/oui36.txt`: `https://standards-oui.ieee.org/oui36/oui36.txt`
-- `collectors/iab.txt`: `https://standards-oui.ieee.org/iab/iab.txt`
+- `src/skannr/data/collectors/oui.txt`: `https://standards-oui.ieee.org/oui/oui.txt`
+- `src/skannr/data/collectors/mam.txt`: `https://standards-oui.ieee.org/oui28/mam.txt`
+- `src/skannr/data/collectors/oui36.txt`: `https://standards-oui.ieee.org/oui36/oui36.txt`
+- `src/skannr/data/collectors/iab.txt`: `https://standards-oui.ieee.org/iab/iab.txt`
 
 The lookup uses longest-prefix matching. Locally administered MACs are shown as
 locally administered/randomized when applicable.
 
 Bluetooth company lookup:
 
-- `collectors/company_identifiers.txt`: `https://www.bluetooth.com/specifications/assigned-numbers/company-identifiers/`
+- `src/skannr/data/collectors/company_identifiers.txt`: `https://www.bluetooth.com/specifications/assigned-numbers/company-identifiers/`
 
 Bluetooth UUID lookup:
 
-- `collectors/member_uuids.txt`: Bluetooth SIG member/vendor UUID assignments,
+- `src/skannr/data/collectors/member_uuids.txt`: Bluetooth SIG member/vendor UUID assignments,
   such as `0xFEAF` for Nest Labs Inc.
-- `collectors/service_uuids.txt`: standard GATT service UUID assignments, such
+- `src/skannr/data/collectors/service_uuids.txt`: standard GATT service UUID assignments, such
   as `0x180A` for Device Information.
-- `collectors/characteristic_uuids.txt`: standard GATT characteristic UUID
+- `src/skannr/data/collectors/characteristic_uuids.txt`: standard GATT characteristic UUID
   assignments, such as `0x2A25` for Serial Number String.
 
 Skannr reads these optional files in the copied Bluetooth SIG YAML-like format,
@@ -889,14 +895,14 @@ The normal local run path is:
 SKANNR_DIR=/path/to/skannr
 cd "$SKANNR_DIR"
 ./install.sh
-sudo "$SKANNR_DIR/.venv/bin/python" main.py
+sudo env PYTHONPATH="$SKANNR_DIR/src" "$SKANNR_DIR/.venv/bin/python" -m skannr.main
 ```
 
 `install.sh` chooses a requirements file based on Python version:
 
-- Python 3.6: `requirements-py36.txt`
-- Python 3.7: `requirements-py37.txt`
-- Python 3.8 and newer: `requirements-py38plus.txt`
+- Python 3.6: `requirements/requirements-py36.txt`
+- Python 3.7: `requirements/requirements-py37.txt`
+- Python 3.8 and newer: `requirements/requirements-py38plus.txt`
 
 System packages such as `rtl-sdr`, `aircrack-ng`, `bluetooth`, and `bluez` must
 be installed separately.
@@ -958,18 +964,19 @@ network, VPN, SSH tunnel, or reverse proxy with appropriate access control.
 
 Adding a collector currently requires:
 
-1. Add `collectors/<key>.yaml` with key, label, order, validation commands, and
+1. Add `config/collectors/<key>.yaml` with key, label, order, validation commands, and
    collector-specific settings.
-2. Add `collectors/<key>.py` implementing a `BaseCollector` subclass.
+2. Add `src/skannr/collectors/<key>.py` implementing a `BaseCollector` subclass.
 3. Implement `hardware_status()` on the subclass if System Status needs static
    hardware or software probes.
-4. Add the class to `COLLECTOR_CLASS_BY_KEY` in `collectors/__init__.py`.
+4. Add the class to `COLLECTOR_CLASS_BY_KEY` in `src/skannr/collectors/__init__.py`.
 5. If the collector contributes to Device History, extend
    `DeviceHistoryBuilder.COLLECTORS` and add parsing logic.
 6. If the collector should appear in Insights or Reports, add rules in
    `history_analysis.py` or `reports.py`.
-7. If the collector needs custom live UI, add markup in `static/index.html`,
-   table schema in `static/tables.js`, and behavior in `static/app.js`.
+7. If the collector needs custom live UI, add markup in
+   `src/skannr/static/index.html`, table schema in `src/skannr/static/tables.js`,
+   and behavior in `src/skannr/static/app.js`.
 
 Collector metadata and derived-view source filters are already driven by YAML,
 but collector class registration and domain-specific UI/history logic are still
@@ -998,55 +1005,75 @@ complexity before the collector set stabilizes.
 
 ```text
 <skannr-dir>
-  main.py
-  config.py
-  bus.py
-  findings.py
-  device_history.py
-  history_analysis.py
-  reports.py
-  log_utils.py
-  oui_lookup.py
-  skannr.yaml
+  src/skannr/
+    main.py
+    config.py
+    bus.py
+    findings.py
+    device_history.py
+    history_analysis.py
+    reports.py
+    log_utils.py
+    oui_lookup.py
+    paths.py
+    collectors/
+      base.py
+      hardware.py
+      metadata.py
+      wifi.py
+      wifi_monitor.py
+      ble.py
+      ble_identify.py
+      bt_classic.py
+      rtlsdr.py
+      rayhunter.py
+    persistence/
+      base.py
+      filesystem.py
+      none.py
+    static/
+      index.html
+      tables.js
+      app.js
+      style.css
+    data/collectors/
+      company_identifiers.txt
+      member_uuids.txt
+      oui.txt
+      mam.txt
+      oui36.txt
+      iab.txt
+  config/
+    skannr.yaml                    # local, not source upload
+    collectors/                    # local, not source upload
+      wifi.yaml
+      wifi_monitor.yaml
+      ble.yaml
+      ble_identify.yaml
+      bt_classic.yaml
+      rtlsdr.yaml
+      rayhunter.yaml
+  config.example/
+    skannr.yaml                    # generic template
+    collectors/
+      wifi.yaml
+      wifi_monitor.yaml
+      ble.yaml
+      ble_identify.yaml
+      bt_classic.yaml
+      rtlsdr.yaml
+      rayhunter.yaml
+  runtime/
+    logs/
+      <collector>/YYYY-MM-DD.jsonl
+      device_history/device_history.json
+      device_history/findings_history.json
+      device_history/history_analysis.json
+      device_history/reports.json
+      skannr.log
+  requirements/
+    requirements*.txt
   install.sh
-  requirements*.txt
-  collectors/
-    base.py
-    hardware.py
-    metadata.py
-    wifi.py
-    wifi.yaml
-    wifi_monitor.py
-    wifi_monitor.yaml
-    ble.py
-    ble.yaml
-    ble_identify.py
-    ble_identify.yaml
-    bt_classic.py
-    bt_classic.yaml
-    rtlsdr.py
-    rtlsdr.yaml
-    company_identifiers.txt
-    oui.txt
-    mam.txt
-    oui36.txt
-    iab.txt
-  persistence/
-    base.py
-    filesystem.py
-    none.py
-  static/
-    index.html
-    tables.js
-    app.js
-    style.css
-  logs/
-    <collector>/YYYY-MM-DD.jsonl
-    device_history/device_history.json
-    device_history/findings_history.json
-    device_history/history_analysis.json
-    device_history/reports.json
-    skannr.log
 ```
 
 ## 16. Design Decisions

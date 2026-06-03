@@ -18,9 +18,11 @@ For architecture, event flow, collector internals, and extension notes, see
 - `LICENSE`: project license
 - `VERSION`: current application version
 - `CHANGELOG.md`: release notes and versioning policy
-- `skannr.yaml`: local runtime configuration, created on first run
-- `collectors/*.yaml`: collector-specific configuration
-- `collectors/*.py`: collector implementations and their hardware probes
+- `src/skannr/`: Python package, collector code, shipped UI, and bundled lookup data
+- `config.example/`: generic config template for source upload and fresh installs
+- `config/`: local runtime configuration, created from `config.example/` by `install.sh`
+- `runtime/`: generated logs, materialized views, and runtime state
+- `requirements/*.txt`: Python dependency manifests
 
 Current version: see `VERSION`.
 
@@ -38,7 +40,7 @@ The rest of this README is the operator manual.
 SKANNR_DIR=/path/to/skannr
 cd "$SKANNR_DIR"
 ./install.sh
-sudo "$SKANNR_DIR/.venv/bin/python" main.py
+sudo env PYTHONPATH="$SKANNR_DIR/src" "$SKANNR_DIR/.venv/bin/python" -m skannr.main
 ```
 
 Open:
@@ -47,8 +49,8 @@ Open:
 http://127.0.0.1:5004/
 ```
 
-The first run creates `skannr.yaml` if it does not already exist. Existing
-YAML is not rewritten on startup.
+`install.sh` creates local `config/` from `config.example/` if
+`config/skannr.yaml` does not already exist. Existing YAML is not overwritten.
 
 ## Install System Packages
 
@@ -65,9 +67,9 @@ sudo apt install rtl-sdr librtlsdr-dev aircrack-ng bluetooth bluez wireless-tool
 The installer creates `.venv` and chooses the Python requirements file by Python
 version:
 
-- Python 3.6: `requirements-py36.txt`
-- Python 3.7: `requirements-py37.txt`
-- Python 3.8 and newer: `requirements-py38plus.txt`
+- Python 3.6: `requirements/requirements-py36.txt`
+- Python 3.7: `requirements/requirements-py37.txt`
+- Python 3.8 and newer: `requirements/requirements-py38plus.txt`
 
 The Python dependencies include Flask, Flask-SocketIO, `simple-websocket`,
 `bleak`, and `scapy` as appropriate for the local Python version.
@@ -89,7 +91,7 @@ Foreground run:
 ```bash
 SKANNR_DIR=/path/to/skannr
 cd "$SKANNR_DIR"
-sudo "$SKANNR_DIR/.venv/bin/python" main.py
+sudo env PYTHONPATH="$SKANNR_DIR/src" "$SKANNR_DIR/.venv/bin/python" -m skannr.main
 ```
 
 Use `sudo` for the simplest setup. Wi-Fi monitor mode, Bluetooth adapters,
@@ -100,20 +102,21 @@ To use a non-default config path:
 
 ```bash
 SKANNR_DIR=/path/to/skannr
-sudo "$SKANNR_DIR/.venv/bin/python" "$SKANNR_DIR/main.py" --config "$SKANNR_DIR/skannr.yaml"
+sudo env PYTHONPATH="$SKANNR_DIR/src" "$SKANNR_DIR/.venv/bin/python" -m skannr.main --config "$SKANNR_DIR/config/skannr.yaml"
 ```
 
 For live troubleshooting, start with `--debug`:
 
 ```bash
 SKANNR_DIR=/path/to/skannr
-sudo "$SKANNR_DIR/.venv/bin/python" "$SKANNR_DIR/main.py" --debug
+sudo env PYTHONPATH="$SKANNR_DIR/src" "$SKANNR_DIR/.venv/bin/python" -m skannr.main --debug
 ```
 
-Debug mode raises log verbosity to `DEBUG` and writes to `logs/skannr.log`. If
+Debug mode raises log verbosity to `DEBUG` and writes to `runtime/logs/skannr.log`. If
 Skannr is started from a graphical desktop with a supported terminal available,
 it also opens a small live `tail -F` log window. Headless and systemd runs keep
-logging to `logs/skannr.log`; use `tail -f logs/skannr.log` from another shell.
+logging to `runtime/logs/skannr.log`; use `tail -f runtime/logs/skannr.log` from
+another shell.
 
 ## Browser Access
 
@@ -200,7 +203,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/path/to/skannr
-ExecStart=/path/to/skannr/.venv/bin/python /path/to/skannr/main.py --config /path/to/skannr/skannr.yaml
+Environment=PYTHONPATH=/path/to/skannr/src
+ExecStart=/path/to/skannr/.venv/bin/python -m skannr.main --config /path/to/skannr/config/skannr.yaml
 Restart=on-failure
 RestartSec=5
 User=root
@@ -234,16 +238,23 @@ sudo systemctl restart skannr
 
 ## Configuration Files
 
-Global settings live in:
+Global settings live in the local runtime config:
 
 ```text
-skannr.yaml
+config/skannr.yaml
 ```
 
 Collector-specific settings live in:
 
 ```text
-collectors/<collector>.yaml
+config/collectors/<collector>.yaml
+```
+
+Generic defaults for source upload and fresh installs live under
+`config.example/`. On a new machine, run `./install.sh` or copy them manually:
+
+```bash
+cp -a config.example/. config/
 ```
 
 Important global sections:
@@ -283,15 +294,15 @@ new metadata and collector configuration.
 
 ## Logs, Retention, And Derived Data
 
-Runtime files are written under `<skannr-dir>/logs` by default:
+Runtime files are written under `<skannr-dir>/runtime/logs` by default:
 
 ```text
-logs/<collector>/YYYY-MM-DD.jsonl
-logs/skannr.log
-logs/device_history/device_history.json
-logs/device_history/findings_history.json
-logs/device_history/history_analysis.json
-logs/device_history/reports.json
+runtime/logs/<collector>/YYYY-MM-DD.jsonl
+runtime/logs/skannr.log
+runtime/logs/device_history/device_history.json
+runtime/logs/device_history/findings_history.json
+runtime/logs/device_history/history_analysis.json
+runtime/logs/device_history/reports.json
 ```
 
 Raw collector events are JSONL. Skannr uses epoch seconds internally for time
@@ -379,7 +390,7 @@ missed live events while the collectors and raw logs kept running.
 
 While a derived refresh is running, the browser polls `/derived_views/status`
 and shows the numbered backend phase in the status strip. Use the same phase
-numbers in `logs/skannr.log` when debugging a long refresh:
+numbers in `runtime/logs/skannr.log` when debugging a long refresh:
 
 - Phase 1/4, Device History: fold new raw log bytes into the materialized
   device-history cache.
@@ -389,7 +400,7 @@ numbers in `logs/skannr.log` when debugging a long refresh:
 - Phase 4/4, Findings History: load and window persisted finding records.
 
 If refresh appears stuck, check which phase is still running and compare its
-elapsed time with the previous completed phase lines in `logs/skannr.log`.
+elapsed time with the previous completed phase lines in `runtime/logs/skannr.log`.
 Normal derived-bundle loads also check `/derived_views/status` first. If the
 backend is already in one of these phases, the browser waits for that refresh
 to finish before loading `/derived_views`, so it does not render an older cached
@@ -505,7 +516,7 @@ traffic. Those belong to `Wi-Fi Monitor`.
 Default config:
 
 ```text
-collectors/wifi.yaml
+config/collectors/wifi.yaml
 ```
 
 ## Wi-Fi Monitor
@@ -533,7 +544,7 @@ Wi-Fi Access Points.
 Default config:
 
 ```text
-collectors/wifi_monitor.yaml
+config/collectors/wifi_monitor.yaml
 ```
 
 Useful settings:
@@ -590,7 +601,7 @@ decoded services/UUIDs, and last-seen time.
 Default config:
 
 ```text
-collectors/ble.yaml
+config/collectors/ble.yaml
 ```
 
 Use `adapters: []` to let Skannr rank the BlueZ adapters Linux exposes. External
@@ -606,7 +617,7 @@ Bluetooth devices such as some laptops, phones, headsets, and watches.
 Default config:
 
 ```text
-collectors/bt_classic.yaml
+config/collectors/bt_classic.yaml
 ```
 
 Start it manually from the Bluetooth tab or System Status.
@@ -621,7 +632,7 @@ device window.
 Default config:
 
 ```text
-collectors/ble_identify.yaml
+config/collectors/ble_identify.yaml
 ```
 
 It attempts to read selected Device Information Service fields:
@@ -645,7 +656,7 @@ identifying, so treat exported Identify data accordingly.
 Default config:
 
 ```text
-collectors/rtlsdr.yaml
+config/collectors/rtlsdr.yaml
 ```
 
 Default validation requires:
@@ -670,12 +681,12 @@ baseline_period_sec: 30
 ## Wi-Fi Manufacturer Names
 
 Skannr can map Wi-Fi BSSIDs and client MACs to offline IEEE manufacturer data.
-Place any of these files under `collectors/`:
+Bundled IEEE registry files live under `src/skannr/data/collectors/`:
 
-- `collectors/oui.txt`: `https://standards-oui.ieee.org/oui/oui.txt`
-- `collectors/mam.txt`: `https://standards-oui.ieee.org/oui28/mam.txt`
-- `collectors/oui36.txt`: `https://standards-oui.ieee.org/oui36/oui36.txt`
-- `collectors/iab.txt`: `https://standards-oui.ieee.org/iab/iab.txt`
+- `src/skannr/data/collectors/oui.txt`: `https://standards-oui.ieee.org/oui/oui.txt`
+- `src/skannr/data/collectors/mam.txt`: `https://standards-oui.ieee.org/oui28/mam.txt`
+- `src/skannr/data/collectors/oui36.txt`: `https://standards-oui.ieee.org/oui36/oui36.txt`
+- `src/skannr/data/collectors/iab.txt`: `https://standards-oui.ieee.org/iab/iab.txt`
 
 Skannr parses classic OUI `(hex)` rows and MA-M/MA-S/IAB `(base 16)` ranges,
 then uses longest-prefix matching. When a MAC has the locally administered bit
@@ -692,7 +703,7 @@ sourced on 2026-05-18.
 BLE advertisements may include Bluetooth SIG company identifiers such as
 `0x004C`. Skannr can resolve these IDs offline if this file exists:
 
-- `collectors/company_identifiers.txt`: copied content from `https://www.bluetooth.com/specifications/assigned-numbers/company-identifiers/`
+- `src/skannr/data/collectors/company_identifiers.txt`: copied content from `https://www.bluetooth.com/specifications/assigned-numbers/company-identifiers/`
 
 Expected content format:
 
@@ -726,11 +737,11 @@ Skannr has a small built-in table for common service UUIDs such as:
 - `0x1812`: Human Interface Device
 
 For broader offline decoding, place any of these optional Bluetooth SIG UUID
-files under `collectors/`:
+files under `src/skannr/data/collectors/`:
 
-- `collectors/member_uuids.txt`
-- `collectors/service_uuids.txt`
-- `collectors/characteristic_uuids.txt`
+- `src/skannr/data/collectors/member_uuids.txt`
+- `src/skannr/data/collectors/service_uuids.txt`
+- `src/skannr/data/collectors/characteristic_uuids.txt`
 
 The files may use the copied Bluetooth SIG YAML-like format:
 
@@ -748,29 +759,33 @@ Identity display as a labeled `Mfr:` part and is not conflated with advertised
 service/member UUIDs.
 Reload the browser after adding or replacing one of these files.
 
-## Package For Another Machine
+## Package Code For Another Machine
 
-Create a portable archive from the parent of the checkout directory without the
-virtual environment, runtime logs, bytecode caches, or machine-generated config:
+Create a code-only archive from the parent of the checkout directory without the
+virtual environment, operator config, runtime state, or bytecode caches:
 
 ```bash
 cd /path/to/parent
 tar \
   --exclude='skannr/.venv' \
-  --exclude='skannr/__pycache__' \
-  --exclude='skannr/*/__pycache__' \
-  --exclude='skannr/logs' \
-  --exclude='skannr/skannr.yaml' \
+  --exclude='skannr/.git' \
+  --exclude='skannr/config' \
+  --exclude='skannr/runtime' \
+  --exclude='skannr/pcaps' \
+  --exclude='skannr/**/__pycache__' \
+  --exclude='*.pyc' \
   -czf skannr.tar.gz skannr
 ```
 
-Copy `skannr.tar.gz` to the target machine, then install:
+Copy `skannr.tar.gz` to a target that already has its own `config/` and
+`runtime/` directories, then install/update dependencies. On a fresh target,
+`install.sh` creates `config/` from `config.example/`.
 
 ```bash
 tar -xzf skannr.tar.gz
 cd skannr
 ./install.sh
-sudo ./.venv/bin/python main.py
+sudo env PYTHONPATH="$PWD/src" ./.venv/bin/python -m skannr.main
 ```
 
 Install system packages on the target as needed.
@@ -783,7 +798,7 @@ Check the configured bind address:
 
 ```bash
 SKANNR_DIR=/path/to/skannr
-grep -n "host\\|port\\|listeners" "$SKANNR_DIR/skannr.yaml"
+grep -n "host\\|port\\|listeners" "$SKANNR_DIR/config/skannr.yaml"
 ss -ltnp | grep -E '5004|5006'
 ```
 

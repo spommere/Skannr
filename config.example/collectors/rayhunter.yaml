@@ -1,0 +1,11 @@
+key: rayhunter
+order: 60
+label: Rayhunter
+description: Optional Rayhunter cellular-monitor status endpoint
+has_device_history: false
+enabled: false
+endpoint: http://127.0.0.1:8080/
+poll_interval_sec: 30
+request_timeout_sec: 10
+retry_interval_sec: 10
+retry_timeout_sec: 30

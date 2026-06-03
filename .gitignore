@@ -12,11 +12,12 @@ venv/
 env/
 
 # Runtime output
-logs/
+runtime/logs/
+config/
+scripts/
 *.log
 
 # Local machine configuration
-skannr.yaml
 VERSION_HISTORY.md
 VERSION_PLAN.md
 
