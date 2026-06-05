@@ -76,8 +76,7 @@ const TABLE_SCHEMAS = {
     (item) => swpcLevelText(item),
     (item) => swpcSubjectLink(item),
     (item) => swpcTimingText(item),
-    (item) => swpcDetailsText(item),
-    (item) => swpcSourceNode(item)
+    (item) => swpcDetailsText(item)
   ],
   lanEvents: [
     (item) => item.last_seen || "",

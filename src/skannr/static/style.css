@@ -701,6 +701,40 @@ table {
   white-space: nowrap;
 }
 
+.swpc-events-table th:nth-child(1),
+.swpc-events-table td:nth-child(1),
+.swpc-events-table th:nth-child(2),
+.swpc-events-table td:nth-child(2) {
+  min-width: 19ch;
+  white-space: nowrap;
+}
+
+.swpc-events-table th:nth-child(3),
+.swpc-events-table td:nth-child(3) {
+  min-width: 17ch;
+}
+
+.swpc-events-table th:nth-child(4),
+.swpc-events-table td:nth-child(4) {
+  min-width: 12ch;
+}
+
+.swpc-events-table th:nth-child(5),
+.swpc-events-table td:nth-child(5) {
+  min-width: 22ch;
+}
+
+.swpc-events-table th:nth-child(6),
+.swpc-events-table td:nth-child(6) {
+  min-width: 24ch;
+}
+
+.swpc-events-table th:nth-child(7),
+.swpc-events-table td:nth-child(7) {
+  max-width: 38ch;
+  width: 24%;
+}
+
 th,
 td {
   border-bottom: 1px solid var(--line);
