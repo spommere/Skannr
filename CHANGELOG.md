@@ -4,15 +4,45 @@ Skannr uses a simple semantic versioning scheme while the project is still
 pre-1.0:
 
 - `0.1.x`: bug fixes and documentation updates
-- `0.2.0`: meaningful feature additions or data format changes
+- `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
-## 0.2.0 - 2026-06-02
+## 0.2.2 - 2026-06-04
+
+- Added collector-neutral Subject History as the main derived layer. Wi-Fi,
+  Bluetooth, APRS-IS, Rayhunter, RTL-SDR, NOAA, USGS, and LAN now roll up into
+  subjects such as SSID, BSSID, MAC, callsign, endpoint, frequency, alert, quake
+  identity, and LAN device/gateway before feeding Insights and Reports.
+- Added APRS-IS live collection and intelligence support, including multiple
+  feeds, CWOP/weather handling, local range enforcement, decoded station/object
+  activity, weather/motion Insights, callsign-based Reports, subject drilldowns,
+  and clearer per-feed System Status text.
+- Added the live AlertEngine with a global alert strip, Alerts tab, ACK
+  workflow, search, details links, retained alert events, and default high-signal
+  rules for drone/Remote ID Wi-Fi, APRS severe weather, Rayhunter warnings,
+  Wi-Fi disruption/open-sensitive SSIDs, BLE tracker-like devices, NOAA hazards,
+  USGS earthquakes, and LAN gateway changes.
+- Added optional NOAA, USGS, and LAN collectors with live tabs, Subject History,
+  Reports, and Alerts. NOAA covers NWS/NHC hazard context, USGS covers nearby
+  earthquake GeoJSON, and LAN passively records local neighbor/default-gateway
+  state without probing the network.
+- Improved browser status and table usability for new feeds: collector status
+  dots, event-time columns, hyperlink details, alert search/ACK-all, wider
+  narrow columns, NOAA headline de-duplication, and suppression of non-actionable
+  NHC "no tropical cyclones" outlook alerts.
+- Cleaned up System Status wording for APRS-IS and LAN so command/debug details
+  stay in logs while the dashboard shows concise operator-facing source and
+  availability text.
+
+## 0.2.1 - 2026-06-02
 
 - Migrated Skannr to a separated source/config/runtime layout. Python code and
   bundled assets now live under `src/skannr/`, generic templates under
   `config.example/`, local operator config under `config/`, requirements under
-  `requirements/`, and generated runtime state under `runtime/`.
+  `requirements/`, and generated runtime state under `runtime/`. Source-control
+  and release staging now exclude local config, virtualenv, logs, pcaps, and
+  archives, and the migration script rewrites legacy `log_dir: logs` settings
+  to `runtime/logs`.
 - Added Privacy reporting inside Reports and kept report score, confidence, and
   reason provenance distinct for clearer counter-surveillance review.
 - Added an optional Rayhunter collector and derived intelligence integration.

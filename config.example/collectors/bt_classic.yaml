@@ -4,7 +4,7 @@ label: Bluetooth Classic
 description: Classic Bluetooth inquiry scan for discoverable phones, tablets, laptops, and watches
 source_group: bluetooth
 source_group_label: Bluetooth
-has_device_history: true
+has_subject_history: true
 enabled: true
 auto_start: false
 validation_timeout_sec: 10

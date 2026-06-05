@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
     "runtime": {
         "event_log_maxlen": 100,
         "sse_queue_size": 200,
+        "sse_heartbeat_sec": 15,
         "system_status_interval_sec": 5,
         "shutdown_timeout_sec": 10,
     },
@@ -50,6 +51,138 @@ DEFAULT_CONFIG = {
         "burst_count": 5,
         "cooldown_sec": 120,
         "persistent_signal_sec": 60,
+        "aprs_move_km": 0.3,
+        "aprs_temp_change_f": 5,
+        "aprs_rain_1h_high_in": 0.25,
+        "aprs_wind_high_mph": 25,
+        "aprs_gust_high_mph": 35,
+        "noaa_upgrade_severities": ["Severe", "Extreme"],
+        "usgs_warning_magnitude": 4.0,
+        "usgs_warning_distance_km": 100,
+        "swpc_warning_xray_class": "X1.0",
+        "swpc_warning_radio_blackout": "R3",
+        "swpc_warning_solar_radiation_storm": "S3",
+        "swpc_warning_geomagnetic_storm": "G3",
+        "swpc_warning_kp": 7,
+        "lan_return_after_sec": 3600,
+    },
+    "alerts": {
+        "enabled": True,
+        "max_items": 50,
+        "active_ttl_sec": 3600,
+        "dedupe_sec": 900,
+        "ack_memory_ttl_sec": 604800,
+        "ack_memory_alert_types": ["noaa_hazard"],
+        "drone_wifi": {
+            "enabled": True,
+            "level": "critical",
+            "min_rssi": -80,
+            "ssid_patterns": [
+                "RID-*",
+                "DJI*",
+                "Mavic*",
+                "Phantom*",
+                "Inspire*",
+                "Spark*",
+                "Mini*",
+                "Autel*",
+                "Parrot*",
+            ],
+            "vendor_patterns": ["DJI", "SZ DJI", "Autel", "Parrot", "Yuneec"],
+            "oui_prefixes": ["60:60:1f"],
+        },
+        "aprs_weather": {
+            "enabled": True,
+            "level": "warning",
+            "critical_level": "critical",
+            "rain_1h_in": 1.0,
+            "critical_rain_1h_in": 2.0,
+            "wind_gust_mph": 40,
+            "critical_wind_gust_mph": 60,
+        },
+        "rayhunter_warning": {
+            "enabled": True,
+            "level": "critical",
+        },
+        "wifi_disruption": {
+            "enabled": True,
+            "level": "critical",
+            "window_sec": 60,
+            "count": 5,
+        },
+        "wifi_open_sensitive": {
+            "enabled": True,
+            "level": "critical",
+            "ssid_patterns": [],
+        },
+        "ble_tracker": {
+            "enabled": True,
+            "level": "critical",
+            "min_rssi": -85,
+            "name_patterns": [
+                "*airtag*",
+                "*find my*",
+                "*tile*",
+                "*chipolo*",
+                "*smarttag*",
+                "*tracker*",
+                "*pebblebee*",
+                "*orbit*",
+            ],
+            "manufacturer_patterns": [],
+            "service_uuid_patterns": ["fd44"],
+        },
+        "collector_issue": {
+            "enabled": False,
+            "level": "warning",
+            "ignored_reason_patterns": [
+                "*No monitor-mode Wi-Fi interface found*",
+            ],
+        },
+        "noaa_hazard": {
+            "enabled": True,
+            "level": "warning",
+            "critical_level": "critical",
+            "critical_events": [
+                "*tsunami warning*",
+                "*tornado warning*",
+                "*hurricane warning*",
+                "*flash flood warning*",
+            ],
+            "critical_severities": ["Extreme"],
+        },
+        "usgs_earthquake": {
+            "enabled": True,
+            "level": "warning",
+            "critical_level": "critical",
+            "warning_magnitude_nearby": 4.0,
+            "critical_magnitude_nearby": 5.0,
+            "nearby_radius_km": 100,
+            "critical_alert_colors": ["orange", "red"],
+        },
+        "swpc_space_weather": {
+            "enabled": True,
+            "level": "warning",
+            "critical_level": "critical",
+            "alert_min_xray_class": "X1.0",
+            "critical_min_xray_class": "X5.0",
+            "alert_min_radio_blackout": "R3",
+            "critical_min_radio_blackout": "R4",
+            "alert_min_solar_radiation_storm": "S3",
+            "critical_min_solar_radiation_storm": "S4",
+            "alert_min_geomagnetic_storm": "G3",
+            "critical_min_geomagnetic_storm": "G4",
+            "alert_min_kp": 7,
+            "critical_min_kp": 8,
+        },
+        "lan_gateway_change": {
+            "enabled": True,
+            "level": "warning",
+        },
+        "lan_new_device": {
+            "enabled": False,
+            "level": "warning",
+        },
     },
     "history_analysis": {
         "new_device_window_sec": 3600,
@@ -84,6 +217,21 @@ DEFAULT_CONFIG = {
         "wifi_long_presence_sec": 14400,
         "wifi_intermit_min_sessions": 3,
         "wifi_monitor_event_count": 5,
+        "aprs_mobile_min_distance_km": 0.3,
+        "aprs_weather_temp_change_f": 5,
+        "aprs_weather_high_rain_1h_in": 0.25,
+        "aprs_weather_high_wind_mph": 25,
+        "aprs_weather_high_gust_mph": 35,
+        "noaa_high_severities": ["Severe", "Extreme"],
+        "usgs_nearby_radius_km": 100,
+        "usgs_warning_magnitude": 4.0,
+        "swpc_report_xray_class": "X1.0",
+        "swpc_report_radio_blackout": "R3",
+        "swpc_report_solar_radiation_storm": "S3",
+        "swpc_report_geomagnetic_storm": "G3",
+        "swpc_report_kp": 7,
+        "lan_report_new_devices": True,
+        "lan_report_gateway_changes": True,
     },
     "ui": {
         "max_live_rows": 200,
@@ -171,7 +319,6 @@ def load_config(path):
     """Load config/skannr.yaml, apply defaults, and refresh runtime probes."""
     config_path = os.path.abspath(path)
     config = copy.deepcopy(DEFAULT_CONFIG)
-    legacy_collectors = {}
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as fh:
             loaded = yaml.safe_load(fh) or {}
@@ -186,7 +333,10 @@ def load_config(path):
                 "skannr.host/skannr.port are no longer supported; "
                 'use skannr.listeners such as ["127.0.0.1:5004"]'
             )
-        legacy_collectors = loaded.pop("collectors", {}) or {}
+        # Collector settings are intentionally read only from
+        # config/collectors/*.yaml. Ignore stale pre-layout collector blocks so
+        # they cannot override per-collector config files.
+        loaded.pop("collectors", None)
         deep_update(config, loaded)
     else:
         # Only create config/skannr.yaml on a fresh checkout. Existing files are
@@ -196,7 +346,6 @@ def load_config(path):
         detect_hardware(config)
         save_config(path, config)
     config["collectors"] = load_collector_configs(path)
-    deep_update(config["collectors"], legacy_collectors)
     config["persistence"]["filesystem"]["retention_days"] = normalize_retention_days(
         config["persistence"]["filesystem"].get("retention_days"),
         DEFAULT_CONFIG["persistence"]["filesystem"]["retention_days"],

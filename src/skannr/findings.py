@@ -6,10 +6,16 @@ Longer historical interpretation belongs in device_history.py, history_analysis.
 and reports.py.
 """
 
+import math
 from collections import deque
 
 from .bus import local_now
+from .collectors.aprsis import clean_aprs_data
+from .collectors.lan import clean_lan_data
+from .collectors.noaa import clean_noaa_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
+from .collectors.swpc import clean_swpc_data, number_or_none, swpc_event_is_alert
+from .collectors.usgs import clean_usgs_data
 from .log_utils import event_time_epoch, now_epoch, timestamp_epoch
 
 
@@ -27,6 +33,16 @@ DEFAULT_FINDINGS_CONFIG = {
     "burst_count": 5,
     "cooldown_sec": 120,
     "persistent_signal_sec": 60,
+    "aprs_move_km": 0.3,
+    "aprs_temp_change_f": 5,
+    "aprs_rain_1h_high_in": 0.25,
+    "aprs_wind_high_mph": 25,
+    "aprs_gust_high_mph": 35,
+    "swpc_warning_xray_class": "X1.0",
+    "swpc_warning_radio_blackout": "R3",
+    "swpc_warning_solar_radiation_storm": "S3",
+    "swpc_warning_geomagnetic_storm": "G3",
+    "swpc_warning_kp": 7,
 }
 
 
@@ -53,6 +69,12 @@ class FindingsEngine:
         self.bt_classic_devices = {}
         self.rtlsdr_signals = {}
         self.collector_states = {}
+        self.aprs_stations = {}
+        self.noaa_alerts = {}
+        self.usgs_events = {}
+        self.swpc_events = {}
+        self.lan_devices = {}
+        self.lan_gateways = {}
 
     def bootstrap(self, events):
         """Replay persisted events to rebuild state without replaying old noise."""
@@ -186,6 +208,26 @@ class FindingsEngine:
         elif collector == "rayhunter":
             findings.extend(
                 self._process_rayhunter(event_type, event, timestamp, emit)
+            )
+        elif collector == "aprsis":
+            findings.extend(
+                self._process_aprsis(event_type, event, timestamp, now, emit)
+            )
+        elif collector == "noaa":
+            findings.extend(
+                self._process_noaa(event_type, event, timestamp, emit)
+            )
+        elif collector == "usgs":
+            findings.extend(
+                self._process_usgs(event_type, event, timestamp, emit)
+            )
+        elif collector == "swpc":
+            findings.extend(
+                self._process_swpc(event_type, event, timestamp, emit)
+            )
+        elif collector == "lan":
+            findings.extend(
+                self._process_lan(event_type, event, timestamp, emit)
             )
         elif collector == "system":
             findings.extend(
@@ -1114,6 +1156,768 @@ class FindingsEngine:
             if data.get(key) not in (None, "", [])
         }
 
+    def _process_aprsis(self, event_type, event, timestamp, now, emit):
+        """Turn filtered APRS-IS packets into situational Insights."""
+        data = clean_aprs_data(event.get("data") or {})
+        if event_type in ("collector_offline", "collector_retrying"):
+            return self._collector_warning("aprsis", event_type, data, timestamp, emit)
+        if event_type == "collector_online":
+            detail = "APRS-IS feed online"
+            if data.get("filter"):
+                detail += "; filter {}".format(data.get("filter"))
+            return self._finding_list(
+                timestamp,
+                "info",
+                "aprsis",
+                "aprsis_feed_online",
+                "APRS-IS feed online",
+                detail,
+                "aprsis-online:{}".format(data.get("filter") or "default"),
+                emit,
+                self.aprsis_attributes(data),
+            )
+        if not str(event_type or "").startswith("aprs_"):
+            return []
+        callsign = data.get("callsign") or "unknown"
+        packet_type = data.get("packet_type") or event_type.replace("aprs_", "")
+        title = self.aprsis_finding_title(packet_type)
+        detail = self.aprsis_finding_detail(data, packet_type)
+        findings = self._finding_list(
+            timestamp,
+            "info",
+            "aprsis",
+            event_type,
+            title,
+            detail,
+            "aprsis:{}:{}".format(packet_type, callsign),
+            emit,
+            self.aprsis_attributes(data),
+        )
+        findings.extend(
+            self.aprsis_pattern_findings(
+                data, packet_type, callsign, timestamp, now, emit
+            )
+        )
+        self.aprsis_update_station_state(callsign, data, now)
+        return findings
+
+    def aprsis_pattern_findings(
+        self, data, packet_type, callsign, timestamp, now, emit
+    ):
+        """Return live APRS movement/weather pattern findings for one station."""
+        findings = []
+        previous = self.aprs_stations.get(callsign) or {}
+        latitude = self._to_number(data.get("latitude"))
+        longitude = self._to_number(data.get("longitude"))
+        if latitude is not None and longitude is not None:
+            distance = self._distance_km(
+                previous.get("latitude"),
+                previous.get("longitude"),
+                latitude,
+                longitude,
+            )
+            if distance is not None and distance >= float(self.config["aprs_move_km"]):
+                attributes = self.aprsis_attributes(data)
+                attributes["movement_km"] = round(distance, 3)
+                findings.extend(
+                    self._finding_list(
+                        timestamp,
+                        "info",
+                        "aprsis",
+                        "aprsis_station_moved",
+                        "APRS station moved through area",
+                        (
+                            "{} moved {:.2f} km through the configured APRS area; "
+                            "latest {:.5f}, {:.5f}; internet-fed"
+                        ).format(callsign, distance, latitude, longitude),
+                        "aprsis-moved:{}".format(callsign),
+                        emit,
+                        attributes,
+                    )
+                )
+        if packet_type == "weather" or data.get("weather_summary"):
+            findings.extend(
+                self.aprsis_weather_pattern_findings(
+                    data, callsign, previous, timestamp, emit
+                )
+            )
+        return findings
+
+    def aprsis_weather_pattern_findings(
+        self, data, callsign, previous, timestamp, emit
+    ):
+        """Return live APRS weather transition findings for one station."""
+        findings = []
+        temperature = self._to_number(data.get("temperature_f"))
+        previous_temperature = previous.get("temperature_f")
+        if temperature is not None and previous_temperature is not None:
+            delta = temperature - previous_temperature
+            if abs(delta) >= float(self.config["aprs_temp_change_f"]):
+                attributes = self.aprsis_attributes(data)
+                attributes["temperature_change_f"] = round(delta, 1)
+                findings.extend(
+                    self._finding_list(
+                        timestamp,
+                        "info",
+                        "aprsis",
+                        "aprsis_weather_temperature_change",
+                        "APRS weather temperature changed",
+                        "{} temperature changed {:+.0f} F to {:.0f} F; internet-fed".format(
+                            callsign, delta, temperature
+                        ),
+                        "aprsis-temp-change:{}".format(callsign),
+                        emit,
+                        attributes,
+                    )
+                )
+        rain_1h = self._to_number(data.get("rain_1h_in"))
+        previous_rain = previous.get("rain_1h_in")
+        if rain_1h is not None:
+            if rain_1h >= float(self.config["aprs_rain_1h_high_in"]):
+                findings.extend(
+                    self._finding_list(
+                        timestamp,
+                        "warning",
+                        "aprsis",
+                        "aprsis_weather_high_rain",
+                        "APRS weather high rain rate",
+                        "{} reported {:.2f} in/hr rain rate; internet-fed".format(
+                            callsign, rain_1h
+                        ),
+                        "aprsis-high-rain:{}".format(callsign),
+                        emit,
+                        self.aprsis_attributes(data),
+                    )
+                )
+            if previous_rain is not None and previous_rain <= 0 < rain_1h:
+                findings.extend(
+                    self._finding_list(
+                        timestamp,
+                        "info",
+                        "aprsis",
+                        "aprsis_weather_rain_started",
+                        "APRS weather rain started",
+                        "{} rain started; 1h rain rate {:.2f} in/hr; internet-fed".format(
+                            callsign, rain_1h
+                        ),
+                        "aprsis-rain-started:{}".format(callsign),
+                        emit,
+                        self.aprsis_attributes(data),
+                    )
+                )
+            if previous_rain is not None and previous_rain > 0 and rain_1h <= 0:
+                findings.extend(
+                    self._finding_list(
+                        timestamp,
+                        "info",
+                        "aprsis",
+                        "aprsis_weather_rain_stopped",
+                        "APRS weather rain stopped",
+                        "{} rain stopped; 1h rain rate returned to {:.2f} in/hr; internet-fed".format(
+                            callsign, rain_1h
+                        ),
+                        "aprsis-rain-stopped:{}".format(callsign),
+                        emit,
+                        self.aprsis_attributes(data),
+                    )
+                )
+        wind = self._to_number(data.get("wind_speed_mph"))
+        gust = self._to_number(data.get("wind_gust_mph"))
+        wind_high = wind is not None and wind >= float(
+            self.config["aprs_wind_high_mph"]
+        )
+        gust_high = gust is not None and gust >= float(
+            self.config["aprs_gust_high_mph"]
+        )
+        if wind_high or gust_high:
+            parts = []
+            if wind is not None:
+                parts.append("wind {:.0f} mph".format(wind))
+            if gust is not None:
+                parts.append("gust {:.0f} mph".format(gust))
+            findings.extend(
+                self._finding_list(
+                    timestamp,
+                    "warning",
+                    "aprsis",
+                    "aprsis_weather_high_wind",
+                    "APRS weather high wind",
+                    "{} reported {}; internet-fed".format(callsign, ", ".join(parts)),
+                    "aprsis-high-wind:{}".format(callsign),
+                    emit,
+                    self.aprsis_attributes(data),
+                )
+            )
+        return findings
+
+    def aprsis_update_station_state(self, callsign, data, now):
+        """Remember latest APRS position/weather fields for live pattern checks."""
+        state = self.aprs_stations.setdefault(callsign, {})
+        state["last_seen_epoch"] = now
+        for key in (
+            "latitude",
+            "longitude",
+            "temperature_f",
+            "rain_1h_in",
+            "wind_speed_mph",
+            "wind_gust_mph",
+        ):
+            value = self._to_number(data.get(key))
+            if value is not None:
+                state[key] = value
+
+    def aprsis_finding_title(self, packet_type):
+        """Return the APRS-IS Insight title for a packet class."""
+        labels = {
+            "position": "APRS station in configured area",
+            "object": "APRS object in configured area",
+            "message": "APRS message in configured area",
+            "status": "APRS status in configured area",
+            "weather": "APRS weather activity in configured area",
+            "telemetry": "APRS telemetry in configured area",
+        }
+        return labels.get(packet_type, "APRS activity in configured area")
+
+    def aprsis_finding_detail(self, data, packet_type):
+        """Return a compact APRS-IS Insight detail string."""
+        callsign = data.get("callsign") or "unknown"
+        parts = [callsign]
+        if data.get("object_name"):
+            parts.append("object {}".format(data.get("object_name")))
+        if data.get("addressee"):
+            parts.append("to {}".format(data.get("addressee")))
+        if data.get("destination") and not data.get("addressee"):
+            parts.append("dst {}".format(data.get("destination")))
+        if data.get("weather_summary"):
+            parts.append(data.get("weather_summary"))
+        if data.get("message"):
+            parts.append(data.get("message"))
+        elif data.get("comment"):
+            parts.append(data.get("comment"))
+        else:
+            parts.append(packet_type)
+        latitude = self._to_number(data.get("latitude"))
+        longitude = self._to_number(data.get("longitude"))
+        if latitude is not None and longitude is not None:
+            parts.append("{:.5f}, {:.5f}".format(latitude, longitude))
+        elif latitude is not None:
+            parts.append("lat {:.5f}".format(latitude))
+        speed_kmh = self._to_number(data.get("speed_kmh"))
+        course_deg = self._to_number(data.get("course_deg"))
+        if speed_kmh is not None:
+            parts.append("{} km/h".format(data.get("speed_kmh")))
+        if course_deg is not None:
+            parts.append("{} deg".format(data.get("course_deg")))
+        if data.get("filter"):
+            parts.append("APRS-IS filter {}".format(data.get("filter")))
+        if data.get("feed_name"):
+            parts.append("feed {}".format(data.get("feed_name")))
+        parts.append("internet-fed")
+        return "; ".join(str(part) for part in parts if part)
+
+    def aprsis_attributes(self, data):
+        """Return structured APRS-IS fields for Insights evidence."""
+        fields = (
+            "callsign",
+            "destination",
+            "via_path",
+            "q_construct",
+            "igate",
+            "packet_type",
+            "aprs_format",
+            "mic_e_message",
+            "weather_summary",
+            "object_name",
+            "addressee",
+            "message",
+            "comment",
+            "latitude",
+            "longitude",
+            "movement_km",
+            "position_span_km",
+            "speed_kmh",
+            "speed_knots",
+            "course_deg",
+            "wind_direction_deg",
+            "wind_speed_mph",
+            "wind_gust_mph",
+            "temperature_f",
+            "temperature_change_f",
+            "rain_1h_in",
+            "rain_24h_in",
+            "rain_since_midnight_in",
+            "humidity_percent",
+            "pressure_hpa",
+            "luminosity_w_m2",
+            "snow_in",
+            "symbol",
+            "symbol_code",
+            "symbol_table",
+            "host",
+            "port",
+            "filter",
+            "feed_name",
+            "feed_role",
+            "distance_from_filter_km",
+            "geofence_enforced",
+            "geofence_radius_km",
+            "internet_fed",
+        )
+        return {
+            key: data.get(key)
+            for key in fields
+            if data.get(key) not in (None, "", [])
+        }
+
+    def _process_noaa(self, event_type, event, timestamp, emit):
+        """Turn NOAA/NWS/NHC feed changes into live Insights."""
+        data = clean_noaa_data(event.get("data") or {})
+        if event_type in ("collector_offline", "collector_retrying"):
+            return self._collector_warning("noaa", event_type, data, timestamp, emit)
+        if event_type not in ("noaa_weather_alert", "noaa_tropical_advisory"):
+            return []
+        event_id = data.get("event_id") or data.get("headline") or "unknown"
+        previous = self.noaa_alerts.get(event_id) or {}
+        self.noaa_alerts[event_id] = {
+            "severity": data.get("severity") or "",
+            "status": data.get("status") or "",
+            "headline": data.get("headline") or "",
+        }
+        findings = []
+        severity = "warning" if self.noaa_is_warning(data) else "info"
+        title = (
+            "NOAA tropical advisory"
+            if event_type == "noaa_tropical_advisory"
+            else "NOAA weather alert"
+        )
+        detail = self.noaa_detail(data)
+        findings.extend(
+            self._finding_list(
+                timestamp,
+                severity,
+                "noaa",
+                event_type,
+                title,
+                detail,
+                "noaa-alert:{}".format(event_id),
+                emit,
+                self.noaa_attributes(data),
+            )
+        )
+        old_rank = self.noaa_severity_rank(previous.get("severity"))
+        new_rank = self.noaa_severity_rank(data.get("severity"))
+        if previous and new_rank > old_rank:
+            findings.extend(
+                self._finding_list(
+                    timestamp,
+                    "warning",
+                    "noaa",
+                    "noaa_alert_upgraded",
+                    "NOAA alert upgraded",
+                    "{} changed severity from {} to {}".format(
+                        data.get("event") or data.get("headline") or event_id,
+                        previous.get("severity") or "unknown",
+                        data.get("severity") or "unknown",
+                    ),
+                    "noaa-alert-upgrade:{}".format(event_id),
+                    emit,
+                    self.noaa_attributes(data),
+                )
+            )
+        return findings
+
+    def noaa_is_warning(self, data):
+        """Return True for NOAA records worth showing as warning Insights."""
+        severities = {
+            str(item or "").lower()
+            for item in self.config.get("noaa_upgrade_severities") or []
+        }
+        severity = str((data or {}).get("severity") or "").lower()
+        kind = str((data or {}).get("alert_kind") or "").lower()
+        if kind == "tropical_outlook":
+            return False
+        event = str((data or {}).get("event") or "").lower()
+        return (
+            severity in severities
+            or kind in ("tsunami", "tropical")
+            or any(word in event for word in ("warning", "watch", "tornado"))
+        )
+
+    def noaa_severity_rank(self, value):
+        """Return coarse NOAA severity rank."""
+        return {
+            "minor": 1,
+            "moderate": 2,
+            "severe": 3,
+            "extreme": 4,
+        }.get(str(value or "").lower(), 0)
+
+    def noaa_detail(self, data):
+        """Return compact NOAA finding detail."""
+        parts = [
+            data.get("event") or data.get("headline") or "",
+            data.get("severity") or "",
+            data.get("area_desc") or "",
+            data.get("headline") if data.get("headline") != data.get("event") else "",
+            data.get("expires") and "expires {}".format(data.get("expires")),
+            data.get("source") or "NOAA",
+            "internet-fed",
+        ]
+        return "; ".join(str(part) for part in parts if part)
+
+    def noaa_attributes(self, data):
+        """Return structured NOAA evidence fields for Insights."""
+        fields = (
+            "event_id",
+            "event",
+            "headline",
+            "severity",
+            "urgency",
+            "certainty",
+            "status",
+            "message_type",
+            "category",
+            "alert_kind",
+            "area_desc",
+            "effective",
+            "onset",
+            "expires",
+            "ends",
+            "updated",
+            "source",
+            "source_url",
+            "basin",
+            "internet_fed",
+        )
+        return {
+            key: data.get(key)
+            for key in fields
+            if data.get(key) not in (None, "", [])
+        }
+
+    def _process_usgs(self, event_type, event, timestamp, emit):
+        """Turn USGS earthquake feed changes into live Insights."""
+        data = clean_usgs_data(event.get("data") or {})
+        if event_type in ("collector_offline", "collector_retrying"):
+            return self._collector_warning("usgs", event_type, data, timestamp, emit)
+        if event_type != "usgs_earthquake":
+            return []
+        event_id = data.get("event_id") or "unknown"
+        previous = self.usgs_events.get(event_id) or {}
+        self.usgs_events[event_id] = {
+            "magnitude": self._to_number(data.get("magnitude")),
+            "updated_epoch": data.get("updated_epoch"),
+        }
+        findings = []
+        severity = "warning" if self.usgs_is_warning(data) else "info"
+        findings.extend(
+            self._finding_list(
+                timestamp,
+                severity,
+                "usgs",
+                "usgs_earthquake",
+                "USGS earthquake",
+                self.usgs_detail(data),
+                "usgs-earthquake:{}".format(event_id),
+                emit,
+                self.usgs_attributes(data),
+            )
+        )
+        old_mag = self._to_number(previous.get("magnitude"))
+        new_mag = self._to_number(data.get("magnitude"))
+        if old_mag is not None and new_mag is not None and new_mag - old_mag >= 0.3:
+            findings.extend(
+                self._finding_list(
+                    timestamp,
+                    "warning" if self.usgs_is_warning(data) else "info",
+                    "usgs",
+                    "usgs_earthquake_magnitude_updated",
+                    "USGS earthquake magnitude updated",
+                    "{} magnitude changed from {:.1f} to {:.1f}".format(
+                        data.get("place") or event_id, old_mag, new_mag
+                    ),
+                    "usgs-earthquake-update:{}".format(event_id),
+                    emit,
+                    self.usgs_attributes(data),
+                )
+            )
+        return findings
+
+    def usgs_is_warning(self, data):
+        """Return True for USGS earthquake warning Insights."""
+        magnitude = self._to_number((data or {}).get("magnitude")) or 0
+        distance = self._to_number((data or {}).get("distance_km"))
+        threshold = float(self.config.get("usgs_warning_magnitude", 4.0))
+        radius = float(self.config.get("usgs_warning_distance_km", 100))
+        if int((data or {}).get("tsunami") or 0):
+            return True
+        if str((data or {}).get("alert_color") or "").lower() in ("yellow", "orange", "red"):
+            return True
+        if distance is not None:
+            return distance <= radius and magnitude >= threshold
+        return magnitude >= threshold
+
+    def usgs_detail(self, data):
+        """Return compact USGS finding detail."""
+        parts = []
+        magnitude = self._to_number(data.get("magnitude"))
+        if magnitude is not None:
+            parts.append("M{:.1f}".format(magnitude))
+        if data.get("place"):
+            parts.append(data.get("place"))
+        distance = self._to_number(data.get("distance_km"))
+        if distance is not None:
+            parts.append("{:.1f} km from configured point".format(distance))
+        if data.get("depth_km") is not None:
+            parts.append("depth {} km".format(data.get("depth_km")))
+        if data.get("alert_color"):
+            parts.append("alert {}".format(data.get("alert_color")))
+        if data.get("tsunami"):
+            parts.append("tsunami flag")
+        parts.append("internet-fed")
+        return "; ".join(str(part) for part in parts if part)
+
+    def usgs_attributes(self, data):
+        """Return structured USGS evidence fields for Insights."""
+        fields = (
+            "event_id",
+            "magnitude",
+            "place",
+            "latitude",
+            "longitude",
+            "depth_km",
+            "distance_km",
+            "event_time",
+            "updated",
+            "status",
+            "felt",
+            "cdi",
+            "mmi",
+            "alert_color",
+            "tsunami",
+            "detail_url",
+            "internet_fed",
+        )
+        return {
+            key: data.get(key)
+            for key in fields
+            if data.get(key) not in (None, "", [])
+        }
+
+    def _process_swpc(self, event_type, event, timestamp, emit):
+        """Turn SWPC space-weather feed changes into live Insights."""
+        data = clean_swpc_data(event.get("data") or {})
+        if event_type in ("collector_offline", "collector_retrying"):
+            return self._collector_warning("swpc", event_type, data, timestamp, emit)
+        if event_type != "swpc_event":
+            return []
+        event_id = data.get("event_id") or data.get("summary") or "swpc"
+        previous = self.swpc_events.get(event_id) or {}
+        self.swpc_events[event_id] = {
+            "summary": data.get("summary") or "",
+            "scale_label": data.get("scale_label") or "",
+            "scale_value": data.get("scale_value"),
+            "xray_class": data.get("xray_class") or "",
+            "kp_index": data.get("kp_index"),
+        }
+        severity = "warning" if self.swpc_is_warning(data) else "info"
+        findings = self._finding_list(
+            timestamp,
+            severity,
+            "swpc",
+            "swpc_event",
+            self.swpc_title(data),
+            self.swpc_detail(data),
+            "swpc-event:{}".format(event_id),
+            emit,
+            self.swpc_attributes(data),
+        )
+        if previous and self.swpc_importance_changed(previous, data):
+            findings.extend(
+                self._finding_list(
+                    timestamp,
+                    severity,
+                    "swpc",
+                    "swpc_event_updated",
+                    "SWPC event updated",
+                    self.swpc_detail(data),
+                    "swpc-event-update:{}".format(event_id),
+                    emit,
+                    self.swpc_attributes(data),
+                )
+            )
+        return findings
+
+    def swpc_is_warning(self, data):
+        """Return True for SWPC records worth showing as warning Insights."""
+        return swpc_event_is_alert(
+            data,
+            {
+                "alert_min_xray_class": self.config.get(
+                    "swpc_warning_xray_class", "X1.0"
+                ),
+                "alert_min_radio_blackout": self.config.get(
+                    "swpc_warning_radio_blackout", "R3"
+                ),
+                "alert_min_solar_radiation_storm": self.config.get(
+                    "swpc_warning_solar_radiation_storm", "S3"
+                ),
+                "alert_min_geomagnetic_storm": self.config.get(
+                    "swpc_warning_geomagnetic_storm", "G3"
+                ),
+                "alert_min_kp": self.config.get("swpc_warning_kp", 7),
+            },
+        )
+
+    def swpc_importance_changed(self, previous, data):
+        """Return True when a retained SWPC event changed impact level."""
+        return any(
+            previous.get(key) != data.get(key)
+            for key in ("scale_label", "scale_value", "xray_class", "kp_index")
+        )
+
+    def swpc_title(self, data):
+        """Return compact SWPC finding title."""
+        return "SWPC {}".format(data.get("event") or "space-weather event")
+
+    def swpc_detail(self, data):
+        """Return compact SWPC finding detail."""
+        kp = number_or_none(data.get("kp_index"))
+        parts = [
+            data.get("summary") or "",
+            data.get("xray_class") or "",
+            data.get("scale_label") or "",
+            kp is not None and "Kp {:.1f}".format(kp),
+            data.get("event_time") or data.get("peak_time") or "",
+            data.get("source") or "SWPC",
+        ]
+        return "; ".join(str(part) for part in parts if part)
+
+    def swpc_attributes(self, data):
+        """Return structured SWPC evidence fields for Insights."""
+        fields = (
+            "event_id",
+            "event_kind",
+            "event",
+            "summary",
+            "scale_family",
+            "scale_value",
+            "scale_label",
+            "kp_index",
+            "xray_class",
+            "xray_flux_peak",
+            "event_time",
+            "start_time",
+            "end_time",
+            "peak_time",
+            "issue_time",
+            "source",
+            "source_url",
+            "product_id",
+            "internet_fed",
+        )
+        return {
+            key: data.get(key)
+            for key in fields
+            if data.get(key) not in (None, "", [])
+        }
+
+    def _process_lan(self, event_type, event, timestamp, emit):
+        """Turn passive LAN observations into live Insights."""
+        data = clean_lan_data(event.get("data") or {})
+        if event_type in ("collector_offline", "collector_retrying"):
+            return self._collector_warning("lan", event_type, data, timestamp, emit)
+        if event_type in ("lan_gateway_seen", "lan_gateway_changed"):
+            return self._process_lan_gateway(event_type, data, timestamp, emit)
+        if event_type not in ("lan_device_seen", "lan_device_changed"):
+            return []
+        key = data.get("subject_key") or data.get("mac") or data.get("ip") or "unknown"
+        previous = self.lan_devices.get(key)
+        self.lan_devices[key] = data
+        title = "New LAN device" if event_type == "lan_device_seen" else "LAN device changed"
+        finding_type = "lan_device_new" if event_type == "lan_device_seen" else "lan_device_changed"
+        return self._finding_list(
+            timestamp,
+            "info",
+            "lan",
+            finding_type,
+            title,
+            self.lan_device_detail(data),
+            "lan-device:{}:{}".format(finding_type, key),
+            emit,
+            self.lan_attributes(data),
+        )
+
+    def _process_lan_gateway(self, event_type, data, timestamp, emit):
+        """Return default-gateway LAN findings."""
+        key = "{}:{}".format(data.get("family") or "", data.get("interface") or "")
+        self.lan_gateways[key] = data
+        changed = event_type == "lan_gateway_changed"
+        return self._finding_list(
+            timestamp,
+            "warning" if changed else "info",
+            "lan",
+            "lan_gateway_changed" if changed else "lan_gateway_seen",
+            "LAN default gateway changed" if changed else "LAN default gateway seen",
+            self.lan_gateway_detail(data),
+            "lan-gateway:{}".format(key),
+            emit,
+            self.lan_attributes(data),
+        )
+
+    def lan_device_detail(self, data):
+        """Return compact LAN device finding detail."""
+        parts = [
+            data.get("hostname") or "",
+            data.get("mac") or "",
+            ", ".join(data.get("ips") or []) or data.get("ip") or "",
+            data.get("vendor_name") or "",
+            data.get("interface") or "",
+            data.get("state") or "",
+            "gateway" if data.get("gateway") else "",
+        ]
+        return "; ".join(str(part) for part in parts if part)
+
+    def lan_gateway_detail(self, data):
+        """Return compact LAN gateway finding detail."""
+        parts = [
+            data.get("family") or "",
+            data.get("gateway_ip") or "",
+            data.get("interface") or "",
+            data.get("mac") or "",
+            data.get("vendor_name") or "",
+        ]
+        return "; ".join(str(part) for part in parts if part)
+
+    def lan_attributes(self, data):
+        """Return structured LAN evidence fields for Insights."""
+        fields = (
+            "subject_key",
+            "mac",
+            "ip",
+            "ips",
+            "hostname",
+            "hostnames",
+            "interface",
+            "interfaces",
+            "state",
+            "states",
+            "sources",
+            "vendor_oui",
+            "vendor_prefix",
+            "vendor_name",
+            "gateway",
+            "gateways",
+            "gateway_ip",
+            "family",
+            "change_type",
+        )
+        return {
+            key: data.get(key)
+            for key in fields
+            if data.get(key) not in (None, "", [])
+        }
+
     def _expire_presence(self, timestamp, now):
         findings = []
         lost_after = float(self.config["lost_after_sec"])
@@ -1257,6 +2061,20 @@ class FindingsEngine:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    def _distance_km(self, lat1, lon1, lat2, lon2):
+        """Return great-circle distance in kilometers for movement checks."""
+        values = [self._to_number(value) for value in (lat1, lon1, lat2, lon2)]
+        if any(value is None for value in values):
+            return None
+        lat1, lon1, lat2, lon2 = [math.radians(value) for value in values]
+        delta_lat = lat2 - lat1
+        delta_lon = lon2 - lon1
+        root = (
+            math.sin(delta_lat / 2.0) ** 2
+            + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2.0) ** 2
+        )
+        return 6371.0 * 2.0 * math.asin(min(1.0, math.sqrt(root)))
 
     def _is_strong(self, rssi, threshold):
         value = self._to_number(rssi)

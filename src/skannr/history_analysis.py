@@ -1,4 +1,4 @@
-"""Deterministic insight rules over the materialized Device History summary.
+"""Deterministic insight rules over the materialized subject/device summary.
 
 This is the short-horizon "what looks notable" layer. It uses explicit rules
 and evidence fields so results are reproducible and can be inspected without an
@@ -34,7 +34,7 @@ DEFAULT_ANALYSIS_CONFIG = {
 
 
 class HistoryAnalyzer:
-    """Deterministic analysis rules over the persisted Device History summary."""
+    """Deterministic analysis rules over the persisted subject/device summary."""
 
     def __init__(self, config=None):
         self.config = DEFAULT_ANALYSIS_CONFIG.copy()
@@ -48,8 +48,8 @@ class HistoryAnalyzer:
         self._generated_at_epoch = generated_at_epoch
         generated_at = local_now(generated_at_epoch)
         observations = []
-        # Device History is the only input here. That keeps analysis cheap after
-        # the summary has been materialized and avoids another raw-log scan.
+        # Subject History's device view is the only input here. That keeps
+        # analysis cheap after materialization and avoids another raw-log scan.
         wifi = history.get("wifi") or {}
         ble = history.get("bluetooth") or history.get("ble") or {}
         aps = wifi.get("access_points") or []
@@ -89,7 +89,7 @@ class HistoryAnalyzer:
         }
 
     def history_generated_epoch(self, history):
-        """Use the Device History snapshot time as the analysis freshness time."""
+        """Use the subject/device snapshot time as the analysis freshness time."""
         try:
             value = float((history or {}).get("generated_at_epoch"))
         except (TypeError, ValueError):

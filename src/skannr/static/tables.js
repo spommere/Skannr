@@ -38,6 +38,57 @@ const TABLE_SCHEMAS = {
     (item) => formatSignal(item.rssi),
     (item) => item.last_seen || ""
   ],
+  aprsisEvents: [
+    (item) => item.last_seen || "",
+    (item) => item.packet_type || item.event_type || "",
+    (item) => aprsisSubjectLink(item),
+    (item) => formatAprsisTarget(item),
+    (item) => formatAprsisRoute(item),
+    (item) => formatAprsisText(item),
+    (item) => formatAprsisPosition(item),
+    (item) => formatAprsisMotion(item)
+  ],
+  noaaEvents: [
+    (item) => item.last_seen || "",
+    (item) => item.alert_kind || item.event_type || "",
+    (item) => noaaSeverityText(item),
+    (item) => noaaEventTimeText(item),
+    (item) => noaaSubjectLink(item),
+    (item) => item.area_desc || "",
+    (item) => noaaTimingText(item),
+    (item) => item.source || ""
+  ],
+  usgsEvents: [
+    (item) => item.last_seen || "",
+    (item) => item.event_time || item.last_seen || "",
+    (item) => usgsSubjectLink(item),
+    (item) => usgsMagnitudeText(item),
+    (item) => item.place || "",
+    (item) => usgsDistanceText(item),
+    (item) => item.depth_km !== undefined ? `${item.depth_km} km` : "",
+    (item) => usgsAlertText(item),
+    (item) => item.status || ""
+  ],
+  swpcEvents: [
+    (item) => item.last_seen || "",
+    (item) => item.event_time || item.peak_time || item.issue_time || "",
+    (item) => swpcKindText(item),
+    (item) => swpcLevelText(item),
+    (item) => swpcSubjectLink(item),
+    (item) => swpcTimingText(item),
+    (item) => swpcDetailsText(item),
+    (item) => swpcSourceNode(item)
+  ],
+  lanEvents: [
+    (item) => item.last_seen || "",
+    (item) => item.event_type || "",
+    (item) => lanSubjectLink(item),
+    (item) => lanIdentityText(item),
+    (item) => lanInterfaceStateText(item),
+    (item) => compactList(item.sources || (item.source ? [item.source] : []), 3),
+    (item) => lanGatewayText(item),
+    (item) => item.change_type || ""
+  ],
   wifiAccessPoints: [
     (item) => detailLink(item.ssid || "(blank)", "wifi-ssid", item.ssid || "(blank)"),
     (item) => detailLink(item.bssid || "", "wifi-bssid", item.bssid || ""),

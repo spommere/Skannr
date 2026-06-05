@@ -1,0 +1,52 @@
+key: swpc
+order: 95
+label: SWPC
+description: Optional internet-fed NOAA SWPC space-weather event feed
+has_subject_history: true
+enabled: false
+
+# NOAA Space Weather Prediction Center public feeds. This collector is
+# event-oriented: it fetches small products, derives compact SWPC events, and
+# does not retain raw X-ray/Kp time-series samples.
+poll_interval_sec: 300
+request_timeout_sec: 15
+user_agent: "Skannr SWPC collector"
+
+products:
+  alerts: true
+  noaa_scales: true
+  xray_flux: true
+  planetary_k: true
+
+urls:
+  alerts: "https://services.swpc.noaa.gov/products/alerts.json"
+  noaa_scales: "https://services.swpc.noaa.gov/products/noaa-scales.json"
+  xray_flux: "https://services.swpc.noaa.gov/json/goes/primary/xrays-1-day.json"
+  planetary_k: "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+
+# Feed thresholds decide what appears as live SWPC events. Alert thresholds live
+# under alerts.swpc_space_weather in skannr.yaml.
+xray_min_class: X1.0
+feed_min_radio_blackout: R1
+feed_min_solar_radiation_storm: S1
+feed_min_geomagnetic_storm: G1
+feed_min_kp: 5
+
+alert_min_xray_class: X1.0
+alert_min_radio_blackout: R3
+alert_min_solar_radiation_storm: S3
+alert_min_geomagnetic_storm: G3
+alert_min_kp: 7
+
+# Official SWPC alert products are retained only when they mention space-weather
+# conditions Skannr currently interprets.
+product_keyword_patterns:
+  - "*x-ray*"
+  - "*xray*"
+  - "*x-class*"
+  - "*radio blackout*"
+  - "*solar radiation storm*"
+  - "*geomagnetic storm*"
+  - "*CME*"
+  - "*coronal mass ejection*"
+  - "*Kp*"

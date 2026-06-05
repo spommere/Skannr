@@ -1,0 +1,61 @@
+key: aprsis
+order: 70
+label: APRS-IS
+description: Optional internet-fed APRS-IS local-area situational feed
+has_subject_history: true
+enabled: false
+
+# APRS-IS is an internet source, not evidence that Skannr's local antenna heard
+# the packet. Use port 14580 so the server applies the location/range filter.
+# Some APRS-IS regional feeds do not forward CWOP weather reliably, so Skannr
+# can run a normal APRS feed plus a CWOP weather feed under one collector.
+callsign: NOCALL
+passcode: -1
+feeds:
+  - name: local
+    role: local
+    host: noam.aprs2.net
+    port: 14580
+    filter: "r/37.7749/-122.4194/50"
+  - name: weather
+    role: weather
+    host: cwop.aprs.net
+    port: 14580
+    filter: "r/37.7749/-122.4194/50"
+    # Keep this on if the CWOP server returns packets outside the configured
+    # range. Leave the filter itself as the plain range filter; do not add t/w
+    # unless you deliberately want a broader weather stream.
+    enforce_radius: true
+    # If a known local station should always be requested from APRS-IS, include
+    # it explicitly. Skannr still applies enforce_radius after decoding.
+    # include_callsigns:
+    #   - GW0154
+    # Optional: for pooled hosts such as cwop.aprs.net, reconnect until the
+    # server banner identifies this backend, for example CWOP-4.
+    # preferred_server: CWOP-4
+
+connect_timeout_sec: 10
+preferred_server_timeout_sec: 2
+# Optional collector-wide limit for preferred_server retries. When set, Skannr
+# accepts the current backend after this many non-preferred attempts instead of
+# reconnecting forever against a sticky pool.
+# preferred_server_max_attempts: 10
+# Skannr writes APRS connect, disconnect, preferred-server retry, timeout, and
+# drop diagnostics to runtime/logs/skannr.log. The browser status keeps only a
+# concise per-feed line.
+# Sparse CWOP/range filters can be quiet for several minutes. Keep the TCP
+# stream open long enough not to churn around periodic station updates.
+read_timeout_sec: 600
+# While connected, quiet feeds emit non-persistent status snapshots at this
+# cadence so System Status can show last-packet age without raw log churn.
+status_interval_sec: 60
+retry_interval_sec: 30
+offline_event_interval_sec: 300
+max_events_per_minute: 120
+store_raw: false
+# Dropped malformed, out-of-radius, or rate-limited packets are counted in
+# status payloads and can be logged for APRS-IS troubleshooting.
+log_dropped_packets: true
+# Server login/filter comments are logged and kept in status counters. Keep
+# live table events off unless debugging APRS-IS server behavior.
+emit_server_messages: false

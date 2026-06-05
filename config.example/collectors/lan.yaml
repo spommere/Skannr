@@ -1,0 +1,16 @@
+key: lan
+order: 100
+label: LAN
+description: Optional passive local-network neighbor observation
+has_subject_history: true
+enabled: false
+
+# LAN is local OS state, not RF evidence. The first pass is passive: neighbor
+# table, ARP fallback, default routes, and optional DHCP lease files.
+poll_interval_sec: 60
+command_timeout_sec: 10
+collect_ip_neigh: true
+collect_arp: true
+
+# Optional dnsmasq-style lease files. Leave empty if Skannr cannot read them.
+dhcp_lease_paths: []

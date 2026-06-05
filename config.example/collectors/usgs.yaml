@@ -1,0 +1,26 @@
+key: usgs
+order: 90
+label: USGS
+description: Optional internet-fed USGS earthquake feed
+has_subject_history: true
+enabled: false
+
+# Poll a local-radius USGS GeoJSON earthquake query. This is internet-fed
+# situational context, not a local sensor measurement.
+poll_interval_sec: 300
+request_timeout_sec: 15
+user_agent: "Skannr USGS collector"
+
+latitude: 37.7749
+longitude: -122.4194
+radius_km: 300
+min_magnitude: 5.0
+orderby: time
+
+# Event severity defaults. Reports and Alerts can add their own thresholds.
+warning_magnitude_nearby: 4.0
+warning_magnitude_regional: 5.0
+warning_nearby_radius_km: 100
+
+# Optional override if you want a fully custom USGS URL:
+# url: "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&latitude=37.7749&longitude=-122.4194&maxradiuskm=300&minmagnitude=5.0&orderby=time"

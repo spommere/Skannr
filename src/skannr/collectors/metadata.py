@@ -10,132 +10,183 @@ those domains.
 FALLBACK_COLLECTOR_DEFINITIONS = [
     {
         "key": "wifi",
+        "order": 10,
         "label": "Wi-Fi Scan",
         "description": "Lightweight Wi-Fi access-point scanning",
-        "has_device_history": True,
+        "has_subject_history": True,
     },
     {
         "key": "wifi_monitor",
+        "order": 20,
         "label": "Wi-Fi Monitor",
         "description": "On-demand monitor-mode Wi-Fi packet capture and channel hopping",
-        "has_device_history": True,
+        "has_subject_history": True,
     },
     {
         "key": "ble",
+        "order": 30,
         "label": "BLE Scan",
         "description": "Bluetooth Low Energy advertisement scanning",
         "source_group": "bluetooth",
         "source_group_label": "Bluetooth",
-        "has_device_history": True,
+        "has_subject_history": True,
     },
     {
         "key": "ble_identify",
         "kind": "action",
+        "order": 40,
         "label": "BLE Identify",
         "description": "On-demand active BLE Device Information Service reader",
         "source_group": "bluetooth",
         "source_group_label": "Bluetooth",
-        "has_device_history": True,
+        "has_subject_history": True,
     },
     {
         "key": "bt_classic",
+        "order": 45,
         "label": "Bluetooth Classic",
         "description": "Classic Bluetooth inquiry scanning",
         "source_group": "bluetooth",
         "source_group_label": "Bluetooth",
-        "has_device_history": True,
+        "has_subject_history": True,
     },
     {
         "key": "rtlsdr",
+        "order": 50,
         "label": "RTL-SDR",
         "description": "rtl_power spectrum scanning",
-        "has_device_history": False,
+        "has_subject_history": True,
     },
     {
         "key": "rayhunter",
+        "order": 60,
         "label": "Rayhunter",
         "description": "Optional Rayhunter cellular-monitor status endpoint",
-        "has_device_history": False,
+        "has_subject_history": True,
+    },
+    {
+        "key": "aprsis",
+        "order": 70,
+        "label": "APRS-IS",
+        "description": "Optional internet-fed APRS-IS local-area situational feed",
+        "has_subject_history": True,
+    },
+    {
+        "key": "noaa",
+        "order": 80,
+        "label": "NOAA",
+        "description": "Optional internet-fed NOAA/NWS/NHC hazard feed",
+        "has_subject_history": True,
+    },
+    {
+        "key": "usgs",
+        "order": 90,
+        "label": "USGS",
+        "description": "Optional internet-fed USGS earthquake feed",
+        "has_subject_history": True,
+    },
+    {
+        "key": "swpc",
+        "order": 95,
+        "label": "SWPC",
+        "description": "Optional internet-fed NOAA SWPC space-weather event feed",
+        "has_subject_history": True,
+    },
+    {
+        "key": "lan",
+        "order": 100,
+        "label": "LAN",
+        "description": "Optional passive local-network neighbor observation",
+        "has_subject_history": True,
     },
 ]
 
 
 def collector_definitions(config=None, include_system=True):
-    """Return collector metadata from loaded YAML, with a static fallback."""
-    loaded = []
+    """Return collector metadata from static definitions plus loaded YAML."""
+    definitions = {
+        item["key"]: dict(item)
+        for item in FALLBACK_COLLECTOR_DEFINITIONS
+        if item.get("kind") != "action"
+    }
     for key, item in ((config or {}).get("collectors") or {}).items():
         if item.get("kind") == "action":
             continue
-        # YAML metadata is the source of truth when available. The fallback list
-        # exists so tests and partial installs still have sane tab labels/order.
-        loaded.append(
-            {
-                "key": key,
-                "label": item.get("label") or key,
-                "description": item.get("description") or "",
-                "source_group": item.get("source_group")
-                or item.get("key")
-                or key,
-                "source_group_label": item.get("source_group_label")
-                or item.get("label")
-                or key,
-                "has_device_history": bool(
-                    item.get("has_device_history", False)
-                ),
-                "order": item.get("order", 999),
-            }
-        )
-    if loaded:
-        definitions = sorted(
-            loaded, key=lambda item: (item.get("order", 999), item["key"])
-        )
-    else:
-        definitions = list(FALLBACK_COLLECTOR_DEFINITIONS)
+        base = definitions.get(key, {})
+        definitions[key] = {
+            **base,
+            "key": key,
+            "label": item.get("label") or base.get("label") or key,
+            "description": item.get("description") or base.get("description") or "",
+            "source_group": item.get("source_group")
+            or base.get("source_group")
+            or item.get("key")
+            or key,
+            "source_group_label": item.get("source_group_label")
+            or base.get("source_group_label")
+            or item.get("label")
+            or base.get("label")
+            or key,
+            "has_subject_history": bool(
+                item.get(
+                    "has_subject_history",
+                    item.get(
+                        "has_device_history",
+                        base.get("has_subject_history", False),
+                    ),
+                )
+            ),
+            "order": item.get("order", base.get("order", 999)),
+        }
+    output = sorted(
+        definitions.values(), key=lambda item: (item.get("order", 999), item["key"])
+    )
     if include_system:
-        definitions = definitions + [
+        output = output + [
             {
                 "key": "system",
                 "label": "System",
                 "description": "Skannr collector health and dependency checks",
-                "has_device_history": False,
+                "has_subject_history": False,
                 "order": 9999,
             }
         ]
-    return definitions
+    return output
 
 
-def collector_keys(config=None, include_system=True):
-    """Return collector keys in the dashboard order."""
-    return [
-        item["key"]
-        for item in collector_definitions(config, include_system=include_system)
-    ]
+def source_definition_from_config(key, item, base=None):
+    """Return source metadata for one collector/action."""
+    base = base or {}
+    return {
+        "key": key,
+        "label": item.get("label") or base.get("label") or key,
+        "source_group": item.get("source_group")
+        or base.get("source_group")
+        or item.get("key")
+        or key,
+        "source_group_label": item.get("source_group_label")
+        or base.get("source_group_label")
+        or item.get("label")
+        or base.get("label")
+        or key,
+        "order": item.get("order", base.get("order", 999)),
+    }
 
 
 def all_source_definitions(config=None, include_system=True):
     """Return collector/action source metadata for UI source grouping."""
-    loaded = []
+    definitions = {
+        item["key"]: dict(item) for item in FALLBACK_COLLECTOR_DEFINITIONS
+    }
     for key, item in ((config or {}).get("collectors") or {}).items():
-        loaded.append(
-            {
-                "key": key,
-                "label": item.get("label") or key,
-                "source_group": item.get("source_group")
-                or item.get("key")
-                or key,
-                "source_group_label": item.get("source_group_label")
-                or item.get("label")
-                or key,
-                "order": item.get("order", 999),
-            }
+        definitions[key] = source_definition_from_config(
+            key, item, definitions.get(key)
         )
-    if not loaded:
-        loaded = list(FALLBACK_COLLECTOR_DEFINITIONS)
-    definitions = sorted(
-        loaded, key=lambda item: (item.get("order", 999), item["key"])
+    output = sorted(
+        definitions.values(), key=lambda item: (item.get("order", 999), item["key"])
     )
     if include_system:
-        definitions = definitions + [
+        output = output + [
             {
                 "key": "system",
                 "label": "System",
@@ -144,7 +195,15 @@ def all_source_definitions(config=None, include_system=True):
                 "order": 9999,
             }
         ]
-    return definitions
+    return output
+
+
+def collector_keys(config=None, include_system=True):
+    """Return collector keys in the dashboard order."""
+    return [
+        item["key"]
+        for item in collector_definitions(config, include_system=include_system)
+    ]
 
 
 def browser_subtabs(config=None):

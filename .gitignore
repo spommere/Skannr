@@ -1,35 +1,18 @@
-# Python bytecode and local caches
+# Local runtime state and generated artifacts.
+/.venv/
+/config/
+/runtime/
+/logs/
+/pcaps/
+
+# Python caches.
 __pycache__/
 *.py[cod]
 *$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 
-# Virtual environments
-.venv/
-venv/
-env/
-
-# Runtime output
-runtime/logs/
-config/
-scripts/
-*.log
-
-# Local machine configuration
-VERSION_HISTORY.md
-VERSION_PLAN.md
-
-# Packaged archives
+# Local helper/output files.
+/crtar.sh
 *.tar
 *.tar.gz
 *.tgz
 *.zip
-
-# Local OS/editor files
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
-*~

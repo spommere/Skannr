@@ -5,10 +5,16 @@ const rows = {
   ble: new Map(),
   btClassic: new Map(),
   bleIdentify: [],
+  aprsis: [],
+  noaa: [],
+  usgs: [],
+  swpc: [],
+  lan: [],
   aps: new Map(),
   monitorEvents: [],
   insights: [],
-  reports: []
+  reports: [],
+  alerts: []
 };
 let COLLECTOR_SUBTABS = [
   {value: "all", label: "All"},
@@ -16,6 +22,12 @@ let COLLECTOR_SUBTABS = [
   {value: "wifi_monitor", label: "Wi-Fi Monitor"},
   {value: "bluetooth", label: "Bluetooth"},
   {value: "rtlsdr", label: "RTL-SDR"},
+  {value: "rayhunter", label: "Rayhunter"},
+  {value: "aprsis", label: "APRS-IS"},
+  {value: "noaa", label: "NOAA"},
+  {value: "usgs", label: "USGS"},
+  {value: "swpc", label: "SWPC"},
+  {value: "lan", label: "LAN"},
   {value: "system", label: "System"}
 ];
 let COLLECTOR_SOURCE_GROUPS = {
@@ -247,12 +259,18 @@ function uiDebug(event, detail) {
 
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
-    document.querySelectorAll(".panel").forEach((item) => item.classList.remove("active"));
-    button.classList.add("active");
-    document.querySelector(`#tab-${button.dataset.tab}`).classList.add("active");
+    showTab(button.dataset.tab);
   });
 });
+
+function showTab(name) {
+  document.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
+  document.querySelectorAll(".panel").forEach((item) => item.classList.remove("active"));
+  const button = document.querySelector(`.tab[data-tab="${name}"]`);
+  const panel = document.querySelector(`#tab-${name}`);
+  if (button) button.classList.add("active");
+  if (panel) panel.classList.add("active");
+}
 
 const viewWindowFilter = document.getElementById("view-window-filter");
 if (viewWindowFilter) {
@@ -297,6 +315,34 @@ const bleSearch = document.getElementById("ble-search");
 if (bleSearch) {
   bleSearch.addEventListener("input", renderBleTable);
 }
+const aprsisSearch = document.getElementById("aprsis-search");
+if (aprsisSearch) {
+  aprsisSearch.addEventListener("input", renderAprsisTable);
+}
+const noaaSearch = document.getElementById("noaa-search");
+if (noaaSearch) {
+  noaaSearch.addEventListener("input", renderNoaaTable);
+}
+const usgsSearch = document.getElementById("usgs-search");
+if (usgsSearch) {
+  usgsSearch.addEventListener("input", renderUsgsTable);
+}
+const swpcSearch = document.getElementById("swpc-search");
+if (swpcSearch) {
+  swpcSearch.addEventListener("input", renderSwpcTable);
+}
+const lanSearch = document.getElementById("lan-search");
+if (lanSearch) {
+  lanSearch.addEventListener("input", renderLanTable);
+}
+const alertsSearch = document.getElementById("alerts-search");
+if (alertsSearch) {
+  alertsSearch.addEventListener("input", renderAlertsTable);
+}
+const alertsAckAllButton = document.getElementById("alerts-ack-all");
+if (alertsAckAllButton) {
+  alertsAckAllButton.addEventListener("click", ackAllAlerts);
+}
 const btClassicStartButton = document.getElementById("bt-classic-start");
 if (btClassicStartButton) {
   btClassicStartButton.addEventListener("click", () => controlCollector("bt_classic", "start"));
@@ -322,6 +368,7 @@ socket.on("connect", () => setSocketState("Connected", "ok"));
 socket.on("disconnect", () => setSocketState("Disconnected", "muted"));
 socket.on("collector_status", renderCollectorHealth);
 socket.on("system_status", renderSystemStatus);
+socket.on("alerts_snapshot", renderAlertsSnapshot);
 socket.on("findings_snapshot", renderFindingsSnapshot);
 socket.on("skannr_event", handleEvent);
 buildSubtabs();
@@ -364,18 +411,42 @@ function createLocalEventSocket() {
     return api;
   }
 
-  setTimeout(() => {
-    const source = new EventSource("/events");
+  let source = null;
+  let reconnectTimer = null;
+
+  function scheduleEventStreamReconnect() {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (source && source.readyState === EventSource.OPEN) return;
+      if (source) source.close();
+      openEventStream();
+    }, 10000);
+  }
+
+  function openEventStream() {
+    source = new EventSource("/events");
     source.onopen = () => {
       connectionState.eventStreamOpen = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       noteHttpConnected();
       emitLocal("connect");
     };
     source.onerror = () => {
       connectionState.eventStreamOpen = false;
       emitLocal("disconnect");
+      scheduleEventStreamReconnect();
     };
-    ["collector_status", "system_status", "findings_snapshot", "skannr_event"].forEach((name) => {
+    [
+      "collector_status",
+      "system_status",
+      "alerts_snapshot",
+      "findings_snapshot",
+      "skannr_event"
+    ].forEach((name) => {
       source.addEventListener(name, (message) => {
         try {
           emitLocal(name, JSON.parse(message.data));
@@ -384,7 +455,9 @@ function createLocalEventSocket() {
         }
       });
     });
-  }, 0);
+  }
+
+  setTimeout(openEventStream, 0);
   return api;
 }
 
@@ -429,6 +502,7 @@ function connectionAddressFamily(host) {
 }
 
 function handleEvent(event) {
+  if (event.collector === "alerts") renderAlertEvent(event);
   if (event.collector === "findings") renderFindingEvent(event);
   if (event.collector === "rtlsdr") renderRtlsdrEvent(event);
   if (event.collector === "ble") renderBleEvent(event);
@@ -436,7 +510,290 @@ function handleEvent(event) {
   if (event.collector === "bt_classic") renderBtClassicEvent(event);
   if (event.collector === "wifi") renderWifiEvent(event);
   if (event.collector === "wifi_monitor") renderWifiMonitorEvent(event);
+  if (event.collector === "aprsis") renderAprsisEvent(event);
+  if (event.collector === "noaa") renderNoaaEvent(event);
+  if (event.collector === "usgs") renderUsgsEvent(event);
+  if (event.collector === "swpc") renderSwpcEvent(event);
+  if (event.collector === "lan") renderLanEvent(event);
   if (event.collector === "system" && event.type === "system_status") renderSystemStatus(event.data);
+}
+
+function renderAlertsSnapshot(alerts) {
+  rows.alerts = sortAlerts((alerts || []).map(normalizeAlert));
+  renderGlobalAlerts();
+  renderAlertsTable();
+}
+
+function renderAlertEvent(event) {
+  if (event.type !== "alert" || !event.data) return;
+  upsertAlert(normalizeAlert(event.data));
+  renderGlobalAlerts();
+  renderAlertsTable();
+}
+
+function normalizeAlert(alert) {
+  return {
+    id: String(alert.id || `${alert.source || "alert"}:${alert.subject || ""}`),
+    level: String(alert.level || "warning").toLowerCase(),
+    source: alert.source || "",
+    title: alert.title || "Alert",
+    subject: alert.subject || "",
+    summary: alert.summary || "",
+    first_seen: alert.first_seen || "",
+    first_seen_epoch: alert.first_seen_epoch,
+    last_seen: alert.last_seen || "",
+    last_seen_epoch: alert.last_seen_epoch,
+    count: Number(alert.count || 1),
+    acked: Boolean(alert.acked),
+    acked_at: alert.acked_at || "",
+    acked_at_epoch: alert.acked_at_epoch,
+    evidence: alert.evidence || {}
+  };
+}
+
+function upsertAlert(alert) {
+  const index = rows.alerts.findIndex((item) => item.id === alert.id);
+  if (index >= 0) rows.alerts[index] = alert;
+  else rows.alerts.unshift(alert);
+  rows.alerts = sortAlerts(rows.alerts).slice(0, 50);
+}
+
+function sortAlerts(alerts) {
+  const priority = {critical: 2, warning: 1, info: 0};
+  return (alerts || []).slice().sort((left, right) => {
+    const acked = Number(Boolean(left.acked)) - Number(Boolean(right.acked));
+    if (acked) return acked;
+    const level = (priority[right.level] || 0) - (priority[left.level] || 0);
+    if (level) return level;
+    return Number(right.last_seen_epoch || 0) - Number(left.last_seen_epoch || 0);
+  });
+}
+
+function renderGlobalAlerts() {
+  const container = document.getElementById("global-alerts");
+  const badge = document.getElementById("alerts-tab-count");
+  const alerts = sortAlerts(rows.alerts || []);
+  const unackedAlerts = alerts.filter((item) => !item.acked);
+  if (badge) {
+    const critical = unackedAlerts.filter((item) => item.level === "critical").length;
+    badge.textContent = unackedAlerts.length ? `${unackedAlerts.length}` : "";
+    badge.className = `tab-alert-count ${critical ? "critical" : ""}`;
+  }
+  if (!container) return;
+  container.innerHTML = "";
+  if (!unackedAlerts.length) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+  const alert = unackedAlerts[0];
+  const item = document.createElement("div");
+  item.className = `global-alert global-alert-${alert.level}`;
+  const label = document.createElement("span");
+  label.className = "global-alert-level";
+  label.textContent = alert.level === "critical" ? "CRITICAL" : "ALERT";
+  const text = document.createElement("span");
+  text.className = "global-alert-text";
+  text.textContent = alert.summary || `${alert.title}: ${alert.subject}`;
+  const meta = document.createElement("span");
+  meta.className = "global-alert-meta";
+  const metaParts = [];
+  if (alert.last_seen) metaParts.push(`last ${alert.last_seen}`);
+  if (unackedAlerts.length > 1) metaParts.push(`+${unackedAlerts.length - 1} more`);
+  meta.textContent = metaParts.join(" ");
+  const actions = document.createElement("span");
+  actions.className = "global-alert-actions";
+  const ack = document.createElement("button");
+  ack.type = "button";
+  ack.textContent = "ACK";
+  ack.addEventListener("click", () => ackAlert(alert.id));
+  const view = document.createElement("button");
+  view.type = "button";
+  view.textContent = "Alerts";
+  view.addEventListener("click", () => showTab("alerts"));
+  actions.appendChild(ack);
+  actions.appendChild(view);
+  item.appendChild(label);
+  item.appendChild(text);
+  if (meta.textContent.trim()) item.appendChild(meta);
+  item.appendChild(actions);
+  container.appendChild(item);
+}
+
+function renderAlertsTable() {
+  const tbody = document.getElementById("alerts-list");
+  const status = document.getElementById("alerts-status");
+  if (!tbody) return;
+  const alerts = sortAlerts(rows.alerts || []);
+  const visibleAlerts = alerts.filter(alertMatchesSearch);
+  const unackedCount = alerts.filter((item) => !item.acked).length;
+  if (status) {
+    if (alerts.length) {
+      const searchText = alertSearchText();
+      const prefix = searchText ? `${visibleAlerts.length} matching alert(s); ` : "";
+      status.textContent = `${prefix}${unackedCount} unacknowledged alert(s), ${alerts.length} active alert(s)`;
+    } else {
+      status.textContent = "No active alerts";
+    }
+    status.className = `status-strip ${unackedCount ? "alert" : "muted"}`;
+  }
+  tbody.innerHTML = "";
+  visibleAlerts.forEach((alert) => {
+    const tr = document.createElement("tr");
+    [
+      alert.level.toUpperCase(),
+      sourceLabel(alert.source),
+      alert.subject,
+      alert.summary,
+      alertDetailsNode(alert),
+      alert.first_seen,
+      alert.last_seen,
+      alert.count,
+      alert.acked ? `ACK ${alert.acked_at || ""}` : "Unacknowledged"
+    ].forEach((value) => {
+      const td = document.createElement("td");
+      appendTableCellValue(td, value);
+      tr.appendChild(td);
+    });
+    const actionCell = document.createElement("td");
+    if (!alert.acked) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "ACK";
+      button.addEventListener("click", () => ackAlert(alert.id));
+      actionCell.appendChild(button);
+    }
+    tr.appendChild(actionCell);
+    tbody.appendChild(tr);
+  });
+}
+
+function alertSearchText() {
+  return String((alertsSearch && alertsSearch.value) || "").trim().toLowerCase();
+}
+
+function alertMatchesSearch(alert) {
+  const needle = alertSearchText();
+  if (!needle) return true;
+  return [
+    alert.level,
+    sourceLabel(alert.source),
+    alert.subject,
+    alert.summary,
+    alertDetailsText(alert),
+    alert.first_seen,
+    alert.last_seen,
+    alert.count,
+    alert.acked ? `ACK ${alert.acked_at || ""}` : "Unacknowledged"
+  ].some((value) => String(value || "").toLowerCase().includes(needle));
+}
+
+function alertDetailsText(alert) {
+  return alertDetailItems(alert)
+    .map((item) => `${item.label} ${item.value}${item.unit || ""}`)
+    .join("; ");
+}
+
+function alertDetailsNode(alert) {
+  const items = alertDetailItems(alert);
+  const text = alertDetailsText(alert);
+  if (!items.length) return text;
+  const span = document.createElement("span");
+  span.className = "alert-detail-items";
+  items.forEach((item, index) => {
+    if (index) span.appendChild(document.createTextNode("; "));
+    span.appendChild(document.createTextNode(`${item.label} `));
+    const url = alertDetailUrl(item.key, item.value);
+    if (url) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = item.value;
+      span.appendChild(link);
+    } else {
+      span.appendChild(document.createTextNode(`${item.value}${item.unit || ""}`));
+    }
+  });
+  return {node: span, text};
+}
+
+function alertDetailItems(alert) {
+  const evidence = (alert || {}).evidence || {};
+  const items = [];
+  [
+    ["bssid", "BSSID", ""],
+    ["mac", "MAC", ""],
+    ["endpoint", "Endpoint", ""],
+    ["source_url", "Source URL", ""],
+    ["detail_url", "Detail URL", ""],
+    ["callsign", "Callsign", ""],
+    ["event", "Event", ""],
+    ["event_id", "Event", ""],
+    ["event_time", "Event Time", ""],
+    ["updated", "Updated", ""],
+    ["effective", "Effective", ""],
+    ["onset", "Onset", ""],
+    ["expires", "Expires", ""],
+    ["severity", "Severity", ""],
+    ["magnitude", "Magnitude", ""],
+    ["distance_km", "Distance", " km"],
+    ["gateway_ip", "Gateway", ""],
+    ["interface", "Interface", ""],
+    ["warning_count", "Warnings", ""],
+    ["rssi", "RSSI", " dBm"],
+    ["channel", "Channel", ""],
+    ["rain_1h_in", "1h Rain Rate", " in/hr"],
+    ["wind_gust_mph", "Gust", " mph"],
+    ["confidence", "Confidence", ""]
+  ].forEach(([key, label, unit]) => {
+    if (evidence[key] !== undefined && evidence[key] !== null && evidence[key] !== "") {
+      items.push({key, label, value: String(evidence[key]), unit});
+    }
+  });
+  if (Array.isArray(evidence.service_uuids) && evidence.service_uuids.length) {
+    items.push({key: "service_uuids", label: "Services", value: compactList(evidence.service_uuids, 3), unit: ""});
+  }
+  if (evidence.vendor_name) {
+    items.push({key: "vendor_name", label: "Vendor", value: String(evidence.vendor_name), unit: ""});
+  }
+  return items;
+}
+
+function alertDetailUrl(key, value) {
+  if (!["endpoint", "source_url", "detail_url"].includes(key)) return "";
+  const text = String(value || "").trim();
+  if (!/^https?:\/\//i.test(text)) return "";
+  try {
+    const url = new URL(text);
+    return url.href;
+  } catch (_error) {
+    return "";
+  }
+}
+
+function ackAlert(alertId) {
+  fetchJson("/alerts/ack", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id: alertId})
+  }).then((payload) => {
+    renderAlertsSnapshot(payload.alerts || []);
+  }).catch((error) => {
+    console.warn("alert ack failed", error);
+  });
+}
+
+function ackAllAlerts() {
+  fetchJson("/alerts/ack_all", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({})
+  }).then((payload) => {
+    renderAlertsSnapshot(payload.alerts || []);
+  }).catch((error) => {
+    console.warn("alert ack-all failed", error);
+  });
 }
 
 function renderFindingsSnapshot(findings) {
@@ -514,32 +871,45 @@ function renderReports(reportBundle) {
   const tbody = document.getElementById("reports-list");
   if (!tbody) return;
   tbody.innerHTML = "";
+  let rendered = 0;
+  const maxRendered = uiNumber("max_rendered_findings");
+  const needle = reportSearchNeedle();
+  const visibleReports = [];
   rows.reports
     .filter(reportMatchesSubtab)
-    .filter(reportMatchesSearch)
-    .slice(0, uiNumber("max_rendered_findings"))
     .forEach((report) => {
-      const tr = document.createElement("tr");
-      reportColumns(report).forEach((column) => {
-        const td = document.createElement("td");
-        td.className = `report-col-${column.key}`;
-        if (column.key === "evidence") {
-          renderReportEvidenceCell(td, reportEvidenceItems(report));
-        } else if (column.key === "subject") {
-          appendTableCellValue(td, reportSubjectCell(report, column.value));
-        } else {
-          td.textContent = column.value;
-        }
-        tr.appendChild(td);
-      });
-      tbody.appendChild(tr);
+      const tr = buildReportRow(report);
+      if (!reportRowMatchesSearch(tr, needle)) return;
+      visibleReports.push(report);
+      if (rendered < maxRendered) {
+        tbody.appendChild(tr);
+        rendered += 1;
+      }
     });
-  updateReportsStatus(latestReports);
-  updateReportsSummary(
-    rows.reports
-      .filter(reportMatchesSubtab)
-      .filter(reportMatchesSearch)
-  );
+  updateReportsStatus(latestReports, visibleReports);
+  updateReportsSummary(visibleReports);
+}
+
+function buildReportRow(report) {
+  const tr = document.createElement("tr");
+  reportColumns(report).forEach((column) => {
+    const td = document.createElement("td");
+    td.className = `report-col-${column.key}`;
+    if (column.key === "evidence") {
+      renderReportEvidenceCell(td, reportEvidenceItems(report));
+    } else if (column.key === "subject") {
+      appendTableCellValue(td, reportSubjectCell(report, column.value));
+    } else {
+      td.textContent = column.value;
+    }
+    tr.appendChild(td);
+  });
+  return tr;
+}
+
+function reportRowMatchesSearch(row, needle) {
+  if (!needle) return true;
+  return String(row.textContent || "").toLowerCase().includes(needle);
 }
 
 function reportIsPresenceReport(report) {
@@ -572,27 +942,43 @@ function renderReportsHeader() {
   head.appendChild(tr);
 }
 
-function reportCells(report) {
-  return reportColumns(report).map((column) => column.value);
-}
 
 function reportColumns(report) {
   const columns = [
-    {key: "generated", label: "Generated", value: report.timestamp || ""},
     {key: "score", label: "Score", value: report.score || 0}
   ];
   if (showReportsSourceColumn()) columns.push({key: "source", label: "Source", value: sourceLabel(report.source)});
   columns.push(
-    {key: "type", label: "Type", value: reportTypeCategory(report)},
     {key: "confidence", label: "Confidence", value: report.confidence || ""},
     {key: "reasons", label: "Reasons", value: compactList(report.reason_tags || [], 6)},
     {key: "report", label: "Report", value: report.title || ""},
     {key: "subject", label: "Subject", value: report.subject || ""},
-    {key: "summary", label: "Summary", value: report.summary || ""},
+    {key: "summary", label: "Summary", value: reportSummaryText(report)},
     {key: "evidence", label: "Evidence", value: reportEvidenceText(report)},
     {key: "last-seen", label: "Last Seen", value: report.last_seen || ""}
   );
   return columns;
+}
+
+function reportSummaryText(report) {
+  const summary = String((report || {}).summary || "");
+  if (!summary) return "";
+  const context = {
+    text: normalizedEvidenceText([
+      sourceLabel((report || {}).source),
+      compactList((report || {}).reason_tags || [], 6),
+      (report || {}).title || "",
+      (report || {}).subject || ""
+    ].filter(Boolean).join(" | "))
+  };
+  const suffix = summary.endsWith(".") ? "." : "";
+  const body = suffix ? summary.slice(0, -1) : summary;
+  const segments = body.split(";").map((part) => part.trim()).filter(Boolean);
+  if (segments.length <= 1) {
+    return evidenceSegmentAlreadyShown(body, context) ? "" : summary;
+  }
+  const kept = segments.filter((segment) => !evidenceSegmentAlreadyShown(segment, context));
+  return kept.length ? `${kept.join("; ")}${suffix}` : "";
 }
 
 function reportSubjectCell(report, fallback) {
@@ -618,6 +1004,30 @@ function detailTargetForReport(report) {
   }
   if ((source === "wifi" || type.includes("ssid")) && evidence.ssid) {
     return {type: "wifi-ssid", key: evidence.ssid};
+  }
+  if (source === "aprsis" || type.startsWith("aprsis")) {
+    const key = evidence.callsign || String((report || {}).subject || "").replace(/^APRS\s+/i, "");
+    return key ? {type: "aprsis-subject", key} : null;
+  }
+  if (source === "rayhunter" || type.startsWith("rayhunter")) {
+    const key = evidence.endpoint || String((report || {}).subject || "").replace(/^Rayhunter\s*/i, "");
+    return key ? {type: "rayhunter-subject", key} : null;
+  }
+  if (source === "noaa" || type.startsWith("noaa")) {
+    const key = evidence.event_id || String((report || {}).subject || "").replace(/^NOAA\s+/i, "");
+    return key ? {type: "noaa-subject", key} : null;
+  }
+  if (source === "usgs" || type.startsWith("usgs")) {
+    const key = evidence.event_id || String((report || {}).subject || "").replace(/^USGS\s+/i, "");
+    return key ? {type: "usgs-subject", key} : null;
+  }
+  if (source === "swpc" || type.startsWith("swpc")) {
+    const key = evidence.event_id || String((report || {}).subject || "").replace(/^SWPC\s+/i, "");
+    return key ? {type: "swpc-subject", key} : null;
+  }
+  if (source === "lan" || type.startsWith("lan")) {
+    const key = evidence.subject_key || evidence.mac || evidence.gateway_ip || String((report || {}).subject || "").replace(/^LAN\s+/i, "");
+    return key ? {type: "lan-subject", key} : null;
   }
   return null;
 }
@@ -1046,8 +1456,8 @@ function renderDerivedViews(bundle) {
   safelyRenderDerivedSection("Findings History", errors, () =>
     renderFindingsHistory(bundle.findings || {})
   );
-  safelyRenderDerivedSection("Device History", errors, () =>
-    renderDeviceHistory(bundle.device_history || {})
+  safelyRenderDerivedSection("Subject History", errors, () =>
+    renderDeviceHistory(subjectHistoryDisplayBundle(bundle))
   );
   safelyRenderDerivedSection("Live scan hydration", errors, () =>
     hydrateLiveScanTablesFromHistory(bundle.device_history || {})
@@ -1072,6 +1482,28 @@ function renderDerivedViews(bundle) {
   });
   acknowledgeDerivedRender(bundle);
   maybeRefreshEmptyDerivedViews("derived views loaded");
+}
+
+function subjectHistoryDisplayBundle(bundle) {
+  const source = bundle || {};
+  const subjectHistory = source.subject_history || {};
+  const deviceHistory = source.device_history || {};
+  const bluetooth = deviceHistory.bluetooth || deviceHistory.ble || subjectHistory.bluetooth || subjectHistory.ble || {};
+  return {
+    ...subjectHistory,
+    generated_at: subjectHistory.generated_at || deviceHistory.generated_at || "",
+    generated_at_epoch: subjectHistory.generated_at_epoch || deviceHistory.generated_at_epoch,
+    refreshed_at: subjectHistory.refreshed_at || deviceHistory.refreshed_at || "",
+    refreshed_at_epoch: subjectHistory.refreshed_at_epoch || deviceHistory.refreshed_at_epoch,
+    window: subjectHistory.window || deviceHistory.window || {},
+    records_read: subjectHistory.records_read || deviceHistory.records_read || 0,
+    wifi: deviceHistory.wifi || subjectHistory.wifi || {},
+    ble: bluetooth,
+    bluetooth,
+    subjects: Array.isArray(subjectHistory.subjects) ? subjectHistory.subjects : [],
+    subject_counts: subjectHistory.subject_counts || {},
+    total_subjects: subjectHistory.total_subjects || ((subjectHistory.subject_counts || {}).total || 0)
+  };
 }
 
 function acknowledgeDerivedRender(bundle) {
@@ -1169,6 +1601,10 @@ function clearStaleDerivedRefreshState() {
 function renderLiveTables() {
   pruneLiveScanRows();
   renderBleTable();
+  renderAprsisTable();
+  renderNoaaTable();
+  renderUsgsTable();
+  renderLanTable();
 }
 
 function scheduleLiveRender(key, renderer) {
@@ -1242,10 +1678,16 @@ function derivedHistoryHasRows() {
   const history = latestDeviceHistory || {};
   const wifi = history.wifi || {};
   const bluetooth = history.bluetooth || history.ble || {};
+  const directSubjects = Array.isArray(history.subjects)
+    ? history.subjects.filter((item) =>
+      ["aprsis", "rayhunter", "rtlsdr", "noaa", "usgs", "swpc", "lan"].includes(String(item.collector || ""))
+    )
+    : [];
   return Boolean(
     (wifi.access_points || []).length ||
     (wifi.clients || []).length ||
-    (bluetooth.devices || []).length
+    (bluetooth.devices || []).length ||
+    directSubjects.length
   );
 }
 
@@ -1254,12 +1696,17 @@ function liveScanRowsSeen() {
     rows.aps.size ||
     rows.ble.size ||
     rows.btClassic.size ||
+    rows.aprsis.length ||
+    rows.noaa.length ||
+    rows.usgs.length ||
+    rows.swpc.length ||
+    rows.lan.length ||
     collectorScanEventsSeen()
   );
 }
 
 function collectorScanEventsSeen() {
-  const scanCollectors = new Set(["wifi", "ble", "bt_classic"]);
+  const scanCollectors = new Set(["wifi", "ble", "bt_classic", "aprsis", "noaa", "usgs", "swpc", "lan"]);
   return (latestCollectorStatuses || []).some((item) => {
     return scanCollectors.has(item.key) && Number(item.events_this_session || 0) > 0;
   });
@@ -1573,6 +2020,11 @@ function sourceLabel(source) {
   const key = String(source || "").toLowerCase();
   if (key === "privacy") return "Privacy";
   if (key === "rayhunter") return "Rayhunter";
+  if (key === "aprsis") return "APRS-IS";
+  if (key === "noaa") return "NOAA";
+  if (key === "usgs") return "USGS";
+  if (key === "swpc") return "SWPC";
+  if (key === "lan") return "LAN";
   const match = collectorEntryForSource(key);
   return match ? match.label : (source || "");
 }
@@ -1581,13 +2033,13 @@ function showInsightSourceColumn() {
   return (activeSubtabs.insights || "all") === "all";
 }
 
-function updateReportsStatus(bundle) {
+function updateReportsStatus(bundle, visibleReports) {
   const source = bundle || {};
   const window = source.window || {};
   const refreshedAt = source.generated_at || source.refreshed_at;
   const refreshedEpoch = source.generated_at_epoch || source.refreshed_at_epoch;
   const total = rows.reports.length;
-  const visible = rows.reports
+  const visible = visibleReports || rows.reports
     .filter(reportMatchesSubtab)
     .filter(reportMatchesSearch);
   const warnings = rows.reports.filter((item) => item.severity === "warning").length;
@@ -1616,7 +2068,14 @@ function reportMatchesSubtab(report) {
 }
 
 function reportMatchesSearch(report) {
-  return rowMatchesSearch(reportCells(report), reportsSearch);
+  const needle = reportSearchNeedle();
+  if (!needle) return true;
+  return reportRowMatchesSearch(buildReportRow(report), needle);
+}
+
+function reportSearchNeedle() {
+  if (!reportsSearch) return "";
+  return String(reportsSearch.value || "").trim().toLowerCase();
 }
 
 function showReportsSourceColumn() {
@@ -1640,7 +2099,7 @@ function updateReportsSummary(visible) {
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
     .slice(0, 4)
     .map(([key, count]) => `${reportFilterTypeLabel(key)}: ${count}`);
-  summary.textContent = `Top report types in this view: ${top.join(" | ")}`;
+  summary.textContent = `Report mix: ${top.join(" | ")}`;
 }
 
 function reportTypeCategory(report) {
@@ -1792,9 +2251,18 @@ function buildSubtabs() {
 
 function subtabEntriesForGroup(group) {
   if (group === "history") {
-    return COLLECTOR_SUBTABS.filter((entry) => entry.value !== "system");
+    const historySources = historySourceValues();
+    return COLLECTOR_SUBTABS.filter((entry) => historySources.has(entry.value));
   }
   return COLLECTOR_SUBTABS;
+}
+
+function historySourceValues() {
+  const values = new Set(["all"]);
+  document.querySelectorAll(".history-source-panel").forEach((panel) => {
+    if (panel.dataset.source) values.add(panel.dataset.source);
+  });
+  return values;
 }
 
 function loadCollectorMetadata() {
@@ -2292,6 +2760,585 @@ function renderWifiMonitorTable() {
   renderSchemaTable("wifi-monitor-events", rows.monitorEvents, "wifiMonitorEvents");
 }
 
+function renderAprsisEvent(event) {
+  const status = document.getElementById("aprsis-status");
+  if (status) status.textContent = event.type;
+  const data = event.data || {};
+  if (event.type === "collector_online") {
+    setCollectorBanner("aprsis", "ONLINE", aprsisStatusDetail(data));
+    return;
+  }
+  if (event.type === "collector_status") {
+    setCollectorBanner("aprsis", data.feed_state || "ONLINE", aprsisStatusDetail(data));
+    return;
+  }
+  if (event.type === "collector_offline" || event.type === "collector_retrying") {
+    setCollectorBanner("aprsis", event.type, aprsisStatusDetail(data));
+    return;
+  }
+  if (event.type === "server_status") {
+    setCollectorBanner("aprsis", "ONLINE", aprsisStatusDetail(data));
+    rows.aprsis.unshift({
+      ...data,
+      event_type: event.type,
+      packet_type: "server",
+      comment: data.last_server_message || data.reason || "",
+      last_seen: event.timestamp,
+      last_seen_epoch: event.timestamp_epoch
+    });
+    rows.aprsis = rows.aprsis.slice(0, uiNumber("max_live_rows"));
+    scheduleLiveRender("aprsis", renderAprsisTable);
+    return;
+  }
+  if (!String(event.type || "").startsWith("aprs_")) return;
+  rows.aprsis.unshift({
+    ...data,
+    event_type: event.type,
+    packet_type: data.packet_type || event.type.replace(/^aprs_/, ""),
+    last_seen: event.timestamp,
+    last_seen_epoch: event.timestamp_epoch
+  });
+  rows.aprsis = rows.aprsis.slice(0, uiNumber("max_live_rows"));
+  scheduleLiveRender("aprsis", renderAprsisTable);
+}
+
+function renderAprsisTable() {
+  const events = rows.aprsis.filter(aprsisEventMatchesSearch);
+  renderSchemaTable("aprsis-events", events, "aprsisEvents", {preserveOrder: true});
+}
+
+function aprsisEventMatchesSearch(item) {
+  return rowMatchesSearch([
+    item.last_seen || "",
+    item.packet_type || item.event_type || "",
+    item.callsign || "",
+    item.destination || "",
+    item.object_name || "",
+    item.addressee || "",
+    item.via_path || "",
+    item.q_construct || "",
+    item.igate || "",
+    item.feed_name || "",
+    item.feed_role || "",
+    item.mic_e_message || "",
+    item.weather_summary || "",
+    item.symbol || "",
+    item.message || "",
+    item.comment || "",
+    item.payload || "",
+    formatAprsisPosition(item),
+    formatAprsisMotion(item)
+  ], aprsisSearch);
+}
+
+function aprsisStatusDetail(data) {
+  const includeState = arguments.length > 1 && arguments[1] && arguments[1].includeState;
+  const parts = [];
+  const feedName = String(data.feed_name || "").trim();
+  const feedRole = aprsisDistinctFeedRole(feedName, data.feed_role);
+  const state = displayState(data.feed_state || data.collector_state || "");
+  if (includeState && state && feedName) {
+    parts.push(`${state}: feed ${feedName}`);
+  } else {
+    if (includeState && state) parts.push(`${state}:`);
+    if (feedName) parts.push(`feed ${feedName}`);
+  }
+  if (feedRole) parts.push(feedRole);
+  if (data.host || data.port) {
+    parts.push(`${data.host || "feed"}:${data.port || ""}`);
+  }
+  if (data.server_name) {
+    parts.push(`server ${data.server_name}`);
+  } else if (data.server_address) {
+    parts.push(`server ${data.server_address}`);
+  }
+  if ((data.preferred_servers || []).length) {
+    parts.push(`preferred ${compactList(data.preferred_servers, 3)}`);
+  }
+  if (data.preferred_server_fallback) {
+    const miss = data.preferred_server_last_miss || data.server_name || "current server";
+    parts.push(`preferred fallback ${miss}`);
+  } else if (data.preferred_server_attempts) {
+    const limit = data.preferred_server_max_attempts
+      ? `/${data.preferred_server_max_attempts}`
+      : "";
+    parts.push(`preferred retry ${data.preferred_server_attempts}${limit}`);
+  }
+  if (data.filter) parts.push(`filter ${data.filter}`);
+  if (Array.isArray(data.include_callsigns) && data.include_callsigns.length) {
+    parts.push(`includes ${data.include_callsigns.join(", ")}`);
+  }
+  const reason = aprsisStatusReason(data);
+  if (reason) parts.push(`reason ${reason}`);
+  if (data.last_packet_callsign) {
+    const age = data.idle_sec !== undefined ? formatSeconds(data.idle_sec) : "";
+    parts.push(`last packet ${data.last_packet_callsign}${age ? ` ${age} ago` : ""}`);
+  }
+  return parts.filter(Boolean).join(" | ");
+}
+
+function aprsisStatusReason(data) {
+  const state = String(data.feed_state || data.collector_state || "").toUpperCase();
+  if (state === "ONLINE") return "";
+  const reason = String(data.reason || data.last_disconnect_reason || "").trim();
+  if (!reason) return "";
+  const lowered = reason.toLowerCase();
+  if (lowered.includes("aprs-is feed(s) offline")) return "";
+  if (lowered.startsWith("#")) return "";
+  return reason.length > 140 ? `${reason.slice(0, 137)}...` : reason;
+}
+
+function formatSeconds(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  if (seconds < 90) return `${Math.round(seconds)}s`;
+  const minutes = seconds / 60;
+  if (minutes < 90) return `${Math.round(minutes)}m`;
+  return `${Math.round(minutes / 60)}h`;
+}
+
+function formatAprsisPosition(item) {
+  const lat = Number(item.latitude);
+  const lon = Number(item.longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) return `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+  if (Number.isFinite(lat)) return `lat ${lat.toFixed(5)}`;
+  if (Number.isFinite(lon)) return `lon ${lon.toFixed(5)}`;
+  return "";
+}
+
+function formatAprsisTarget(item) {
+  return [
+    item.object_name ? `object ${item.object_name}` : "",
+    item.addressee ? `to ${item.addressee}` : "",
+    item.destination ? `dst ${item.destination}` : ""
+  ].filter(Boolean).join("; ");
+}
+
+function aprsisSubjectLink(item) {
+  const callsign = String((item || {}).callsign || "").trim();
+  if (!callsign) return "";
+  return detailLink(callsign, "aprsis-subject", callsign);
+}
+
+function formatAprsisRoute(item) {
+  return [
+    item.via_path ? `via ${item.via_path}` : "",
+    item.q_construct || "",
+    item.igate ? `igate ${item.igate}` : ""
+  ].filter(Boolean).join("; ");
+}
+
+function formatAprsisText(item) {
+  return [
+    item.mic_e_message || "",
+    item.message || item.comment || "",
+    item.aprs_format ? `format ${item.aprs_format}` : ""
+  ].filter(Boolean).join("; ") || item.payload || "";
+}
+
+function normalizeAprsWeatherSummary(value) {
+  return String(value || "").replace(
+    /\brain 1h ([0-9]+(?:\.[0-9]+)?) in\b/g,
+    "1h rain rate $1 in/hr"
+  );
+}
+
+function formatAprsisMotion(item) {
+  if (item.weather_summary) return normalizeAprsWeatherSummary(item.weather_summary);
+  const speedKmh = Number(item.speed_kmh);
+  const speedKnots = Number(item.speed_knots);
+  const course = Number(item.course_deg);
+  const parts = [];
+  if (Number.isFinite(speedKmh)) {
+    parts.push(`${speedKmh.toFixed(1)} km/h`);
+  } else if (Number.isFinite(speedKnots)) {
+    parts.push(`${speedKnots.toFixed(0)} kt`);
+  }
+  if (Number.isFinite(course)) parts.push(`${course.toFixed(0)} deg`);
+  if (item.symbol) parts.push(`symbol ${item.symbol}`);
+  return parts.join("; ");
+}
+
+function renderNoaaEvent(event) {
+  const status = document.getElementById("noaa-status");
+  if (status) status.textContent = event.type;
+  const data = event.data || {};
+  if (event.type === "collector_online") {
+    setCollectorBanner("noaa", "ONLINE", noaaStatusDetail(data));
+    return;
+  }
+  if (event.type === "collector_offline" || event.type === "collector_retrying") {
+    setCollectorBanner("noaa", event.type, data.reason || "");
+    return;
+  }
+  if (!["noaa_weather_alert", "noaa_tropical_advisory"].includes(event.type)) return;
+  rows.noaa.unshift({
+    ...data,
+    event_type: event.type,
+    last_seen: event.timestamp,
+    last_seen_epoch: event.timestamp_epoch
+  });
+  rows.noaa = rows.noaa.slice(0, uiNumber("max_live_rows"));
+  scheduleLiveRender("noaa", renderNoaaTable);
+  maybeRefreshEmptyDerivedViews("NOAA feed");
+}
+
+function renderNoaaTable() {
+  const events = rows.noaa.filter(noaaEventMatchesSearch);
+  renderSchemaTable("noaa-events", events, "noaaEvents", {preserveOrder: true});
+}
+
+function noaaEventMatchesSearch(item) {
+  return rowMatchesSearch([
+    item.last_seen,
+    item.event_type,
+    item.alert_kind,
+    noaaEventTimeText(item),
+    item.event || item.headline || item.event_id,
+    item.severity,
+    item.urgency,
+    item.certainty,
+    item.status,
+    item.area_desc,
+    noaaTimingText(item),
+    item.source
+  ], noaaSearch);
+}
+
+function noaaStatusDetail(data) {
+  const feeds = Array.isArray(data.feeds) ? data.feeds.join(", ") : "";
+  return [
+    data.source || "NOAA",
+    feeds ? `feeds ${feeds}` : "",
+    data.internet_fed ? "internet-fed" : ""
+  ].filter(Boolean).join(" | ");
+}
+
+function noaaSeverityText(item) {
+  return [
+    item.severity || "",
+    item.urgency ? `urgency ${item.urgency}` : "",
+    item.certainty ? `certainty ${item.certainty}` : ""
+  ].filter(Boolean).join("; ");
+}
+
+function noaaSubjectLink(item) {
+  const key = String((item || {}).event_id || (item || {}).headline || "").trim();
+  const label = (item || {}).event || (item || {}).headline || key;
+  return key ? detailLink(label, "noaa-subject", key) : label;
+}
+
+function noaaTimingText(item) {
+  return [
+    item.effective ? `effective ${item.effective}` : "",
+    item.onset ? `onset ${item.onset}` : "",
+    item.expires ? `expires ${item.expires}` : "",
+    item.updated ? `updated ${item.updated}` : ""
+  ].filter(Boolean).join("; ");
+}
+
+function noaaEventTimeText(item) {
+  return item.updated || item.onset || item.effective || "";
+}
+
+function renderUsgsEvent(event) {
+  const status = document.getElementById("usgs-status");
+  if (status) status.textContent = event.type;
+  const data = event.data || {};
+  if (event.type === "collector_online") {
+    setCollectorBanner("usgs", "ONLINE", usgsStatusDetail(data));
+    return;
+  }
+  if (event.type === "collector_offline" || event.type === "collector_retrying") {
+    setCollectorBanner("usgs", event.type, data.reason || "");
+    return;
+  }
+  if (event.type !== "usgs_earthquake") return;
+  rows.usgs.unshift({
+    ...data,
+    event_type: event.type,
+    last_seen: event.timestamp,
+    last_seen_epoch: event.timestamp_epoch
+  });
+  rows.usgs = rows.usgs.slice(0, uiNumber("max_live_rows"));
+  scheduleLiveRender("usgs", renderUsgsTable);
+  maybeRefreshEmptyDerivedViews("USGS feed");
+}
+
+function renderUsgsTable() {
+  const events = rows.usgs.filter(usgsEventMatchesSearch);
+  renderSchemaTable("usgs-events", events, "usgsEvents", {preserveOrder: true});
+}
+
+function usgsEventMatchesSearch(item) {
+  return rowMatchesSearch([
+    item.event_id,
+    item.magnitude,
+    item.place,
+    item.distance_km,
+    item.depth_km,
+    item.alert_color,
+    item.status,
+    item.event_time,
+    item.updated
+  ], usgsSearch);
+}
+
+function usgsStatusDetail(data) {
+  return [
+    data.source || "USGS",
+    data.url || "",
+    data.internet_fed ? "internet-fed" : ""
+  ].filter(Boolean).join(" | ");
+}
+
+function usgsSubjectLink(item) {
+  const key = String((item || {}).event_id || "").trim();
+  const label = usgsMagnitudeText(item) || key;
+  return key ? detailLink(label, "usgs-subject", key) : label;
+}
+
+function usgsMagnitudeText(item) {
+  const value = Number((item || {}).magnitude);
+  return Number.isFinite(value) ? `M${value.toFixed(1)}` : "";
+}
+
+function usgsDistanceText(item) {
+  const value = Number((item || {}).distance_km);
+  return Number.isFinite(value) ? `${value.toFixed(1)} km` : "";
+}
+
+function usgsAlertText(item) {
+  return [
+    item.alert_color ? `alert ${item.alert_color}` : "",
+    Number(item.tsunami || 0) ? "tsunami" : ""
+  ].filter(Boolean).join("; ");
+}
+
+function renderSwpcEvent(event) {
+  const status = document.getElementById("swpc-status");
+  if (status) status.textContent = event.type;
+  const data = event.data || {};
+  if (event.type === "collector_online") {
+    setCollectorBanner("swpc", "ONLINE", swpcStatusDetail(data));
+    return;
+  }
+  if (event.type === "collector_offline" || event.type === "collector_retrying") {
+    setCollectorBanner("swpc", event.type, data.reason || "");
+    return;
+  }
+  if (event.type !== "swpc_event") return;
+  rows.swpc.unshift({
+    ...data,
+    event_type: event.type,
+    last_seen: event.timestamp,
+    last_seen_epoch: event.timestamp_epoch
+  });
+  rows.swpc = rows.swpc.slice(0, uiNumber("max_live_rows"));
+  scheduleLiveRender("swpc", renderSwpcTable);
+  maybeRefreshEmptyDerivedViews("SWPC feed");
+}
+
+function renderSwpcTable() {
+  const events = rows.swpc
+    .filter(swpcEventMatchesSearch)
+    .sort(compareSwpcEvents);
+  renderSchemaTable("swpc-events", events, "swpcEvents", {preserveOrder: true});
+}
+
+function compareSwpcEvents(left, right) {
+  return swpcEventSortMs(right) - swpcEventSortMs(left);
+}
+
+function swpcEventSortMs(item) {
+  return recordTimestampMs(item, "event_time") ||
+    recordTimestampMs(item, "peak_time") ||
+    recordTimestampMs(item, "issue") ||
+    recordTimestampMs(item, "last_seen") ||
+    0;
+}
+
+function swpcEventMatchesSearch(item) {
+  return rowMatchesSearch([
+    item.last_seen,
+    item.event_time,
+    item.peak_time,
+    item.issue_time,
+    item.event_kind,
+    item.event,
+    item.summary,
+    swpcLevelText(item),
+    swpcTimingText(item),
+    swpcDetailsText(item),
+    item.source,
+    item.source_url,
+    item.product_id
+  ], swpcSearch);
+}
+
+function swpcStatusDetail(data) {
+  const feeds = Array.isArray(data.feeds) ? data.feeds.join(", ") : "";
+  return [
+    data.source || "SWPC",
+    feeds ? `feeds ${feeds}` : ""
+  ].filter(Boolean).join(" | ");
+}
+
+function swpcKindText(item) {
+  return String((item || {}).event_kind || (item || {}).event || "event")
+    .replace(/^swpc_/, "")
+    .replace(/_/g, " ");
+}
+
+function swpcLevelText(item) {
+  const parts = [];
+  if ((item || {}).xray_class) parts.push(item.xray_class);
+  if ((item || {}).scale_label) parts.push(item.scale_label);
+  const scale = swpcScaleText(item);
+  if (scale && !parts.includes(scale)) parts.push(scale);
+  const kp = formatKpIndex((item || {}).kp_index);
+  if (kp) parts.push(kp);
+  return parts.join("; ");
+}
+
+function swpcScaleText(item) {
+  const family = String((item || {}).scale_family || "").trim();
+  const value = (item || {}).scale_value;
+  if (!family || value === undefined || value === null || value === "") return "";
+  if (family.toLowerCase() === "kp") return "";
+  return `${family}${value}`;
+}
+
+function formatKpIndex(value) {
+  const kp = Number(value);
+  return Number.isFinite(kp) ? `Kp ${kp.toFixed(1)}` : "";
+}
+
+function swpcTimingText(item) {
+  return [
+    (item || {}).start_time ? `start ${(item || {}).start_time}` : "",
+    (item || {}).peak_time ? `peak ${(item || {}).peak_time}` : "",
+    (item || {}).end_time ? `end ${(item || {}).end_time}` : "",
+    (item || {}).issue_time ? `issued ${(item || {}).issue_time}` : "",
+    (item || {}).updated ? `updated ${(item || {}).updated}` : ""
+  ].filter(Boolean).join("; ");
+}
+
+function swpcDetailsText(item) {
+  const summary = (item || {}).summary || "";
+  const message = (item || {}).message || "";
+  return [
+    summary,
+    message && message !== summary ? `message ${message}` : "",
+    (item || {}).product_id ? `product ${(item || {}).product_id}` : "",
+    (item || {}).xray_flux_peak !== undefined ? `peak flux ${(item || {}).xray_flux_peak}` : "",
+    (item || {}).alert_recommended ? "alert threshold" : ""
+  ].filter(Boolean).join("; ");
+}
+
+function swpcSourceNode(item) {
+  const source = (item || {}).source || "";
+  const url = (item || {}).source_url || "";
+  if (!url) return source;
+  return externalLink(source ? `${source}; ${url}` : url, url);
+}
+
+function swpcSubjectLink(item) {
+  const key = String((item || {}).event_id || (item || {}).summary || "").trim();
+  const label = [
+    (item || {}).event || "SWPC event",
+    swpcLevelText(item)
+  ].filter(Boolean).join(" ");
+  return key ? detailLink(label, "swpc-subject", key) : label;
+}
+
+function renderLanEvent(event) {
+  const status = document.getElementById("lan-status");
+  if (status) status.textContent = event.type;
+  const data = event.data || {};
+  if (event.type === "collector_online") {
+    setCollectorBanner("lan", "ONLINE", data.method || "passive LAN observation");
+    return;
+  }
+  if (event.type === "collector_offline" || event.type === "collector_retrying") {
+    setCollectorBanner("lan", event.type, data.reason || "");
+    return;
+  }
+  if (!["lan_device_seen", "lan_device_changed", "lan_gateway_seen", "lan_gateway_changed"].includes(event.type)) return;
+  rows.lan.unshift({
+    ...data,
+    event_type: event.type,
+    last_seen: event.timestamp,
+    last_seen_epoch: event.timestamp_epoch
+  });
+  rows.lan = rows.lan.slice(0, uiNumber("max_live_rows"));
+  scheduleLiveRender("lan", renderLanTable);
+  maybeRefreshEmptyDerivedViews("LAN observation");
+}
+
+function renderLanTable() {
+  const events = rows.lan.filter(lanEventMatchesSearch);
+  renderSchemaTable("lan-events", events, "lanEvents", {preserveOrder: true});
+}
+
+function lanEventMatchesSearch(item) {
+  return rowMatchesSearch([
+    item.last_seen,
+    item.event_type,
+    item.subject_key,
+    item.mac,
+    item.ip,
+    (item.ips || []).join(" "),
+    item.hostname,
+    (item.hostnames || []).join(" "),
+    item.vendor_name,
+    item.vendor_prefix,
+    item.interface,
+    (item.interfaces || []).join(" "),
+    item.state,
+    (item.states || []).join(" "),
+    (item.sources || []).join(" "),
+    item.gateway_ip,
+    item.family,
+    item.change_type
+  ], lanSearch);
+}
+
+function lanSubjectLink(item) {
+  const key = String((item || {}).subject_key || (item || {}).mac || (item || {}).ip || "").trim();
+  const label = [
+    (item || {}).mac || "",
+    compactList((item || {}).ips || ((item || {}).ip ? [(item || {}).ip] : []), 2)
+  ].filter(Boolean).join(" / ") || key;
+  return key ? detailLink(label, "lan-subject", key) : label;
+}
+
+function lanIdentityText(item) {
+  return [
+    item.hostname || compactList(item.hostnames || [], 2),
+    item.vendor_name || item.vendor_prefix || ""
+  ].filter(Boolean).join("; ");
+}
+
+function lanInterfaceStateText(item) {
+  return [
+    item.interface || compactList(item.interfaces || [], 2),
+    item.state || compactList(item.states || [], 2)
+  ].filter(Boolean).join("; ");
+}
+
+function lanGatewayText(item) {
+  if (item.gateway_ip) {
+    return [
+      item.family || "",
+      item.gateway_ip,
+      item.interface || "",
+      item.mac || ""
+    ].filter(Boolean).join("; ");
+  }
+  return item.gateway ? "gateway" : "";
+}
+
 function setWifiMonitorPlan(text, state) {
   const node = document.getElementById("wifi-monitor-plan");
   if (!node) return;
@@ -2333,6 +3380,13 @@ function renderDeviceHistory(history) {
   const aps = wifi.access_points || [];
   const clients = wifi.clients || [];
   const devices = ble.devices || [];
+  const aprsisSubjects = historySubjectsFor(history, "aprsis");
+  const rayhunterSubjects = historySubjectsFor(history, "rayhunter");
+  const rtlsdrSubjects = historySubjectsFor(history, "rtlsdr");
+  const noaaSubjects = historySubjectsFor(history, "noaa");
+  const usgsSubjects = historySubjectsFor(history, "usgs");
+  const swpcSubjects = historySubjectsFor(history, "swpc");
+  const lanSubjects = historySubjectsFor(history, "lan");
   const monitorEmpty = document.getElementById("history-wifi-monitor-empty");
   if (monitorEmpty) {
     monitorEmpty.textContent = clients.length
@@ -2385,6 +3439,72 @@ function renderDeviceHistory(history) {
     sessionCount(item),
     item.finding_count || 0
   ], historySearch);
+  renderHistoryTable("history-aprsis-subjects", aprsisSubjects, (item) => [
+    detailLink(item.subject || "", "aprsis-subject", item.subject || ""),
+    subjectTypeLabel(item),
+    item.first_seen || "",
+    item.last_seen || "",
+    aprsisSubjectCounts(item),
+    aprsisSubjectPosition(item),
+    aprsisSubjectActivity(item),
+    aprsisSubjectRoute(item)
+  ], historySearch);
+  renderHistoryTable("history-rayhunter-subjects", rayhunterSubjects, (item) => [
+    detailLink(item.subject || "", "rayhunter-subject", subjectData(item).endpoint || item.subject || ""),
+    item.first_seen || "",
+    item.last_seen || "",
+    subjectData(item).warning_count || 0,
+    subjectData(item).events_in_window || 0,
+    subjectData(item).recording_id || ""
+  ], historySearch);
+  renderHistoryTable("history-rtlsdr-subjects", rtlsdrSubjects, (item) => [
+    item.subject || "",
+    subjectTypeLabel(item),
+    item.first_seen || "",
+    item.last_seen || "",
+    rtlsdrSubjectActivity(item),
+    rtlsdrSubjectSignal(item)
+  ], historySearch);
+  renderHistoryTable("history-noaa-subjects", noaaSubjects, (item) => [
+    detailLink(item.subject || "", "noaa-subject", subjectData(item).event_id || item.subject_id || ""),
+    subjectTypeLabel(item),
+    item.first_seen || "",
+    item.last_seen || "",
+    noaaSubjectSeverity(item),
+    subjectData(item).area_desc || "",
+    noaaSubjectTiming(item),
+    noaaSubjectSource(item)
+  ], historySearch);
+  renderHistoryTable("history-usgs-subjects", usgsSubjects, (item) => [
+    detailLink(item.subject || "", "usgs-subject", subjectData(item).event_id || item.subject_id || ""),
+    usgsMagnitudeText(subjectData(item)),
+    item.first_seen || "",
+    item.last_seen || "",
+    subjectData(item).event_time || "",
+    usgsSubjectLocation(item),
+    usgsSubjectDepthDistance(item),
+    usgsSubjectStatus(item)
+  ], historySearch);
+  renderHistoryTable("history-swpc-subjects", swpcSubjects, (item) => [
+    detailLink(item.subject || "", "swpc-subject", subjectData(item).event_id || item.subject_id || ""),
+    subjectTypeLabel(item),
+    item.first_seen || "",
+    item.last_seen || "",
+    subjectData(item).event_time || subjectData(item).peak_time || subjectData(item).issue_time || "",
+    swpcLevelText(subjectData(item)),
+    subjectData(item).summary || "",
+    swpcSubjectSource(item)
+  ], historySearch);
+  renderHistoryTable("history-lan-subjects", lanSubjects, (item) => [
+    detailLink(item.subject || "", "lan-subject", subjectData(item).subject_key || item.subject_id || ""),
+    subjectTypeLabel(item),
+    item.first_seen || "",
+    item.last_seen || "",
+    lanSubjectIpMac(item),
+    lanSubjectIdentity(item),
+    lanSubjectInterfaceState(item),
+    lanSubjectActivity(item)
+  ], historySearch);
 }
 
 function updateDeviceHistoryStatus(history) {
@@ -2393,13 +3513,19 @@ function updateDeviceHistoryStatus(history) {
   const aps = wifi.access_points || [];
   const clients = wifi.clients || [];
   const devices = ble.devices || [];
+  const subjectCounts = history.subject_counts || {};
+  const subjects = Array.isArray(history.subjects) ? history.subjects : [];
+  const directSubjects = subjects.filter((item) =>
+    ["aprsis", "rayhunter", "rtlsdr", "noaa", "usgs", "swpc", "lan"].includes(String(item.collector || ""))
+  );
   const window = history.window || {};
   const refreshedAt = history.generated_at || history.refreshed_at;
-  const visible = [...aps, ...clients, ...devices];
+  const visible = [...aps, ...clients, ...devices, ...directSubjects];
   const totalAps = Number(wifi.total_access_points || aps.length);
   const totalClients = Number(wifi.total_clients || clients.length);
   const totalBluetooth = Number(ble.total_devices || devices.length);
-  const totalShown = totalAps + totalClients + totalBluetooth;
+  const totalSubjects = Number(history.total_subjects || subjectCounts.total || subjects.length || 0);
+  const totalShown = totalSubjects || (totalAps + totalClients + totalBluetooth);
   const displayedShown = visible.length;
   const rawEvents = history.records_read || 0;
   const newestSeen = latestSeenStatusText(visible, ["last_seen", "timestamp"]);
@@ -2409,15 +3535,207 @@ function updateDeviceHistoryStatus(history) {
     [
       derivedStatusPrefix(window, refreshedAt, refreshedEpoch),
       newestSeen,
-      `${totalShown} devices/APs in view`,
+      `${totalShown} subjects in view`,
       displayedShown < totalShown ? `${displayedShown} loaded for display` : "",
       `${rawEvents} raw events processed`,
       `${totalAps} APs`,
       `${totalClients} Wi-Fi clients`,
-      `${totalBluetooth} Bluetooth devices`
+      `${totalBluetooth} Bluetooth devices`,
+      `${directSubjects.length} direct collector subjects`
     ].filter(Boolean).join(" | "),
     derivedDataStatusState(visible, ["last_seen", "timestamp"], normalState)
   );
+}
+
+function historySubjectsFor(history, collector) {
+  return (Array.isArray((history || {}).subjects) ? history.subjects : [])
+    .filter((item) => String(item.collector || "") === collector);
+}
+
+function subjectData(item) {
+  return (item || {}).data || {};
+}
+
+function subjectTypeLabel(item) {
+  return String((item || {}).subject_type || "")
+    .replace(/^(aprsis|rayhunter|rtlsdr|wifi|bluetooth)_/, "")
+    .replace(/^swpc_/, "")
+    .replace(/_/g, " ");
+}
+
+function aprsisSubjectCounts(item) {
+  const data = subjectData(item);
+  return [
+    `${data.packet_count || 0} pkt`,
+    data.position_count ? `${data.position_count} pos` : "",
+    data.weather_count ? `${data.weather_count} wx` : "",
+    data.object_count ? `${data.object_count} obj` : "",
+    data.message_count ? `${data.message_count} msg` : "",
+    data.status_count ? `${data.status_count} status` : ""
+  ].filter(Boolean).join("; ");
+}
+
+function aprsisSubjectPosition(item) {
+  const data = subjectData(item);
+  const lat = Number(data.latitude !== undefined ? data.latitude : data.last_latitude);
+  const lon = Number(data.longitude !== undefined ? data.longitude : data.last_longitude);
+  const parts = [];
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    parts.push(`${lat.toFixed(5)}, ${lon.toFixed(5)}`);
+  }
+  if (data.position_span_km !== undefined) parts.push(`span ${Number(data.position_span_km).toFixed(2)} km`);
+  if (data.movement_km !== undefined) parts.push(`move ${Number(data.movement_km).toFixed(2)} km`);
+  return parts.join("; ");
+}
+
+function aprsisSubjectActivity(item) {
+  const data = subjectData(item);
+  if (data.weather_summary) return normalizeAprsWeatherSummary(data.weather_summary);
+  const parts = [];
+  if (data.temperature_f !== undefined) parts.push(`${data.temperature_f} F`);
+  if (data.latest_wind_speed_mph !== undefined) parts.push(`wind ${data.latest_wind_speed_mph} mph`);
+  if (data.latest_wind_gust_mph !== undefined) parts.push(`gust ${data.latest_wind_gust_mph} mph`);
+  if (data.max_speed_kmh !== undefined) parts.push(`max ${Number(data.max_speed_kmh).toFixed(1)} km/h`);
+  if (data.object_name) parts.push(`object ${data.object_name}`);
+  if (data.message || data.comment) parts.push(data.message || data.comment);
+  return parts.join("; ");
+}
+
+function aprsisSubjectRoute(item) {
+  const data = subjectData(item);
+  const server = aprsisServerText(data);
+  return [
+    data.via_path ? `via ${data.via_path}` : "",
+    data.q_construct || "",
+    data.igate ? `igate ${data.igate}` : "",
+    data.feed_name ? `feed ${data.feed_name}` : "",
+    server ? `server ${server}` : "",
+    data.host ? `host ${data.host}` : "",
+    compactList(data.sample_igates || [], 3),
+    aprsisAdditionalSamples(data.sample_servers, data.server_name, "servers", 3)
+  ].filter(Boolean).join("; ");
+}
+
+function aprsisServerText(data) {
+  const item = data || {};
+  const name = String(item.server_name || "").trim();
+  const address = String(item.server_address || "").trim();
+  if (name && address) return `${name} (${address})`;
+  return name || address;
+}
+
+function rtlsdrSubjectActivity(item) {
+  const data = subjectData(item);
+  return [
+    data.frequency_mhz ? `${data.frequency_mhz} MHz` : "",
+    data.signal_count ? `${data.signal_count} signal(s)` : "",
+    data.active ? "active" : ""
+  ].filter(Boolean).join("; ");
+}
+
+function rtlsdrSubjectSignal(item) {
+  const data = subjectData(item);
+  return [
+    data.power_dbm !== undefined ? `${data.power_dbm} dBm` : "",
+    data.above_floor_db !== undefined ? `+${data.above_floor_db} dB` : "",
+    data.reason || ""
+  ].filter(Boolean).join("; ");
+}
+
+function noaaSubjectSeverity(item) {
+  const data = subjectData(item);
+  return [
+    data.severity || "",
+    data.urgency ? `urgency ${data.urgency}` : "",
+    data.certainty ? `certainty ${data.certainty}` : ""
+  ].filter(Boolean).join("; ");
+}
+
+function noaaSubjectTiming(item) {
+  const data = subjectData(item);
+  return [
+    data.effective ? `effective ${data.effective}` : "",
+    data.onset ? `onset ${data.onset}` : "",
+    data.expires ? `expires ${data.expires}` : "",
+    data.updated ? `updated ${data.updated}` : ""
+  ].filter(Boolean).join("; ");
+}
+
+function noaaSubjectSource(item) {
+  const data = subjectData(item);
+  return [
+    data.source || "",
+    data.basin ? data.basin.replace(/_/g, " ") : "",
+    data.internet_fed ? "internet-fed" : ""
+  ].filter(Boolean).join("; ");
+}
+
+function usgsSubjectLocation(item) {
+  const data = subjectData(item);
+  const lat = Number(data.latitude);
+  const lon = Number(data.longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) return `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+  return data.place || "";
+}
+
+function usgsSubjectDepthDistance(item) {
+  const data = subjectData(item);
+  return [
+    data.depth_km !== undefined ? `depth ${data.depth_km} km` : "",
+    data.distance_km !== undefined ? `${Number(data.distance_km).toFixed(1)} km away` : ""
+  ].filter(Boolean).join("; ");
+}
+
+function usgsSubjectStatus(item) {
+  const data = subjectData(item);
+  return [
+    data.status || "",
+    data.alert_color ? `alert ${data.alert_color}` : "",
+    Number(data.tsunami || 0) ? "tsunami" : ""
+  ].filter(Boolean).join("; ");
+}
+
+function swpcSubjectSource(item) {
+  const data = subjectData(item);
+  return [
+    data.source || "",
+    data.product_id ? `product ${data.product_id}` : ""
+  ].filter(Boolean).join("; ");
+}
+
+function lanSubjectIpMac(item) {
+  const data = subjectData(item);
+  return [
+    compactList(data.ips || (data.ip ? [data.ip] : []), 3),
+    data.mac || ""
+  ].filter(Boolean).join(" / ");
+}
+
+function lanSubjectIdentity(item) {
+  const data = subjectData(item);
+  return [
+    data.hostname || compactList(data.hostnames || [], 2),
+    data.vendor_name || data.vendor_prefix || ""
+  ].filter(Boolean).join("; ");
+}
+
+function lanSubjectInterfaceState(item) {
+  const data = subjectData(item);
+  return [
+    data.interface || compactList(data.interfaces || [], 2),
+    data.state || compactList(data.states || [], 2)
+  ].filter(Boolean).join("; ");
+}
+
+function lanSubjectActivity(item) {
+  const data = subjectData(item);
+  return [
+    data.gateway ? "gateway" : "",
+    data.observation_count ? `${data.observation_count} observation(s)` : "",
+    data.change_count ? `${data.change_count} change(s)` : "",
+    data.gateway_ip ? `gateway ${data.gateway_ip}` : "",
+    compactList(data.sources || [], 3)
+  ].filter(Boolean).join("; ");
 }
 
 function vendorLabel(item) {
@@ -2437,6 +3755,18 @@ function detailLink(label, type, key) {
   button.title = "Open detail view";
   button.addEventListener("click", () => openDetail(type, key));
   return {node: button, text};
+}
+
+function externalLink(label, href) {
+  const text = String(label || href || "");
+  const url = String(href || "").trim();
+  if (!/^https?:\/\//i.test(url)) return text;
+  const link = document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = text;
+  return {node: link, text};
 }
 
 function setupDetailPanel() {
@@ -2476,10 +3806,258 @@ function buildDetail(type, key) {
   if (type === "bluetooth-device") return buildBluetoothDetail(key);
   if (type === "wifi-ssid") return buildWifiSsidDetail(key);
   if (type === "wifi-bssid") return buildWifiBssidDetail(key);
+  if (type === "aprsis-subject") return buildAprsisSubjectDetail(key);
+  if (type === "rayhunter-subject") return buildRayhunterSubjectDetail(key);
+  if (type === "noaa-subject") return buildNoaaSubjectDetail(key);
+  if (type === "usgs-subject") return buildUsgsSubjectDetail(key);
+  if (type === "swpc-subject") return buildSwpcSubjectDetail(key);
+  if (type === "lan-subject") return buildLanSubjectDetail(key);
   return {
     kind: "Detail",
     title: String(key || "Unknown"),
     sections: [detailMessage("No detail renderer is available for this item.")]
+  };
+}
+
+function buildRayhunterSubjectDetail(key) {
+  const subject = findRayhunterHistorySubject(key);
+  const reports = relatedReportsFor("rayhunter-subject", key);
+  if (!subject) return missingDetail("Rayhunter Subject", key, reports);
+  const data = subjectData(subject);
+  return {
+    kind: "Rayhunter Subject",
+    title: subject.subject || data.endpoint || key,
+    sections: [
+      detailSection("Endpoint", [
+        ["Endpoint", data.endpoint || key],
+        ["Type", subjectTypeLabel(subject)]
+      ]),
+      detailSection("Status", [
+        ["Warnings", data.warning_count],
+        ["Status Events", data.events_in_window],
+        ["Warning Events", data.warning_events_in_window],
+        ["Latest Event", data.latest_event],
+        ["Reason", data.reason]
+      ]),
+      detailSection("System", [
+        ["Version", data.rayhunter_version],
+        ["OS", data.device_os],
+        ["GPS", data.gps_mode],
+        ["Storage", data.storage],
+        ["Memory", data.memory],
+        ["Battery", data.battery]
+      ]),
+      detailSection("Recording", [
+        ["ID", data.recording_id],
+        ["Size", data.recording_size],
+        ["Start", data.recording_start],
+        ["Last Message", data.recording_last_message]
+      ]),
+      detailSection("Observed", [
+        ["First Seen", subject.first_seen || data.first_seen],
+        ["Last Seen", subject.last_seen || data.last_seen]
+      ]),
+      reportsSection(reports)
+    ]
+  };
+}
+
+function buildAprsisSubjectDetail(key) {
+  const subject = findAprsisHistorySubject(key);
+  const reports = relatedReportsFor("aprsis-subject", key);
+  if (!subject) return missingDetail("APRS-IS Subject", key, reports);
+  const data = subjectData(subject);
+  return {
+    kind: "APRS-IS Subject",
+    title: subject.subject || data.callsign || key,
+    sections: [
+      detailSection("Subject", [
+        ["Callsign / Object", subject.subject || data.callsign || key],
+        ["Type", subjectTypeLabel(subject)],
+        ["Latest Packet", data.packet_type],
+        ["Internet-fed", data.internet_fed ? "yes" : ""]
+      ]),
+      detailSection("Observed", [
+        ["First Seen", subject.first_seen || data.first_seen],
+        ["Last Seen", subject.last_seen || data.last_seen],
+        ["Packets", aprsisSubjectCounts(subject)]
+      ]),
+      detailSection("Position / Activity", [
+        ["Position", aprsisSubjectPosition(subject)],
+        ["Weather / Motion", aprsisSubjectActivity(subject)]
+      ]),
+      detailSection("Weather", [
+        ["Latest", normalizeAprsWeatherSummary(data.weather_summary)],
+        ["Temperature", aprsisTemperatureEvidenceText(data)],
+        ["Wind", aprsisWindEvidenceText(data)],
+        ["Rain", aprsisRainEvidenceText(data)],
+        ["Humidity", data.humidity_percent ? `${data.humidity_percent}%` : ""],
+        ["Pressure", data.pressure_hpa ? `${data.pressure_hpa} hPa` : ""]
+      ]),
+      detailSection("Feed / Server", [
+        ["Feed", data.feed_name],
+        ["Role", aprsisDistinctFeedRole(data.feed_name, data.feed_role) || data.feed_role],
+        ["Backend Server", aprsisServerText(data)],
+        ["Preferred Server", compactList(data.preferred_servers || [], 4)],
+        ["Sample Servers", compactList(data.sample_servers || [], 5)],
+        ["Configured Host", data.host],
+        ["Filter", data.filter],
+        ["Igate", data.igate],
+        ["Sample Igates", compactList(data.sample_igates || [], 5)]
+      ]),
+      reportsSection(reports)
+    ]
+  };
+}
+
+function buildNoaaSubjectDetail(key) {
+  const subject = findNoaaHistorySubject(key);
+  const reports = relatedReportsFor("noaa-subject", key);
+  if (!subject) return missingDetail("NOAA Subject", key, reports);
+  const data = subjectData(subject);
+  return {
+    kind: "NOAA Subject",
+    title: subject.subject || data.event || data.headline || key,
+    sections: [
+      detailSection("Alert", [
+        ["Event", data.event],
+        ["Headline", data.headline],
+        ["Type", subjectTypeLabel(subject)],
+        ["Kind", data.alert_kind],
+        ["Severity", noaaSubjectSeverity(subject)],
+        ["Status", data.status],
+        ["Message Type", data.message_type]
+      ]),
+      detailSection("Area / Timing", [
+        ["Area", data.area_desc],
+        ["Effective", data.effective],
+        ["Onset", data.onset],
+        ["Expires", data.expires],
+        ["Ends", data.ends],
+        ["Updated", data.updated]
+      ]),
+      detailSection("Source", [
+        ["Source", data.source],
+        ["Basin", data.basin],
+        ["URL", data.source_url],
+        ["Internet-fed", data.internet_fed ? "yes" : ""],
+        ["Updates", data.update_count]
+      ]),
+      detailSection("Observed", [
+        ["First Seen", subject.first_seen || data.first_seen],
+        ["Last Seen", subject.last_seen || data.last_seen]
+      ]),
+      reportsSection(reports)
+    ]
+  };
+}
+
+function buildUsgsSubjectDetail(key) {
+  const subject = findUsgsHistorySubject(key);
+  const reports = relatedReportsFor("usgs-subject", key);
+  if (!subject) return missingDetail("USGS Subject", key, reports);
+  const data = subjectData(subject);
+  return {
+    kind: "USGS Subject",
+    title: subject.subject || data.place || key,
+    sections: [
+      detailSection("Earthquake", [
+        ["Event ID", data.event_id],
+        ["Magnitude", usgsMagnitudeText(data)],
+        ["Place", data.place],
+        ["Status", data.status],
+        ["Alert", usgsAlertText(data)]
+      ]),
+      detailSection("Location", [
+        ["Coordinates", usgsSubjectLocation(subject)],
+        ["Depth", data.depth_km !== undefined ? `${data.depth_km} km` : ""],
+        ["Distance", data.distance_km !== undefined ? `${Number(data.distance_km).toFixed(1)} km` : ""]
+      ]),
+      detailSection("Timing", [
+        ["Event Time", data.event_time],
+        ["Updated", data.updated],
+        ["First Seen", subject.first_seen || data.first_seen],
+        ["Last Seen", subject.last_seen || data.last_seen],
+        ["Updates", data.update_count]
+      ]),
+      detailSection("Source", [
+        ["URL", data.detail_url],
+        ["Internet-fed", data.internet_fed ? "yes" : ""]
+      ]),
+      reportsSection(reports)
+    ]
+  };
+}
+
+function buildSwpcSubjectDetail(key) {
+  const subject = findSwpcHistorySubject(key);
+  const reports = relatedReportsFor("swpc-subject", key);
+  if (!subject) return missingDetail("SWPC Subject", key, reports);
+  const data = subjectData(subject);
+  return {
+    kind: "SWPC Subject",
+    title: subject.subject || data.event || key,
+    sections: [
+      detailSection("Event", [
+        ["Event ID", data.event_id],
+        ["Type", subjectTypeLabel(subject)],
+        ["Event", data.event],
+        ["Level", swpcLevelText(data)],
+        ["Summary", data.summary]
+      ]),
+      detailSection("Timing", [
+        ["Event Time", data.event_time],
+        ["Start", data.start_time],
+        ["Peak", data.peak_time],
+        ["End", data.end_time],
+        ["Issue Time", data.issue_time],
+        ["First Seen", subject.first_seen || data.first_seen],
+        ["Last Seen", subject.last_seen || data.last_seen],
+        ["Updates", data.update_count]
+      ]),
+      detailSection("Source", [
+        ["Source", data.source],
+        ["Product", data.product_id],
+        ["URL", data.source_url]
+      ]),
+      reportsSection(reports)
+    ]
+  };
+}
+
+function buildLanSubjectDetail(key) {
+  const subject = findLanHistorySubject(key);
+  const reports = relatedReportsFor("lan-subject", key);
+  if (!subject) return missingDetail("LAN Subject", key, reports);
+  const data = subjectData(subject);
+  return {
+    kind: "LAN Subject",
+    title: subject.subject || data.hostname || data.mac || data.gateway_ip || key,
+    sections: [
+      detailSection("Identity", [
+        ["Type", subjectTypeLabel(subject)],
+        ["MAC", data.mac],
+        ["IPs", compactList(data.ips || (data.ip ? [data.ip] : []), 8)],
+        ["Hostnames", compactList(data.hostnames || (data.hostname ? [data.hostname] : []), 8)],
+        ["Vendor", data.vendor_name || data.vendor_prefix],
+        ["Gateway", data.gateway ? "yes" : ""]
+      ]),
+      detailSection("Network", [
+        ["Interfaces", compactList(data.interfaces || (data.interface ? [data.interface] : []), 8)],
+        ["States", compactList(data.states || (data.state ? [data.state] : []), 8)],
+        ["Sources", compactList(data.sources || [], 8)],
+        ["Gateway IP", data.gateway_ip],
+        ["Family", data.family]
+      ]),
+      detailSection("Observed", [
+        ["First Seen", subject.first_seen || data.first_seen],
+        ["Last Seen", subject.last_seen || data.last_seen],
+        ["Observations", data.observation_count],
+        ["Changes", data.change_count],
+        ["Latest Change", data.change_type]
+      ]),
+      reportsSection(reports)
+    ]
   };
 }
 
@@ -2579,7 +4157,7 @@ function missingDetail(kind, key, reports) {
     kind,
     title: String(key || "Unknown"),
     sections: [
-      detailMessage("No matching Device History row is loaded for this item."),
+      detailMessage("No matching Subject History row is loaded for this item."),
       reportsSection(reports)
     ]
   };
@@ -2599,12 +4177,21 @@ function detailSection(title, rows) {
       const term = document.createElement("dt");
       term.textContent = label;
       const detail = document.createElement("dd");
-      detail.textContent = String(value);
+      appendDetailValue(detail, label, value);
       list.appendChild(term);
       list.appendChild(detail);
     });
   section.appendChild(list);
   return section;
+}
+
+function appendDetailValue(detail, label, value) {
+  const text = String(value);
+  if (String(label || "").toLowerCase().includes("url") && /^https?:\/\//i.test(text)) {
+    detail.appendChild(externalLink(text, text).node);
+    return;
+  }
+  detail.textContent = text;
 }
 
 function detailApTable(aps) {
@@ -2656,7 +4243,7 @@ function reportsSection(reports) {
   }
   const table = document.createElement("table");
   table.className = "detail-table detail-related-reports";
-  table.innerHTML = "<thead><tr><th>Score</th><th>Type</th><th>Report</th><th>Summary</th><th>Last Seen</th></tr></thead>";
+  table.innerHTML = "<thead><tr><th>Score</th><th>Category</th><th>Report</th><th>Summary</th><th>Last Seen</th></tr></thead>";
   const tbody = document.createElement("tbody");
   reports.forEach((report) => {
     const tr = document.createElement("tr");
@@ -2709,6 +4296,32 @@ function reportMatchesDetail(report, type, key) {
   if (type === "wifi-ssid") {
     return String(evidence.ssid || "(blank)").toLowerCase() === normalizedKey;
   }
+  if (type === "aprsis-subject") {
+    return String(evidence.callsign || "").toLowerCase() === normalizedKey ||
+      String((report || {}).subject || "").toLowerCase().includes(normalizedKey);
+  }
+  if (type === "rayhunter-subject") {
+    return String(evidence.endpoint || "").toLowerCase() === normalizedKey ||
+      String((report || {}).subject || "").toLowerCase().includes(normalizedKey);
+  }
+  if (type === "noaa-subject") {
+    return String(evidence.event_id || "").toLowerCase() === normalizedKey ||
+      String((report || {}).subject || "").toLowerCase().includes(normalizedKey);
+  }
+  if (type === "usgs-subject") {
+    return String(evidence.event_id || "").toLowerCase() === normalizedKey ||
+      String((report || {}).subject || "").toLowerCase().includes(normalizedKey);
+  }
+  if (type === "swpc-subject") {
+    return String(evidence.event_id || "").toLowerCase() === normalizedKey ||
+      String((report || {}).subject || "").toLowerCase().includes(normalizedKey);
+  }
+  if (type === "lan-subject") {
+    return String(evidence.subject_key || "").toLowerCase() === normalizedKey ||
+      String(evidence.mac || "").toLowerCase() === normalizedKey ||
+      String(evidence.gateway_ip || "").toLowerCase() === normalizedKey ||
+      String((report || {}).subject || "").toLowerCase().includes(normalizedKey);
+  }
   return false;
 }
 
@@ -2741,6 +4354,95 @@ function findBluetoothHistoryDevice(mac) {
   return bluetoothHistoryDevices().find((device) =>
     String(device.mac || "").toLowerCase() === normalized
   );
+}
+
+function aprsisHistorySubjects() {
+  return historySubjectsFor(latestDeviceHistory || {}, "aprsis");
+}
+
+function rayhunterHistorySubjects() {
+  return historySubjectsFor(latestDeviceHistory || {}, "rayhunter");
+}
+
+function noaaHistorySubjects() {
+  return historySubjectsFor(latestDeviceHistory || {}, "noaa");
+}
+
+function usgsHistorySubjects() {
+  return historySubjectsFor(latestDeviceHistory || {}, "usgs");
+}
+
+function swpcHistorySubjects() {
+  return historySubjectsFor(latestDeviceHistory || {}, "swpc");
+}
+
+function lanHistorySubjects() {
+  return historySubjectsFor(latestDeviceHistory || {}, "lan");
+}
+
+function findRayhunterHistorySubject(key) {
+  const normalized = String(key || "").toLowerCase();
+  return rayhunterHistorySubjects().find((subject) => {
+    const data = subjectData(subject);
+    return String(subject.subject || "").toLowerCase() === normalized ||
+      String(subject.subject_id || "").toLowerCase() === normalized ||
+      String(data.endpoint || "").toLowerCase() === normalized;
+  });
+}
+
+function findAprsisHistorySubject(key) {
+  const normalized = String(key || "").toLowerCase();
+  return aprsisHistorySubjects().find((subject) => {
+    const data = subjectData(subject);
+    return String(subject.subject || "").toLowerCase() === normalized ||
+      String(subject.subject_id || "").toLowerCase() === normalized ||
+      String(data.callsign || "").toLowerCase() === normalized ||
+      String(data.object_name || "").toLowerCase() === normalized;
+  });
+}
+
+function findNoaaHistorySubject(key) {
+  const normalized = String(key || "").toLowerCase();
+  return noaaHistorySubjects().find((subject) => {
+    const data = subjectData(subject);
+    return String(subject.subject || "").toLowerCase() === normalized ||
+      String(subject.subject_id || "").toLowerCase() === normalized ||
+      String(data.event_id || "").toLowerCase() === normalized ||
+      String(data.headline || "").toLowerCase() === normalized;
+  });
+}
+
+function findUsgsHistorySubject(key) {
+  const normalized = String(key || "").toLowerCase();
+  return usgsHistorySubjects().find((subject) => {
+    const data = subjectData(subject);
+    return String(subject.subject || "").toLowerCase() === normalized ||
+      String(subject.subject_id || "").toLowerCase() === normalized ||
+      String(data.event_id || "").toLowerCase() === normalized;
+  });
+}
+
+function findSwpcHistorySubject(key) {
+  const normalized = String(key || "").toLowerCase();
+  return swpcHistorySubjects().find((subject) => {
+    const data = subjectData(subject);
+    return String(subject.subject || "").toLowerCase() === normalized ||
+      String(subject.subject_id || "").toLowerCase() === normalized ||
+      String(data.event_id || "").toLowerCase() === normalized ||
+      String(data.summary || "").toLowerCase() === normalized;
+  });
+}
+
+function findLanHistorySubject(key) {
+  const normalized = String(key || "").toLowerCase();
+  return lanHistorySubjects().find((subject) => {
+    const data = subjectData(subject);
+    return String(subject.subject || "").toLowerCase() === normalized ||
+      String(subject.subject_id || "").toLowerCase() === normalized ||
+      String(data.subject_key || "").toLowerCase() === normalized ||
+      String(data.mac || "").toLowerCase() === normalized ||
+      String(data.gateway_ip || "").toLowerCase() === normalized;
+  });
 }
 
 function uniqueValues(values) {
@@ -2884,7 +4586,7 @@ function normalizeObservationInsight(observation) {
     last_seen: observation.last_seen || "",
     last_seen_epoch: observation.last_seen_epoch,
     age_minutes: observation.age_minutes,
-    origin: "device history",
+    origin: "subject history",
     score: observation.score || 0,
   };
 }
@@ -2945,19 +4647,101 @@ function reportEvidenceItems(report) {
   const evidence = (report || {}).evidence || {};
   const source = String((report || {}).source || "").toLowerCase();
   const type = String((report || {}).type || "").toLowerCase();
+  let items;
   if (source === "bluetooth" || type.startsWith("ble_")) {
-    return bluetoothReportEvidenceItems(evidence);
+    items = bluetoothReportEvidenceItems(evidence);
+  } else if (source === "wifi" || type.startsWith("wifi_ap") || type.includes("ssid")) {
+    items = wifiApReportEvidenceItems(evidence);
+  } else if (source === "wifi_monitor" || type.startsWith("wifi_client")) {
+    items = wifiClientReportEvidenceItems(evidence);
+  } else if (source === "rayhunter" || type.startsWith("rayhunter")) {
+    items = rayhunterReportEvidenceItems(evidence);
+  } else if (source === "aprsis" || type.startsWith("aprsis")) {
+    items = aprsisReportEvidenceItems(evidence);
+  } else if (source === "noaa" || type.startsWith("noaa")) {
+    items = noaaReportEvidenceItems(evidence);
+  } else if (source === "usgs" || type.startsWith("usgs")) {
+    items = usgsReportEvidenceItems(evidence);
+  } else if (source === "swpc" || type.startsWith("swpc")) {
+    items = swpcReportEvidenceItems(evidence);
+  } else if (source === "lan" || type.startsWith("lan")) {
+    items = lanReportEvidenceItems(evidence);
+  } else {
+    items = genericEvidenceItems(evidence, (report || {}).summary || "");
   }
-  if (source === "wifi" || type.startsWith("wifi_ap") || type.includes("ssid")) {
-    return wifiApReportEvidenceItems(evidence);
+  return dedupeReportEvidenceItems(items, report);
+}
+
+function dedupeReportEvidenceItems(items, report) {
+  const context = reportDedupeContext(report);
+  return (items || [])
+    .map((item) => {
+      const value = dedupeEvidenceValue(item, context);
+      if (!value) return null;
+      const key = normalizedEvidenceText(`${item.label}: ${value}`);
+      if (key && context.seen.has(key)) return null;
+      if (key) context.seen.add(key);
+      return {...item, value};
+    })
+    .filter(Boolean);
+}
+
+function reportDedupeContext(report) {
+  const visible = [
+    sourceLabel((report || {}).source),
+    (report || {}).confidence || "",
+    compactList((report || {}).reason_tags || [], 6),
+    (report || {}).title || "",
+    (report || {}).subject || "",
+    reportSummaryText(report),
+    (report || {}).last_seen || ""
+  ].filter(Boolean);
+  return {
+    text: normalizedEvidenceText(visible.join(" | ")),
+    seen: new Set()
+  };
+}
+
+function dedupeEvidenceValue(item, context) {
+  const value = String((item || {}).value || "");
+  if (!value) return "";
+  const separator = (item || {}).label === "Findings" ? "," : ";";
+  const segments = value.split(separator).map((part) => part.trim()).filter(Boolean);
+  if (segments.length <= 1) {
+    return evidenceSegmentAlreadyShown(value, context) ? "" : value;
   }
-  if (source === "wifi_monitor" || type.startsWith("wifi_client")) {
-    return wifiClientReportEvidenceItems(evidence);
-  }
-  if (source === "rayhunter" || type.startsWith("rayhunter")) {
-    return rayhunterReportEvidenceItems(evidence);
-  }
-  return genericEvidenceItems(evidence, (report || {}).summary || "");
+  const seen = new Set();
+  const kept = segments.filter((segment) => {
+    const normalized = normalizedEvidenceText(segment);
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return !evidenceSegmentAlreadyShown(segment, context);
+  });
+  return kept.join(`${separator} `);
+}
+
+function evidenceSegmentAlreadyShown(segment, context) {
+  const text = String(segment || "").trim();
+  if (!text || text.includes("://")) return false;
+  const candidates = [
+    normalizedEvidenceText(text),
+    normalizedEvidenceText(
+      text.replace(/^(mac|id|source id|event|kind|area|source|feed|server|gateway|host|ip|iface|interface|vendor)\s+/i, "")
+    )
+  ].filter((item, index, array) => item && array.indexOf(item) === index);
+  return candidates.some((candidate) => {
+    if (candidate.length < 4) return false;
+    return context.text.includes(candidate);
+  });
+}
+
+function normalizedEvidenceText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/[.,()]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function renderReportEvidenceCell(cell, items) {
@@ -2972,7 +4756,17 @@ function renderReportEvidenceCell(cell, items) {
     const term = document.createElement("dt");
     term.textContent = item.label;
     const detail = document.createElement("dd");
-    detail.textContent = item.value;
+    if (item.nowrap) detail.classList.add("evidence-nowrap");
+    if (item.href) {
+      const link = document.createElement("a");
+      link.href = item.href;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = item.value;
+      detail.appendChild(link);
+    } else {
+      detail.textContent = item.value;
+    }
     list.appendChild(term);
     list.appendChild(detail);
   });
@@ -3087,16 +4881,362 @@ function rayhunterReportEvidenceItems(evidence) {
     evidence.recording_last_message ? `last message ${evidence.recording_last_message}` : ""
   ].filter(Boolean).join("; ");
   if (recording) parts.push({label: "Recording", value: recording});
-  if (evidence.recording_artifacts && evidence.recording_artifacts.length) {
-    parts.push({label: "Artifacts", value: compactList(evidence.recording_artifacts, 5)});
-  }
-  const endpoint = [
-    evidence.endpoint || "",
-    evidence.events ? `${evidence.events} status event${Number(evidence.events) === 1 ? "" : "s"}` : "",
-    evidence.warning_events ? `${evidence.warning_events} warning event${Number(evidence.warning_events) === 1 ? "" : "s"}` : ""
-  ].filter(Boolean).join("; ");
-  if (endpoint) parts.push({label: "Endpoint", value: endpoint});
   return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function aprsisReportEvidenceItems(evidence) {
+  const parts = [];
+  const isWeatherStation = Number(evidence.weather_count || 0) > 0;
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const activity = aprsisReportActivityText(evidence);
+  const observed = timeRangeText(evidence.first_seen, evidence.last_seen);
+  if (activity || observed) {
+    parts.push({
+      label: "Activity",
+      value: [activity, observed ? `observed ${observed}` : ""].filter(Boolean).join("; ")
+    });
+  }
+  const route = [
+    evidence.via_path ? `via ${evidence.via_path}` : "",
+    evidence.q_construct || "",
+    evidence.igate ? `igate ${evidence.igate}` : "",
+    aprsisAdditionalSamples(evidence.sample_igates, evidence.igate, "igates", 4)
+  ].filter(Boolean).join("; ");
+  const position = aprsisReportPositionText(evidence);
+  const weather = aprsisReportWeatherText(evidence);
+  const place = [
+    position,
+    weather
+  ].filter(Boolean).join("; ");
+  if (place) parts.push({label: isWeatherStation ? "Weather" : "Position", value: place});
+  const feedRole = aprsisDistinctFeedRole(evidence.feed_name, evidence.feed_role);
+  const feed = [
+    route,
+    evidence.feed_name ? `feed ${evidence.feed_name}` : "",
+    feedRole,
+    aprsisAdditionalSamples(evidence.sample_feeds, evidence.feed_name, "feeds", 3),
+    evidence.server_name || evidence.server_address ? `server ${aprsisServerText(evidence)}` : "",
+    aprsisAdditionalSamples(evidence.sample_servers, evidence.server_name, "servers", 3),
+    (evidence.preferred_servers || []).length ? `preferred ${compactList(evidence.preferred_servers, 3)}` : "",
+    evidence.host || evidence.port ? `${evidence.host || "feed"}:${evidence.port || ""}` : "",
+    evidence.filter ? `filter ${evidence.filter}` : "",
+    evidence.geofence_enforced && evidence.geofence_radius_km ? `local radius ${evidence.geofence_radius_km} km` : "",
+    evidence.distance_from_filter_km ? `${evidence.distance_from_filter_km} km from center` : ""
+  ].filter(Boolean).join("; ");
+  if (feed) parts.push({label: "Route / Feed", value: feed});
+  return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function aprsisAdditionalSamples(values, primary, label, limit) {
+  const primaryText = String(primary || "").trim().toLowerCase();
+  const items = (Array.isArray(values) ? values : []).filter((item) => {
+    const text = String(item || "").trim();
+    return text && text.toLowerCase() !== primaryText;
+  });
+  return items.length ? `${label} ${compactList(items, limit)}` : "";
+}
+
+function aprsisReportActivityText(evidence) {
+  const parts = [];
+  if (evidence.callsign) parts.push(evidence.callsign);
+  if (evidence.packet_count) parts.push(`${evidence.packet_count} packet(s)`);
+  if (evidence.position_count) parts.push(`${evidence.position_count} position`);
+  if (evidence.weather_count) parts.push(`${evidence.weather_count} weather`);
+  if (evidence.object_count) parts.push(`${evidence.object_count} object`);
+  if (evidence.message_count) parts.push(`${evidence.message_count} message`);
+  if (evidence.status_count) parts.push(`${evidence.status_count} status`);
+  return parts.join("; ");
+}
+
+function aprsisReportPositionText(evidence) {
+  const parts = [];
+  const position = formatAprsisPosition(evidence);
+  if (position) parts.push(position);
+  const span = numericEvidence(evidence.position_span_km);
+  const movement = numericEvidence(evidence.movement_km);
+  const step = numericEvidence(evidence.max_step_km);
+  if (span !== null && span > 0) parts.push(`span ${span.toFixed(2)} km`);
+  if (movement !== null && movement > 0) parts.push(`first/latest ${movement.toFixed(2)} km`);
+  if (step !== null && step > 0) parts.push(`max step ${step.toFixed(2)} km`);
+  const motion = aprsisMotionEvidenceText(evidence);
+  if (motion) parts.push(motion);
+  const maxSpeed = numericEvidence(evidence.max_speed_kmh);
+  if (maxSpeed !== null && maxSpeed > 0) parts.push(`max ${maxSpeed.toFixed(1)} km/h`);
+  return parts.join("; ");
+}
+
+function aprsisReportWeatherText(evidence) {
+  const parts = [];
+  if (evidence.weather_summary) parts.push(normalizeAprsWeatherSummary(evidence.weather_summary));
+  const temp = aprsisTemperatureEvidenceText(evidence);
+  if (temp) parts.push(temp);
+  const wind = aprsisWindEvidenceText(evidence);
+  if (wind) parts.push(wind);
+  const rain = aprsisRainEvidenceText(evidence);
+  if (rain) parts.push(rain);
+  if (evidence.humidity_percent) parts.push(`humidity ${evidence.humidity_percent}%`);
+  if (evidence.pressure_hpa) parts.push(`${evidence.pressure_hpa} hPa`);
+  return parts.join("; ");
+}
+
+function aprsisMotionEvidenceText(evidence) {
+  const speed = numericEvidence(evidence.speed_kmh);
+  const course = numericEvidence(evidence.course_deg);
+  const parts = [];
+  if (speed !== null) parts.push(`${speed.toFixed(1)} km/h`);
+  if (course !== null) parts.push(`${course.toFixed(0)} deg`);
+  return parts.join("; ");
+}
+
+function aprsisTemperatureEvidenceText(evidence) {
+  const latest = numericEvidence(evidence.temperature_f);
+  const min = numericEvidence(evidence.temperature_min_f);
+  const max = numericEvidence(evidence.temperature_max_f);
+  const change = numericEvidence(evidence.temperature_change_f);
+  const parts = [];
+  if (latest !== null) parts.push(`${latest.toFixed(0)} F latest`);
+  if (min !== null && max !== null) parts.push(`range ${min.toFixed(0)}-${max.toFixed(0)} F`);
+  if (change !== null && change !== 0) {
+    parts.push(`net ${change > 0 ? "+" : ""}${change.toFixed(0)} F first-to-latest`);
+  }
+  return parts.join(", ");
+}
+
+function aprsisWindEvidenceText(evidence) {
+  const wind = numericEvidence(evidence.wind_speed_max_mph);
+  const gust = numericEvidence(evidence.wind_gust_max_mph);
+  const parts = [];
+  if (wind !== null && wind > 0) parts.push(`max wind ${wind.toFixed(0)} mph`);
+  if (gust !== null && gust > 0) parts.push(`max gust ${gust.toFixed(0)} mph`);
+  return parts.join(", ");
+}
+
+function aprsisRainEvidenceText(evidence) {
+  const latest = numericEvidence(evidence.rain_1h_in);
+  const max = numericEvidence(evidence.rain_1h_max_in);
+  const parts = [];
+  if (latest !== null) parts.push(`1h rate ${latest.toFixed(2)} in/hr`);
+  if (max !== null) parts.push(`max 1h rate ${max.toFixed(2)} in/hr`);
+  const transition = latestRainTransition(evidence);
+  if (transition) parts.push(transition);
+  return parts.join(", ");
+}
+
+function latestRainTransition(evidence) {
+  const explicit = String(evidence.rain_last_transition || "").trim().toLowerCase();
+  if (["started", "stopped"].includes(explicit)) {
+    const when = rainTransitionTimestamp(evidence, explicit);
+    return when ? `${explicit} ${when}` : explicit;
+  }
+  const candidates = [];
+  if (evidence.rain_started) {
+    candidates.push({
+      state: "started",
+      epoch: numericEvidence(evidence.rain_started_epoch) || 0,
+      when: evidence.rain_started_at || ""
+    });
+  }
+  if (evidence.rain_stopped) {
+    candidates.push({
+      state: "stopped",
+      epoch: numericEvidence(evidence.rain_stopped_epoch) || 0,
+      when: evidence.rain_stopped_at || ""
+    });
+  }
+  if (!candidates.length) return "";
+  candidates.sort((a, b) => b.epoch - a.epoch);
+  const latest = candidates[0];
+  const when = latest.state === "stopped"
+    ? rainTransitionTimestamp(evidence, latest.state) || latest.when
+    : latest.when;
+  return when ? `${latest.state} ${when}` : latest.state;
+}
+
+function rainTransitionTimestamp(evidence, state) {
+  if (state === "stopped") {
+    const stopped = evidence.rain_episode_stopped_at || evidence.rain_last_transition_at || "";
+    const started = evidence.rain_episode_started_at || "";
+    if (stopped && started) return `${stopped}; episode started ${started}`;
+    return stopped;
+  }
+  return evidence.rain_last_transition_at || evidence.rain_episode_started_at || "";
+}
+
+function noaaReportEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const event = [
+    evidence.event_id ? `ID ${evidence.event_id}` : "",
+    evidence.source_event_id && evidence.source_event_id !== evidence.event_id ? `source ID ${evidence.source_event_id}` : "",
+    evidence.alert_kind ? `kind ${evidence.alert_kind}` : "",
+    evidence.severity || "",
+    evidence.urgency ? `urgency ${evidence.urgency}` : "",
+    evidence.certainty ? `certainty ${evidence.certainty}` : "",
+    evidence.status || "",
+    evidence.message_type ? `message ${evidence.message_type}` : "",
+    updateEvidenceText(evidence.updated, evidence.update_count),
+    timeRangeText(evidence.first_seen, evidence.last_seen)
+  ].filter(Boolean).join("; ");
+  if (event) parts.push({label: "Event", value: event});
+  const timing = [
+    evidence.effective ? `effective ${evidence.effective}` : "",
+    evidence.onset ? `onset ${evidence.onset}` : "",
+    evidence.expires ? `expires ${evidence.expires}` : "",
+    evidence.ends ? `ends ${evidence.ends}` : ""
+  ].filter(Boolean).join("; ");
+  if (timing) parts.push({label: "Timing", value: timing});
+  const source = [
+    evidence.area_desc ? `area ${evidence.area_desc}` : "",
+    evidence.source || "",
+    evidence.source_url || ""
+  ].filter(Boolean).join("; ");
+  if (source) {
+    parts.push({
+      label: "Source",
+      value: source,
+      href: evidence.source_url || "",
+      nowrap: Boolean(evidence.source_url)
+    });
+  }
+  return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function usgsReportEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const event = [
+    evidence.event_id ? `ID ${evidence.event_id}` : "",
+    evidence.event_time ? `time ${evidence.event_time}` : "",
+    updateEvidenceText(evidence.updated, evidence.update_count),
+    timeRangeText(evidence.first_seen, evidence.last_seen),
+    evidence.status || ""
+  ].filter(Boolean).join("; ");
+  if (event) parts.push({label: "Event", value: event});
+  const location = [
+    formatLatLon(evidence.latitude, evidence.longitude),
+    evidence.depth_km !== undefined ? `depth ${evidence.depth_km} km` : "",
+    evidence.distance_km !== undefined ? `${evidence.distance_km} km from point` : ""
+  ].filter(Boolean).join("; ");
+  if (location) parts.push({label: "Location", value: location});
+  const shaking = [
+    evidence.cdi !== undefined ? `CDI felt ${evidence.cdi}` : "",
+    evidence.mmi !== undefined ? `MMI modeled ${evidence.mmi}` : "",
+    evidence.felt !== undefined ? `${evidence.felt} felt report(s)` : "",
+    evidence.alert_color ? `alert ${evidence.alert_color}` : "",
+    evidence.tsunami ? "tsunami flag" : ""
+  ].filter(Boolean).join("; ");
+  if (shaking) parts.push({label: "Shaking", value: shaking});
+  if (evidence.detail_url) {
+    parts.push({
+      label: "Detail",
+      value: evidence.detail_url,
+      href: evidence.detail_url,
+      nowrap: true
+    });
+  }
+  return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function swpcReportEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const event = [
+    evidence.event_id ? `ID ${evidence.event_id}` : "",
+    evidence.event_kind ? `kind ${String(evidence.event_kind).replace(/_/g, " ")}` : "",
+    evidence.product_id ? `product ${evidence.product_id}` : "",
+    evidence.summary || ""
+  ].filter(Boolean).join("; ");
+  if (event) parts.push({label: "Event", value: event});
+  const level = [
+    evidence.xray_class || "",
+    evidence.scale_label || "",
+    evidence.scale_family && evidence.scale_value !== undefined ? `${evidence.scale_family}${evidence.scale_value}` : "",
+    formatKpIndex(evidence.kp_index),
+    evidence.xray_flux_peak !== undefined ? `peak flux ${evidence.xray_flux_peak}` : ""
+  ].filter(Boolean).join("; ");
+  if (level) parts.push({label: "Level", value: level});
+  const timing = [
+    evidence.event_time ? `event ${evidence.event_time}` : "",
+    evidence.start_time ? `start ${evidence.start_time}` : "",
+    evidence.peak_time ? `peak ${evidence.peak_time}` : "",
+    evidence.end_time ? `end ${evidence.end_time}` : "",
+    evidence.issue_time ? `issued ${evidence.issue_time}` : "",
+    updateEvidenceText("", evidence.update_count),
+    timeRangeText(evidence.first_seen, evidence.last_seen)
+  ].filter(Boolean).join("; ");
+  if (timing) parts.push({label: "Timing", value: timing});
+  const source = [
+    evidence.source || "",
+    evidence.source_url || ""
+  ].filter(Boolean).join("; ");
+  if (source) {
+    parts.push({
+      label: "Source",
+      value: source,
+      href: evidence.source_url || "",
+      nowrap: Boolean(evidence.source_url)
+    });
+  }
+  return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function lanReportEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const identity = [
+    evidence.mac ? `MAC ${evidence.mac}` : "",
+    evidence.ips && evidence.ips.length ? `IP ${compactList(evidence.ips, 4)}` : "",
+    evidence.hostnames && evidence.hostnames.length ? `host ${compactList(evidence.hostnames, 3)}` : "",
+    evidence.vendor || ""
+  ].filter(Boolean).join("; ");
+  if (identity) parts.push({label: "Identity", value: identity});
+  const network = [
+    evidence.gateway_ip ? `gateway ${evidence.gateway_ip}` : "",
+    evidence.family || "",
+    evidence.interface || (evidence.interfaces && evidence.interfaces.length ? `iface ${compactList(evidence.interfaces, 3)}` : ""),
+    evidence.states && evidence.states.length ? `state ${compactList(evidence.states, 3)}` : "",
+    evidence.sources && evidence.sources.length ? `source ${compactList(evidence.sources, 3)}` : ""
+  ].filter(Boolean).join("; ");
+  if (network) parts.push({label: "Network", value: network});
+  const activity = [
+    evidence.observation_count ? `${evidence.observation_count} observation(s)` : "",
+    evidence.change_count ? `${evidence.change_count} change(s)` : "",
+    evidence.gateway ? "gateway device" : "",
+    evidence.gateways && evidence.gateways.length ? `gateways ${compactList(evidence.gateways, 3)}` : ""
+  ].filter(Boolean).join("; ");
+  if (activity) parts.push({label: "Activity", value: activity});
+  const observed = timeRangeText(evidence.first_seen, evidence.last_seen);
+  if (observed) parts.push({label: "Observed", value: observed});
+  return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function updateEvidenceText(updated, updateCount) {
+  const parts = [];
+  if (updated) parts.push(`updated ${updated}`);
+  const count = Number(updateCount || 0);
+  if (count) parts.push(`${count} update${count === 1 ? "" : "s"}`);
+  return parts.join("; ");
+}
+
+function formatLatLon(latitude, longitude) {
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    return `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+  }
+  if (Number.isFinite(lat)) return `lat ${lat.toFixed(5)}`;
+  if (Number.isFinite(lon)) return `lon ${lon.toFixed(5)}`;
+  return "";
+}
+
+function numericEvidence(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function withCommonEvidenceItems(parts, evidence) {
@@ -3201,7 +5341,7 @@ function genericEvidenceItems(evidence, detail) {
 }
 
 function internalEvidenceKey(key) {
-  return ["identity_key"].includes(key);
+  return ["identity_key", "internet_fed"].includes(key);
 }
 
 function evidenceDisplayValue(evidence, key) {
@@ -3307,6 +5447,11 @@ function renderCollectorTabStatusDots() {
   setTabStatusDots("wifi", [statusByKey.get("wifi")]);
   setTabStatusDots("wifi_monitor", [statusByKey.get("wifi_monitor")]);
   setTabStatusDots("rtlsdr", [statusByKey.get("rtlsdr")]);
+  setTabStatusDots("aprsis", [statusByKey.get("aprsis")]);
+  setTabStatusDots("noaa", [statusByKey.get("noaa")]);
+  setTabStatusDots("usgs", [statusByKey.get("usgs")]);
+  setTabStatusDots("swpc", [statusByKey.get("swpc")]);
+  setTabStatusDots("lan", [statusByKey.get("lan")]);
   setTabStatusDots("bluetooth", [
     statusByKey.get("ble"),
     statusByKey.get("bt_classic")
@@ -3357,6 +5502,12 @@ function updateCollectorActionButtons(item) {
 }
 
 function collectorStatusDetail(item) {
+  if (item.key === "aprsis" && Array.isArray(item.feed_statuses) && item.feed_statuses.length) {
+    return item.feed_statuses
+      .map((feed) => aprsisStatusDetail(feed, {includeState: true}))
+      .filter(Boolean)
+      .join("\n");
+  }
   const hardware = hardwareSummary(item);
   const cleanWarning = displayWarning(item);
   const warning = cleanWarning ? ` | ${cleanWarning}` : "";
@@ -3392,7 +5543,11 @@ function setCollectorBanner(key, state, detail) {
   const banner = document.getElementById(`${key}-banner`);
   if (!banner) return;
   const label = displayState(state);
-  banner.textContent = detail ? `${label}: ${detail}` : label;
+  const detailText = String(detail || "");
+  const detailHasOwnState = key === "aprsis" && /^[A-Z][A-Z /_-]*:\s+feed\s+/m.test(detailText);
+  banner.textContent = detailText
+    ? (detailHasOwnState ? detailText : `${label}: ${detailText}`)
+    : label;
   banner.className = `status-strip ${bannerClassForState(state)}`;
 }
 
@@ -3481,7 +5636,48 @@ function hardwareSummary(item) {
       detected.endpoint ? `endpoint: ${detected.endpoint}` : "no endpoint configured"
     ].filter(Boolean).join(", ");
   }
+  if (item.key === "aprsis") {
+    const feeds = Array.isArray(detected.feeds) ? detected.feeds : [];
+    if (feeds.length) {
+      return [
+        detected.enabled === false ? "disabled" : "",
+        `${feeds.length} feed${feeds.length === 1 ? "" : "s"}`,
+        feeds.map(aprsisFeedSummary).filter(Boolean).join("; ")
+      ].filter(Boolean).join(", ");
+    }
+    return [
+      detected.enabled === false ? "disabled" : "",
+      detected.host ? `feed: ${detected.host}:${detected.port || ""}` : "no feed configured",
+      detected.filter ? `filter: ${detected.filter}` : "no filter configured"
+    ].filter(Boolean).join(", ");
+  }
+  if (item.key === "lan") {
+    return [
+      detected.enabled === false ? "disabled" : "",
+      "local OS neighbor/default-route state"
+    ].filter(Boolean).join(", ");
+  }
   return item.hardware || "";
+}
+
+function aprsisFeedSummary(feed) {
+  const geofence = feed.geofence || {};
+  const feedName = String(feed.name || "").trim();
+  const feedRole = aprsisDistinctFeedRole(feedName, feed.role);
+  return [
+    feedName,
+    feedRole,
+    feed.host ? `${feed.host}:${feed.port || ""}` : "",
+    (feed.preferred_servers || []).length ? `preferred ${compactList(feed.preferred_servers, 3)}` : "",
+    feed.filter ? `filter ${feed.filter}` : ""
+  ].filter(Boolean).join(" ");
+}
+
+function aprsisDistinctFeedRole(name, role) {
+  const roleText = String(role || "").trim();
+  if (!roleText) return "";
+  const nameText = String(name || "").trim();
+  return roleText.toLowerCase() === nameText.toLowerCase() ? "" : roleText;
 }
 
 function availabilitySummary(label, records, active) {
@@ -3542,6 +5738,15 @@ function softwareSummary(key) {
   }
   if (key === "rayhunter") {
     return "HTTP endpoint, gzip-aware";
+  }
+  if (key === "aprsis") {
+    return "APRS-IS TCP feed";
+  }
+  if (key === "lan") {
+    return [
+      executableStatus("ip", detected.ip),
+      executableStatus("arp", detected.arp)
+    ].filter(Boolean).join(", ");
   }
   return "";
 }

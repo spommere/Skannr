@@ -1,15 +1,26 @@
-"""Longer-window report generation from materialized Device History.
+"""Longer-window report generation from materialized Subject History.
 
 Insights are meant to move quickly. Reports are the slower summary layer for
 questions such as "what recurring Bluetooth presence happened this week?" or
 "which APs/clients were notable during this retained window?"
 """
 
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
 from .bus import local_now
+from .collectors.aprsis import clean_aprs_data
+from .collectors.lan import clean_lan_data
+from .collectors.noaa import clean_noaa_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
+from .collectors.swpc import (
+    clean_swpc_data,
+    number_or_none,
+    swpc_event_is_alert,
+    swpc_event_is_critical,
+)
+from .collectors.usgs import clean_usgs_data
 from .log_utils import (
     format_epoch,
     now_epoch,
@@ -34,11 +45,26 @@ DEFAULT_REPORT_CONFIG = {
     "wifi_long_presence_sec": 4 * 3600,
     "wifi_intermit_min_sessions": 3,
     "wifi_monitor_event_count": 5,
+    "aprs_mobile_min_distance_km": 0.3,
+    "aprs_weather_temp_change_f": 5,
+    "aprs_weather_high_rain_1h_in": 0.25,
+    "aprs_weather_high_wind_mph": 25,
+    "aprs_weather_high_gust_mph": 35,
+    "noaa_high_severities": ["Severe", "Extreme"],
+    "usgs_nearby_radius_km": 100,
+    "usgs_warning_magnitude": 4.0,
+    "swpc_report_xray_class": "X1.0",
+    "swpc_report_radio_blackout": "R3",
+    "swpc_report_solar_radiation_storm": "S3",
+    "swpc_report_geomagnetic_storm": "G3",
+    "swpc_report_kp": 7,
+    "lan_report_new_devices": True,
+    "lan_report_gateway_changes": True,
 }
 
 
 class ReportsBuilder:
-    """Build slower report-style interpretations from Device History.
+    """Build slower report-style interpretations from Subject History.
 
     Reports are intentionally separate from Insights. Insights answer "what is
     notable now?", while reports summarize repeated or long-running patterns
@@ -58,7 +84,7 @@ class ReportsBuilder:
         self._generated_at_epoch = generated_at_epoch
         generated_at = local_now(generated_at_epoch)
         # Reports never read raw JSONL directly. The Refresh path in main.py
-        # first updates Device History, then hands the summary to this builder.
+        # first updates Subject History, then hands that summary to this builder.
         wifi = (history or {}).get("wifi") or {}
         bluetooth = (history or {}).get("bluetooth") or (history or {}).get("ble") or {}
         reports = []
@@ -71,6 +97,21 @@ class ReportsBuilder:
         )
         reports.extend(
             self.rayhunter_reports((history or {}).get("rayhunter") or [], generated_at)
+        )
+        reports.extend(
+            self.aprsis_reports((history or {}).get("aprsis") or [], generated_at)
+        )
+        reports.extend(
+            self.noaa_reports((history or {}).get("noaa") or [], generated_at)
+        )
+        reports.extend(
+            self.usgs_reports((history or {}).get("usgs") or [], generated_at)
+        )
+        reports.extend(
+            self.swpc_reports((history or {}).get("swpc") or [], generated_at)
+        )
+        reports.extend(
+            self.lan_reports((history or {}).get("lan") or [], generated_at)
         )
         reports.extend(self.privacy_reports(wifi, bluetooth, generated_at))
         reports.extend(self.scanner_quality_reports(history or {}, generated_at))
@@ -95,7 +136,7 @@ class ReportsBuilder:
         }
 
     def history_generated_epoch(self, history):
-        """Use the Device History snapshot time as the report freshness time."""
+        """Use the Subject History snapshot time as the report freshness time."""
         try:
             value = float((history or {}).get("generated_at_epoch"))
         except (TypeError, ValueError):
@@ -114,15 +155,17 @@ class ReportsBuilder:
         event_type = latest.get("type") or ""
         last_seen = latest.get("timestamp") or ""
         last_seen_epoch = record_time_epoch(latest, "timestamp")
-        endpoint = data.get("endpoint") or "default"
+        endpoint = clean_rayhunter_field(data.get("endpoint")) or ""
+        status_events = self.to_int(data.get("events_in_window")) or len(events)
         if event_type in ("collector_offline", "collector_retrying"):
             severity = "warning"
             title = "Rayhunter collector not healthy"
             warning_count = ""
-            summary = (
+            summary = self.rayhunter_summary_with_event_count(
                 clean_rayhunter_field(data.get("reason"))
                 or clean_rayhunter_field(data.get("warning"))
-                or "Rayhunter collector is not healthy."
+                or "Rayhunter collector is not healthy.",
+                status_events,
             )
             findings = ["Rayhunter collector not healthy"]
             score = 75
@@ -134,8 +177,8 @@ class ReportsBuilder:
                 if warning_count > 0
                 else "Rayhunter status"
             )
-            summary = clean_rayhunter_field(data.get("summary")) or (
-                "Rayhunter reported {} warning(s).".format(warning_count)
+            summary = self.rayhunter_warning_summary(
+                warning_count, status_events
             )
             findings = (
                 ["Rayhunter warning"]
@@ -155,11 +198,8 @@ class ReportsBuilder:
             "recording_size": data.get("recording_size") or "",
             "recording_start": data.get("recording_start") or "",
             "recording_last_message": data.get("recording_last_message") or "",
-            "recording_artifacts": data.get("recording_artifacts") or [],
             "device_os": data.get("device_os") or "",
             "gps_mode": data.get("gps_mode") or "",
-            "events": data.get("events_in_window") or len(events),
-            "warning_events": data.get("warning_events_in_window") or 0,
             "findings": findings,
             "last_seen_epoch": last_seen_epoch,
         }
@@ -179,9 +219,1240 @@ class ReportsBuilder:
                 evidence,
                 self.score_with_recency(score, last_seen_epoch),
                 last_seen,
-                subject="Rayhunter",
+                subject=self.rayhunter_subject(endpoint),
             )
         ]
+
+    def rayhunter_subject(self, endpoint):
+        """Return a compact Rayhunter report subject."""
+        endpoint = clean_rayhunter_field(endpoint) or ""
+        return "Rayhunter {}".format(endpoint) if endpoint else "Rayhunter"
+
+    def rayhunter_warning_summary(self, warning_count, status_events):
+        """Return the compact Rayhunter status summary shown in Reports."""
+        warning_label = "warning" if warning_count == 1 else "warnings"
+        summary = "{} {}.".format(warning_count, warning_label)
+        return self.rayhunter_summary_with_event_count(summary, status_events)
+
+    def rayhunter_summary_with_event_count(self, summary, status_events):
+        """Append the selected-window Rayhunter event count to a summary."""
+        summary = (clean_rayhunter_field(summary) or "").rstrip(".")
+        if not summary:
+            summary = "Rayhunter status"
+        if status_events:
+            event_label = "status event" if status_events == 1 else "status events"
+            return "{}. {} {}.".format(summary, status_events, event_label)
+        return "{}.".format(summary)
+
+    def aprsis_reports(self, events, timestamp):
+        """Return APRS-IS report rows grouped by source callsign."""
+        reports = []
+        for event in events or []:
+            data = clean_aprs_data(event.get("data") or {})
+            event_type = event.get("type") or ""
+            if event_type == "aprsis_collector_summary":
+                report = self.aprsis_collector_report(data, event, timestamp)
+            else:
+                report = self.aprsis_station_report(data, event, timestamp)
+            if report:
+                reports.append(report)
+        return reports
+
+    def aprsis_collector_report(self, data, event, timestamp):
+        """Return a collector-health row only when APRS-IS is not online."""
+        collector_state = str(data.get("collector_state") or "").upper()
+        if collector_state not in ("OFFLINE", "RETRYING"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        reason = data.get("reason") or "APRS-IS feed is offline."
+        evidence = self.aprsis_clean_evidence(
+            {
+                "findings": ["APRS-IS collector offline"],
+                "collector_state": collector_state,
+                "reason": reason,
+                "host": data.get("host") or "",
+                "port": data.get("port") or "",
+                "filter": data.get("filter") or "",
+                "feed_name": data.get("feed_name") or "",
+                "feed_role": data.get("feed_role") or "",
+                "geofence_enforced": data.get("geofence_enforced"),
+                "geofence_radius_km": data.get("geofence_radius_km"),
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+                "internet_fed": True,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning",
+            "aprsis",
+            "aprsis_collector_offline",
+            "APRS-IS feed offline",
+            reason,
+            evidence,
+            self.score_with_recency(75, last_seen_epoch),
+            last_seen,
+            subject="APRS-IS collector",
+        )
+
+    def aprsis_station_report(self, data, event, timestamp):
+        """Return one APRS-IS report row for a callsign/object source."""
+        callsign = data.get("callsign") or "unknown"
+        packet_count = self.to_int(data.get("packet_count"))
+        if packet_count <= 0:
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = self.aprsis_station_findings(data)
+        report_type, title = self.aprsis_station_report_kind(data, findings)
+        score = self.score_aprsis_station(data, findings, last_seen_epoch)
+        severity = "warning" if self.aprsis_warning_findings(findings) else "info"
+        evidence = self.aprsis_station_evidence(
+            data, findings, last_seen, last_seen_epoch
+        )
+        return self.report(
+            timestamp,
+            severity,
+            "aprsis",
+            report_type,
+            title,
+            self.aprsis_station_summary_text(data, findings),
+            evidence,
+            score,
+            last_seen,
+            subject=self.aprsis_subject(data),
+        )
+
+    def aprsis_station_findings(self, data):
+        """Return deterministic APRS patterns detected for one callsign."""
+        findings = []
+        position_count = self.to_int(data.get("position_count"))
+        weather_count = self.to_int(data.get("weather_count"))
+        object_count = self.to_int(data.get("object_count"))
+        message_count = self.to_int(data.get("message_count"))
+        movement_span = self.to_number(data.get("position_span_km")) or 0
+        max_speed = self.to_number(data.get("max_speed_kmh")) or 0
+        if weather_count:
+            findings.append("Weather station in configured area")
+        if position_count:
+            findings.append("Position in configured area")
+            if (
+                bool(data.get("movement_detected"))
+                or movement_span >= float(self.config["aprs_mobile_min_distance_km"])
+                or max_speed >= 5
+            ):
+                findings.append("Mobile station moved through area")
+        if object_count:
+            findings.append("APRS object activity")
+        if message_count:
+            findings.append("APRS message activity")
+        temp_change = abs(self.to_number(data.get("temperature_change_f")) or 0)
+        if temp_change >= float(self.config["aprs_weather_temp_change_f"]):
+            findings.append("Weather temperature changed")
+        if (self.to_number(data.get("rain_1h_max_in")) or 0) >= float(
+            self.config["aprs_weather_high_rain_1h_in"]
+        ):
+            findings.append("High rain rate")
+        transition = self.aprsis_latest_rain_transition(data)
+        if transition:
+            findings.append(self.aprsis_transition_finding(*transition))
+        if (self.to_number(data.get("wind_speed_max_mph")) or 0) >= float(
+            self.config["aprs_weather_high_wind_mph"]
+        ):
+            findings.append("High wind")
+        if (self.to_number(data.get("wind_gust_max_mph")) or 0) >= float(
+            self.config["aprs_weather_high_gust_mph"]
+        ):
+            findings.append("High wind gust")
+        return self.unique_ordered(findings)
+
+    def aprsis_station_report_kind(self, data, findings):
+        """Classify one APRS callsign report row."""
+        if self.to_int(data.get("weather_count")):
+            return "aprsis_weather_station", "APRS weather station activity"
+        if "Mobile station moved through area" in findings:
+            return "aprsis_mobile_station", "APRS mobile station moved through area"
+        if self.to_int(data.get("position_count")):
+            return "aprsis_position_station", "APRS station position activity"
+        if self.to_int(data.get("object_count")):
+            return "aprsis_object_station", "APRS object activity"
+        if self.to_int(data.get("message_count")):
+            return "aprsis_message_station", "APRS message activity"
+        return "aprsis_station_activity", "APRS station activity"
+
+    def aprsis_station_summary_text(self, data, findings):
+        """Return the concise Reports summary for one APRS callsign."""
+        packet_count = self.to_int(data.get("packet_count"))
+        if self.to_int(data.get("weather_count")):
+            return self.aprsis_weather_summary_text(packet_count, data)
+        if self.to_int(data.get("position_count")):
+            return self.aprsis_position_summary_text(packet_count, data)
+        parts = [
+            "{} APRS packet(s) in the configured area".format(packet_count)
+        ]
+        if data.get("object_name"):
+            parts.append("object {}".format(data.get("object_name")))
+        if data.get("message"):
+            parts.append("latest message {}".format(data.get("message")))
+        elif data.get("comment"):
+            parts.append(data.get("comment"))
+        return "{}.".format("; ".join(parts))
+
+    def aprsis_position_summary_text(self, packet_count, data):
+        """Return a movement-oriented APRS summary."""
+        parts = [
+            "{} APRS packet(s), including {} position report(s)".format(
+                packet_count,
+                self.to_int(data.get("position_count")),
+            )
+        ]
+        position = self.aprsis_position_text(data)
+        if position:
+            parts.append("latest {}".format(position))
+        movement = self.aprsis_movement_text(data)
+        if movement:
+            parts.append(movement)
+        motion = self.aprsis_motion_text(data)
+        if motion:
+            parts.append(motion)
+        return "{}.".format("; ".join(parts))
+
+    def aprsis_weather_summary_text(self, packet_count, data):
+        """Return a weather-pattern APRS summary."""
+        parts = [
+            "{} APRS packet(s), including {} weather report(s)".format(
+                packet_count,
+                self.to_int(data.get("weather_count")),
+            )
+        ]
+        weather_summary = self.aprsis_weather_summary_display(data.get("weather_summary"))
+        if weather_summary:
+            parts.append("latest {}".format(weather_summary))
+        temperature = self.aprsis_temperature_range_text(data)
+        if temperature:
+            parts.append(temperature)
+        wind = self.aprsis_wind_text(data)
+        if wind:
+            parts.append(wind)
+        rain = self.aprsis_rain_text(data)
+        if rain:
+            parts.append(rain)
+        position = self.aprsis_position_text(data)
+        if position:
+            parts.append("latest position {}".format(position))
+        observed = self.aprsis_observed_text(data)
+        if observed:
+            parts.append("observed {}".format(observed))
+        return "{}.".format("; ".join(parts))
+
+    def score_aprsis_station(self, data, findings, last_seen_epoch):
+        """Return an operator-attention score for an APRS callsign row."""
+        score = 25 + min(self.to_int(data.get("packet_count")), 20)
+        if "Mobile station moved through area" in findings:
+            score += 25
+        elif self.to_int(data.get("position_count")):
+            score += 10
+        if "Weather station in configured area" in findings:
+            score += 15
+        if "Weather temperature changed" in findings:
+            score += 10
+        if "High rain rate" in findings:
+            score += 25
+        if "High wind" in findings or "High wind gust" in findings:
+            score += 20
+        if self.aprsis_has_finding_prefix(findings, ("Rain started", "Rain stopped")):
+            score += 8
+        if "APRS object activity" in findings:
+            score += 10
+        if "APRS message activity" in findings:
+            score += 10
+        return self.score_with_recency(score, last_seen_epoch, cap=95)
+
+    def aprsis_warning_findings(self, findings):
+        """Return True for APRS weather conditions that should sort as warnings."""
+        warning_labels = {
+            "High rain rate",
+            "High wind",
+            "High wind gust",
+        }
+        return bool(warning_labels & set(findings or []))
+
+    def aprsis_station_evidence(self, data, findings, last_seen, last_seen_epoch):
+        """Return compact APRS evidence for one callsign report."""
+        evidence = {
+            "findings": findings,
+            "callsign": data.get("callsign") or "",
+            "packet_count": self.to_int(data.get("packet_count")),
+            "position_count": self.to_int(data.get("position_count")),
+            "weather_count": self.to_int(data.get("weather_count")),
+            "object_count": self.to_int(data.get("object_count")),
+            "message_count": self.to_int(data.get("message_count")),
+            "status_count": self.to_int(data.get("status_count")),
+            "first_seen": data.get("first_seen") or "",
+            "first_seen_epoch": data.get("first_seen_epoch"),
+            "last_seen": last_seen,
+            "last_seen_epoch": last_seen_epoch,
+            "destination": data.get("destination") or "",
+            "via_path": data.get("via_path") or "",
+            "q_construct": data.get("q_construct") or "",
+            "igate": data.get("igate") or "",
+            "sample_destinations": data.get("sample_destinations") or [],
+            "sample_paths": data.get("sample_paths") or [],
+            "sample_igates": data.get("sample_igates") or [],
+            "sample_feeds": data.get("sample_feeds") or [],
+            "sample_feed_roles": data.get("sample_feed_roles") or [],
+            "sample_servers": data.get("sample_servers") or [],
+            "sample_objects": data.get("sample_objects") or [],
+            "sample_messages": data.get("sample_messages") or [],
+            "object_name": data.get("object_name") or "",
+            "addressee": data.get("addressee") or "",
+            "message": data.get("message") or "",
+            "comment": data.get("comment") or "",
+            "latitude": data.get("latitude"),
+            "longitude": data.get("longitude"),
+            "position_span_km": data.get("position_span_km"),
+            "movement_km": data.get("movement_km"),
+            "max_step_km": data.get("max_step_km"),
+            "speed_kmh": data.get("speed_kmh"),
+            "max_speed_kmh": data.get("max_speed_kmh"),
+            "course_deg": data.get("course_deg"),
+            "weather_summary": self.aprsis_weather_summary_display(
+                data.get("weather_summary")
+            ),
+            "temperature_f": data.get("temperature_f"),
+            "temperature_min_f": data.get("temperature_min_f"),
+            "temperature_max_f": data.get("temperature_max_f"),
+            "temperature_change_f": data.get("temperature_change_f"),
+            "wind_speed_mph": data.get("wind_speed_mph"),
+            "wind_speed_max_mph": data.get("wind_speed_max_mph"),
+            "wind_gust_mph": data.get("wind_gust_mph"),
+            "wind_gust_max_mph": data.get("wind_gust_max_mph"),
+            "rain_1h_in": data.get("rain_1h_in"),
+            "rain_1h_max_in": data.get("rain_1h_max_in"),
+            "rain_started": data.get("rain_started"),
+            "rain_started_at": data.get("rain_started_at") or "",
+            "rain_started_epoch": data.get("rain_started_epoch"),
+            "rain_stopped": data.get("rain_stopped"),
+            "rain_stopped_at": data.get("rain_stopped_at") or "",
+            "rain_stopped_epoch": data.get("rain_stopped_epoch"),
+            "rain_active": data.get("rain_active"),
+            "rain_last_transition": data.get("rain_last_transition") or "",
+            "rain_last_transition_at": data.get("rain_last_transition_at") or "",
+            "rain_last_transition_epoch": data.get("rain_last_transition_epoch"),
+            "rain_episode_started_at": data.get("rain_episode_started_at") or "",
+            "rain_episode_started_epoch": data.get("rain_episode_started_epoch"),
+            "rain_episode_stopped_at": data.get("rain_episode_stopped_at") or "",
+            "rain_episode_stopped_epoch": data.get("rain_episode_stopped_epoch"),
+            "humidity_percent": data.get("humidity_percent"),
+            "pressure_hpa": data.get("pressure_hpa"),
+            "host": data.get("host") or "",
+            "port": data.get("port") or "",
+            "filter": data.get("filter") or "",
+            "feed_name": data.get("feed_name") or "",
+            "feed_role": data.get("feed_role") or "",
+            "server_name": data.get("server_name") or "",
+            "server_address": data.get("server_address") or "",
+            "preferred_servers": data.get("preferred_servers") or [],
+            "distance_from_filter_km": data.get("distance_from_filter_km"),
+            "geofence_enforced": data.get("geofence_enforced"),
+            "geofence_radius_km": data.get("geofence_radius_km"),
+            "internet_fed": True,
+        }
+        return self.aprsis_clean_evidence(evidence)
+
+    def aprsis_clean_evidence(self, evidence):
+        """Drop empty APRS evidence fields while preserving numeric zeroes."""
+        return {
+            key: value
+            for key, value in (evidence or {}).items()
+            if value not in ("", [], None)
+        }
+
+    def clean_evidence(self, evidence):
+        """Drop empty evidence fields while preserving numeric zeroes."""
+        return {
+            key: value
+            for key, value in (evidence or {}).items()
+            if value not in ("", [], None)
+        }
+
+    def aprsis_subject(self, data):
+        """Return the APRS report subject centered on the source callsign."""
+        callsign = data.get("callsign") or "unknown"
+        return "APRS {}".format(callsign)
+
+    def aprsis_position_text(self, data):
+        """Return latest APRS coordinates as compact text."""
+        latitude = self.to_number(data.get("latitude"))
+        longitude = self.to_number(data.get("longitude"))
+        if latitude is not None and longitude is not None:
+            return "{:.5f}, {:.5f}".format(latitude, longitude)
+        if latitude is not None:
+            return "lat {:.5f}".format(latitude)
+        if longitude is not None:
+            return "lon {:.5f}".format(longitude)
+        return ""
+
+    def aprsis_movement_text(self, data):
+        """Return APRS movement span text when available."""
+        span = self.to_number(data.get("position_span_km"))
+        movement = self.to_number(data.get("movement_km"))
+        if span is not None and span > 0:
+            return "movement span {:.2f} km".format(span)
+        if movement is not None and movement > 0:
+            return "first-to-latest movement {:.2f} km".format(movement)
+        return ""
+
+    def aprsis_motion_text(self, data):
+        """Return APRS latest/max motion text."""
+        parts = []
+        speed = self.to_number(data.get("speed_kmh"))
+        max_speed = self.to_number(data.get("max_speed_kmh"))
+        course = self.to_number(data.get("course_deg"))
+        if speed is not None:
+            parts.append("latest {:.1f} km/h".format(speed))
+        if max_speed is not None and max_speed > 0:
+            parts.append("max {:.1f} km/h".format(max_speed))
+        if course is not None:
+            parts.append("{:.0f} deg".format(course))
+        return ", ".join(parts)
+
+    def aprsis_temperature_range_text(self, data):
+        """Return compact APRS temperature range and net-change text."""
+        minimum = self.to_number(data.get("temperature_min_f"))
+        maximum = self.to_number(data.get("temperature_max_f"))
+        change = self.to_number(data.get("temperature_change_f"))
+        parts = []
+        if minimum is not None and maximum is not None:
+            parts.append("temperature range {:.0f}-{:.0f} F".format(minimum, maximum))
+        if change is not None and change:
+            parts.append("net {:+.0f} F first-to-latest".format(change))
+        return ", ".join(parts)
+
+    def aprsis_wind_text(self, data):
+        """Return compact APRS wind text."""
+        wind = self.to_number(data.get("wind_speed_max_mph"))
+        gust = self.to_number(data.get("wind_gust_max_mph"))
+        parts = []
+        if wind is not None and wind:
+            parts.append("max wind {:.0f} mph".format(wind))
+        if gust is not None and gust:
+            parts.append("max gust {:.0f} mph".format(gust))
+        return ", ".join(parts)
+
+    def aprsis_rain_text(self, data):
+        """Return compact APRS rain text."""
+        rain = self.to_number(data.get("rain_1h_max_in"))
+        parts = []
+        if rain is not None:
+            parts.append("max 1h rain rate {:.2f} in/hr".format(rain))
+        transition = self.aprsis_latest_rain_transition(data, lower_label=True)
+        if transition:
+            parts.append(self.aprsis_transition_text(*transition))
+        return ", ".join(parts)
+
+    def aprsis_weather_summary_display(self, value):
+        """Return APRS weather summary text with one-hour rain shown as a rate."""
+        text = str(value or "")
+        return re.sub(
+            r"\brain 1h ([0-9]+(?:\.[0-9]+)?) in\b",
+            r"1h rain rate \1 in/hr",
+            text,
+        )
+
+    def aprsis_latest_rain_transition(self, data, lower_label=False):
+        """Return the latest retained APRS rain-rate transition."""
+        explicit = str(data.get("rain_last_transition") or "").strip().lower()
+        if explicit in ("started", "stopped"):
+            label = "rain {}".format(explicit) if lower_label else "Rain {}".format(explicit)
+            return label, self.aprsis_rain_transition_timestamp(data, explicit)
+
+        candidates = []
+        if data.get("rain_started"):
+            candidates.append(
+                (
+                    self.to_number(data.get("rain_started_epoch")) or 0,
+                    "started",
+                    data.get("rain_started_at") or "",
+                )
+            )
+        if data.get("rain_stopped"):
+            candidates.append(
+                (
+                    self.to_number(data.get("rain_stopped_epoch")) or 0,
+                    "stopped",
+                    data.get("rain_stopped_at") or "",
+                )
+            )
+        if not candidates:
+            return None
+        _epoch, state, timestamp = max(candidates, key=lambda item: item[0])
+        label = "rain {}".format(state) if lower_label else "Rain {}".format(state)
+        if state == "stopped":
+            timestamp = self.aprsis_rain_transition_timestamp(data, state) or timestamp
+        return label, timestamp
+
+    def aprsis_rain_transition_timestamp(self, data, state):
+        """Return transition timestamp with episode context when available."""
+        if state == "stopped":
+            stopped = data.get("rain_episode_stopped_at") or data.get(
+                "rain_last_transition_at"
+            )
+            started = data.get("rain_episode_started_at") or ""
+            if stopped and started:
+                return "{}; episode started {}".format(stopped, started)
+            return stopped or ""
+        return data.get("rain_last_transition_at") or data.get(
+            "rain_episode_started_at"
+        ) or ""
+
+    def aprsis_transition_text(self, label, timestamp):
+        """Return a transition label with retained report timing when available."""
+        return "{} at {}".format(label, timestamp) if timestamp else label
+
+    def aprsis_transition_finding(self, label, timestamp):
+        """Return a report finding that can stand alone in the Reasons column."""
+        return "{} at {}".format(label, timestamp) if timestamp else label
+
+    def aprsis_has_finding_prefix(self, findings, prefixes):
+        """Return True when timestamped findings still match their base label."""
+        return any(
+            str(finding or "").startswith(prefix)
+            for finding in findings or []
+            for prefix in prefixes
+        )
+
+    def aprsis_observed_text(self, data):
+        """Return the retained first/latest APRS observation range."""
+        first = data.get("first_seen") or ""
+        last = data.get("last_seen") or ""
+        if first and last and first != last:
+            return "{} to {}".format(first, last)
+        return first or last
+
+    def noaa_reports(self, events, timestamp):
+        """Return NOAA/NWS/NHC report rows."""
+        reports = []
+        for event in events or []:
+            data = clean_noaa_data((event or {}).get("data") or {})
+            event_type = (event or {}).get("type") or ""
+            if event_type == "noaa_collector_summary":
+                report = self.noaa_collector_report(data, event, timestamp)
+            else:
+                report = self.noaa_alert_report(data, event, timestamp)
+            if report:
+                reports.append(report)
+        return reports
+
+    def noaa_collector_report(self, data, event, timestamp):
+        """Return NOAA collector-health row only when not healthy."""
+        state = str(data.get("collector_state") or "").upper()
+        if state not in ("OFFLINE", "RETRYING"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        evidence = self.clean_evidence(
+            {
+                "findings": ["NOAA collector offline"],
+                "collector_state": state,
+                "reason": data.get("reason") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning",
+            "noaa",
+            "noaa_collector_offline",
+            "NOAA feed offline",
+            data.get("reason") or "NOAA feed is offline.",
+            evidence,
+            self.score_with_recency(75, last_seen_epoch),
+            last_seen,
+            subject="NOAA collector",
+        )
+
+    def noaa_alert_report(self, data, event, timestamp):
+        """Return one NOAA alert/advisory report row."""
+        event_id = data.get("event_id") or ""
+        if not event_id and not data.get("headline") and not data.get("event"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = self.noaa_findings(data)
+        score = self.score_noaa_alert(data, findings, last_seen_epoch)
+        severity = "warning" if self.noaa_warning_findings(findings) else "info"
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "event_id": event_id,
+                "source_event_id": data.get("source_event_id") or "",
+                "event": data.get("event") or "",
+                "headline": data.get("headline") or "",
+                "severity": data.get("severity") or "",
+                "urgency": data.get("urgency") or "",
+                "certainty": data.get("certainty") or "",
+                "status": data.get("status") or "",
+                "message_type": data.get("message_type") or "",
+                "alert_kind": data.get("alert_kind") or "",
+                "area_desc": data.get("area_desc") or "",
+                "effective": data.get("effective") or "",
+                "onset": data.get("onset") or "",
+                "expires": data.get("expires") or "",
+                "ends": data.get("ends") or "",
+                "updated": data.get("updated") or "",
+                "source": data.get("source") or "",
+                "source_url": data.get("source_url") or "",
+                "update_count": data.get("update_count") or 0,
+                "first_seen": data.get("first_seen") or "",
+                "first_seen_epoch": data.get("first_seen_epoch"),
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+                "internet_fed": True,
+            }
+        )
+        return self.report(
+            timestamp,
+            severity,
+            "noaa",
+            "noaa_alert",
+            self.noaa_report_title(data),
+            self.noaa_summary_text(data),
+            evidence,
+            score,
+            last_seen,
+            subject=self.noaa_subject(data),
+        )
+
+    def noaa_findings(self, data):
+        """Return deterministic NOAA report findings."""
+        findings = []
+        kind = data.get("alert_kind") or ""
+        severity = data.get("severity") or ""
+        event = data.get("event") or data.get("headline") or ""
+        if kind == "tsunami":
+            findings.append("Tsunami hazard")
+        elif kind == "tropical":
+            findings.append("Tropical cyclone advisory")
+        elif kind == "tropical_outlook":
+            findings.append("Tropical weather outlook")
+        else:
+            findings.append("Weather hazard")
+        if str(severity).lower() in {
+            str(item or "").lower()
+            for item in self.config.get("noaa_high_severities") or []
+        }:
+            findings.append("High NOAA severity")
+        if "warning" in str(event).lower():
+            findings.append("Warning present")
+        if data.get("message_type"):
+            findings.append("NOAA {}".format(data.get("message_type")))
+        return self.unique_ordered(findings)
+
+    def noaa_warning_findings(self, findings):
+        """Return True for NOAA findings that should sort as warnings."""
+        warning_labels = {
+            "Tsunami hazard",
+            "Tropical cyclone advisory",
+            "High NOAA severity",
+            "Warning present",
+        }
+        return bool(warning_labels & set(findings or []))
+
+    def score_noaa_alert(self, data, findings, last_seen_epoch):
+        """Return attention score for a NOAA alert/advisory."""
+        score = 35
+        if "Tsunami hazard" in findings:
+            score += 45
+        if "Tropical cyclone advisory" in findings:
+            score += 30
+        if "High NOAA severity" in findings:
+            score += 30
+        if "Warning present" in findings:
+            score += 20
+        if str(data.get("urgency") or "").lower() == "immediate":
+            score += 15
+        return self.score_with_recency(score, last_seen_epoch, cap=98)
+
+    def noaa_report_title(self, data):
+        """Return NOAA report title."""
+        if data.get("alert_kind") == "tropical":
+            return "NOAA tropical advisory"
+        if data.get("alert_kind") == "tropical_outlook":
+            return "NOAA tropical outlook"
+        if data.get("alert_kind") == "tsunami":
+            return "NOAA tsunami alert"
+        return "NOAA weather alert"
+
+    def noaa_summary_text(self, data):
+        """Return compact NOAA report summary."""
+        parts = [
+            data.get("severity") or "",
+            data.get("area_desc") or "",
+            data.get("headline") if data.get("headline") != data.get("event") else "",
+            data.get("expires") and "expires {}".format(data.get("expires")),
+        ]
+        return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def noaa_subject(self, data):
+        """Return NOAA report subject."""
+        label = data.get("event") or data.get("headline") or data.get("event_id") or "NOAA"
+        return label
+
+    def usgs_reports(self, events, timestamp):
+        """Return USGS earthquake report rows."""
+        reports = []
+        for event in events or []:
+            data = clean_usgs_data((event or {}).get("data") or {})
+            event_type = (event or {}).get("type") or ""
+            if event_type == "usgs_collector_summary":
+                report = self.usgs_collector_report(data, event, timestamp)
+            else:
+                report = self.usgs_earthquake_report(data, event, timestamp)
+            if report:
+                reports.append(report)
+        return reports
+
+    def usgs_collector_report(self, data, event, timestamp):
+        """Return USGS collector-health row only when not healthy."""
+        state = str(data.get("collector_state") or "").upper()
+        if state not in ("OFFLINE", "RETRYING"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        evidence = self.clean_evidence(
+            {
+                "findings": ["USGS collector offline"],
+                "collector_state": state,
+                "reason": data.get("reason") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning",
+            "usgs",
+            "usgs_collector_offline",
+            "USGS feed offline",
+            data.get("reason") or "USGS feed is offline.",
+            evidence,
+            self.score_with_recency(75, last_seen_epoch),
+            last_seen,
+            subject="USGS collector",
+        )
+
+    def usgs_earthquake_report(self, data, event, timestamp):
+        """Return one USGS earthquake report row."""
+        event_id = data.get("event_id") or ""
+        if not event_id:
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = self.usgs_findings(data)
+        score = self.score_usgs_earthquake(data, findings, last_seen_epoch)
+        severity = "warning" if self.usgs_warning_findings(findings) else "info"
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "event_id": event_id,
+                "magnitude": data.get("magnitude"),
+                "place": data.get("place") or "",
+                "latitude": data.get("latitude"),
+                "longitude": data.get("longitude"),
+                "depth_km": data.get("depth_km"),
+                "distance_km": data.get("distance_km"),
+                "event_time": data.get("event_time") or "",
+                "updated": data.get("updated") or "",
+                "status": data.get("status") or "",
+                "felt": data.get("felt"),
+                "cdi": data.get("cdi"),
+                "mmi": data.get("mmi"),
+                "alert_color": data.get("alert_color") or "",
+                "tsunami": data.get("tsunami"),
+                "detail_url": data.get("detail_url") or "",
+                "update_count": data.get("update_count") or 0,
+                "first_seen": data.get("first_seen") or "",
+                "first_seen_epoch": data.get("first_seen_epoch"),
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+                "internet_fed": True,
+            }
+        )
+        return self.report(
+            timestamp,
+            severity,
+            "usgs",
+            "usgs_earthquake",
+            "USGS earthquake",
+            self.usgs_summary_text(data),
+            evidence,
+            score,
+            last_seen,
+            subject=self.usgs_subject(data),
+        )
+
+    def usgs_findings(self, data):
+        """Return deterministic USGS report findings."""
+        findings = ["Earthquake in configured query area"]
+        magnitude = self.to_number(data.get("magnitude")) or 0
+        distance = self.to_number(data.get("distance_km"))
+        if distance is not None and distance <= float(
+            self.config.get("usgs_nearby_radius_km", 100)
+        ):
+            findings.append("Nearby earthquake")
+        if magnitude >= float(self.config.get("usgs_warning_magnitude", 4.0)):
+            findings.append("Notable magnitude")
+        if data.get("tsunami"):
+            findings.append("Tsunami flag")
+        if data.get("alert_color"):
+            findings.append("USGS alert color {}".format(data.get("alert_color")))
+        return self.unique_ordered(findings)
+
+    def usgs_warning_findings(self, findings):
+        """Return True for USGS findings that should sort as warnings."""
+        return any(
+            str(item or "").startswith(
+                ("Nearby earthquake", "Notable magnitude", "Tsunami flag", "USGS alert color")
+            )
+            for item in findings or []
+        )
+
+    def score_usgs_earthquake(self, data, findings, last_seen_epoch):
+        """Return attention score for a USGS earthquake."""
+        magnitude = self.to_number(data.get("magnitude")) or 0
+        score = 25 + int(max(0, magnitude) * 10)
+        if "Nearby earthquake" in findings:
+            score += 20
+        if "Tsunami flag" in findings:
+            score += 35
+        alert = str(data.get("alert_color") or "").lower()
+        if alert == "yellow":
+            score += 20
+        elif alert == "orange":
+            score += 35
+        elif alert == "red":
+            score += 45
+        return self.score_with_recency(score, last_seen_epoch, cap=98)
+
+    def usgs_summary_text(self, data):
+        """Return compact USGS report summary."""
+        parts = []
+        distance = self.to_number(data.get("distance_km"))
+        if distance is not None:
+            parts.append("{:.1f} km from configured point".format(distance))
+        if data.get("depth_km") is not None:
+            parts.append("depth {} km".format(data.get("depth_km")))
+        if data.get("event_time"):
+            parts.append("event {}".format(data.get("event_time")))
+        if data.get("alert_color"):
+            parts.append("alert {}".format(data.get("alert_color")))
+        if data.get("tsunami"):
+            parts.append("tsunami flag")
+        return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def usgs_subject(self, data):
+        """Return USGS report subject."""
+        label = data.get("place") or data.get("event_id") or "earthquake"
+        magnitude = self.to_number(data.get("magnitude"))
+        if magnitude is not None:
+            return "M{:.1f} {}".format(magnitude, label)
+        return label
+
+    def swpc_reports(self, events, timestamp):
+        """Return SWPC space-weather report rows."""
+        reports = []
+        for event in events or []:
+            data = clean_swpc_data((event or {}).get("data") or {})
+            event_type = (event or {}).get("type") or ""
+            if event_type == "swpc_collector_summary":
+                report = self.swpc_collector_report(data, event, timestamp)
+            else:
+                report = self.swpc_event_report(data, event, timestamp)
+            if report:
+                reports.append(report)
+        return reports
+
+    def swpc_collector_report(self, data, event, timestamp):
+        """Return SWPC collector-health row only when not healthy."""
+        state = str(data.get("collector_state") or "").upper()
+        if state not in ("OFFLINE", "RETRYING"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        evidence = self.clean_evidence(
+            {
+                "findings": ["SWPC collector offline"],
+                "collector_state": state,
+                "reason": data.get("reason") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning",
+            "swpc",
+            "swpc_collector_offline",
+            "SWPC feed offline",
+            data.get("reason") or "SWPC feed is offline.",
+            evidence,
+            self.score_with_recency(75, last_seen_epoch),
+            last_seen,
+            subject="SWPC collector",
+        )
+
+    def swpc_event_report(self, data, event, timestamp):
+        """Return one SWPC event report row."""
+        event_id = data.get("event_id") or ""
+        if not event_id and not data.get("summary"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = self.swpc_findings(data)
+        warning = self.swpc_warning_findings(findings)
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "event_id": event_id,
+                "event_kind": data.get("event_kind") or "",
+                "event": data.get("event") or "",
+                "summary": data.get("summary") or "",
+                "scale_family": data.get("scale_family") or "",
+                "scale_value": data.get("scale_value"),
+                "scale_label": data.get("scale_label") or "",
+                "kp_index": data.get("kp_index"),
+                "xray_class": data.get("xray_class") or "",
+                "xray_flux_peak": data.get("xray_flux_peak"),
+                "event_time": data.get("event_time") or "",
+                "start_time": data.get("start_time") or "",
+                "end_time": data.get("end_time") or "",
+                "peak_time": data.get("peak_time") or "",
+                "issue_time": data.get("issue_time") or "",
+                "product_id": data.get("product_id") or "",
+                "source": data.get("source") or "",
+                "source_url": data.get("source_url") or "",
+                "update_count": data.get("update_count") or 0,
+                "first_seen": data.get("first_seen") or "",
+                "first_seen_epoch": data.get("first_seen_epoch"),
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning" if warning else "info",
+            "swpc",
+            "swpc_space_weather",
+            self.swpc_report_title(data),
+            self.swpc_summary_text(data),
+            evidence,
+            self.score_swpc_event(data, findings, last_seen_epoch),
+            last_seen,
+            subject=self.swpc_subject(data),
+        )
+
+    def swpc_findings(self, data):
+        """Return deterministic SWPC report findings."""
+        findings = []
+        kind = data.get("event_kind") or ""
+        if kind == "xray_flare":
+            findings.append("X-class solar flare")
+        elif kind == "radio_blackout":
+            findings.append("Radio blackout")
+        elif kind == "solar_radiation_storm":
+            findings.append("Solar radiation storm")
+        elif kind == "geomagnetic_storm":
+            findings.append("Geomagnetic storm")
+        elif kind == "cme_watch":
+            findings.append("CME watch/update")
+        else:
+            findings.append("SWPC product")
+        if swpc_event_is_alert(data, self.swpc_report_thresholds()):
+            findings.append("Alert threshold crossed")
+        if swpc_event_is_critical(data):
+            findings.append("Critical SWPC level")
+        return self.unique_ordered(findings)
+
+    def swpc_report_thresholds(self):
+        """Return threshold config using the names expected by SWPC helpers."""
+        return {
+            "alert_min_xray_class": self.config.get(
+                "swpc_report_xray_class", "X1.0"
+            ),
+            "alert_min_radio_blackout": self.config.get(
+                "swpc_report_radio_blackout", "R3"
+            ),
+            "alert_min_solar_radiation_storm": self.config.get(
+                "swpc_report_solar_radiation_storm", "S3"
+            ),
+            "alert_min_geomagnetic_storm": self.config.get(
+                "swpc_report_geomagnetic_storm", "G3"
+            ),
+            "alert_min_kp": self.config.get("swpc_report_kp", 7),
+        }
+
+    def swpc_warning_findings(self, findings):
+        """Return True for SWPC findings that should sort as warnings."""
+        return "Alert threshold crossed" in set(findings or [])
+
+    def score_swpc_event(self, data, findings, last_seen_epoch):
+        """Return attention score for an SWPC event."""
+        score = 30
+        if "X-class solar flare" in findings:
+            score += 35
+        if "Radio blackout" in findings:
+            score += 30
+        if "Solar radiation storm" in findings:
+            score += 25
+        if "Geomagnetic storm" in findings:
+            score += 25
+        if "CME watch/update" in findings:
+            score += 15
+        if "Alert threshold crossed" in findings:
+            score += 20
+        if "Critical SWPC level" in findings:
+            score += 15
+        kp = self.to_number(data.get("kp_index"))
+        if kp is not None:
+            score += int(max(0, kp - 4) * 5)
+        return self.score_with_recency(score, last_seen_epoch, cap=98)
+
+    def swpc_report_title(self, data):
+        """Return compact SWPC report title."""
+        return "SWPC {}".format(data.get("event") or "space-weather event")
+
+    def swpc_summary_text(self, data):
+        """Return compact SWPC report summary."""
+        parts = [
+            data.get("summary") or "",
+            data.get("xray_class") or "",
+            data.get("scale_label") or "",
+        ]
+        kp = number_or_none(data.get("kp_index"))
+        if kp is not None:
+            parts.append("Kp {:.1f}".format(kp))
+        if data.get("event_time"):
+            parts.append("event {}".format(data.get("event_time")))
+        if data.get("source"):
+            parts.append(data.get("source"))
+        return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def swpc_subject(self, data):
+        """Return SWPC report subject."""
+        parts = [
+            data.get("event") or "SWPC event",
+            data.get("xray_class") or data.get("scale_label") or "",
+        ]
+        kp = number_or_none(data.get("kp_index"))
+        if kp is not None:
+            parts.append("Kp {:.1f}".format(kp))
+        return " ".join(str(part) for part in parts if part)
+
+    def lan_reports(self, events, timestamp):
+        """Return LAN device and gateway report rows."""
+        reports = []
+        for event in events or []:
+            data = clean_lan_data((event or {}).get("data") or {})
+            event_type = (event or {}).get("type") or ""
+            if event_type == "lan_collector_summary":
+                report = self.lan_collector_report(data, event, timestamp)
+            elif event_type == "lan_gateway_summary":
+                report = self.lan_gateway_report(data, event, timestamp)
+            else:
+                report = self.lan_device_report(data, event, timestamp)
+            if report:
+                reports.append(report)
+        return reports
+
+    def lan_collector_report(self, data, event, timestamp):
+        """Return LAN collector-health row only when not healthy."""
+        state = str(data.get("collector_state") or "").upper()
+        if state not in ("OFFLINE", "RETRYING"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        evidence = self.clean_evidence(
+            {
+                "findings": ["LAN collector offline"],
+                "collector_state": state,
+                "reason": data.get("reason") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning",
+            "lan",
+            "lan_collector_offline",
+            "LAN collector offline",
+            data.get("reason") or "LAN collector is offline.",
+            evidence,
+            self.score_with_recency(75, last_seen_epoch),
+            last_seen,
+            subject="LAN collector",
+        )
+
+    def lan_gateway_report(self, data, event, timestamp):
+        """Return default-gateway LAN report rows."""
+        if not self.config.get("lan_report_gateway_changes", True):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = ["Default gateway observed"]
+        if self.to_int(data.get("change_count")):
+            findings.append("Default gateway changed")
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "subject_key": data.get("subject_key") or "",
+                "gateway_ip": data.get("gateway_ip") or "",
+                "family": data.get("family") or "",
+                "interface": data.get("interface") or "",
+                "mac": data.get("mac") or "",
+                "vendor": data.get("vendor_name") or data.get("vendor_prefix") or "",
+                "change_count": data.get("change_count") or 0,
+                "first_seen": data.get("first_seen") or "",
+                "first_seen_epoch": data.get("first_seen_epoch"),
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        score = 85 if "Default gateway changed" in findings else 55
+        return self.report(
+            timestamp,
+            "warning" if "Default gateway changed" in findings else "info",
+            "lan",
+            "lan_gateway_profile",
+            "LAN default gateway",
+            self.lan_gateway_summary_text(data, findings),
+            evidence,
+            self.score_with_recency(score, last_seen_epoch),
+            last_seen,
+            subject=self.lan_gateway_subject(data),
+        )
+
+    def lan_device_report(self, data, event, timestamp):
+        """Return LAN device report rows."""
+        if not self.config.get("lan_report_new_devices", True):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = ["LAN device observed"]
+        if data.get("gateway"):
+            findings.append("Gateway device")
+        if self.to_int(data.get("change_count")):
+            findings.append("LAN identity changed")
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "subject_key": data.get("subject_key") or "",
+                "mac": data.get("mac") or "",
+                "ips": data.get("ips") or [],
+                "hostnames": data.get("hostnames") or [],
+                "interfaces": data.get("interfaces") or [],
+                "states": data.get("states") or [],
+                "sources": data.get("sources") or [],
+                "vendor": data.get("vendor_name") or data.get("vendor_prefix") or "",
+                "gateway": data.get("gateway"),
+                "gateways": data.get("gateways") or [],
+                "observation_count": data.get("observation_count") or 0,
+                "change_count": data.get("change_count") or 0,
+                "first_seen": data.get("first_seen") or "",
+                "first_seen_epoch": data.get("first_seen_epoch"),
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        score = 45 + min(self.to_int(data.get("observation_count")), 15)
+        if "Gateway device" in findings:
+            score += 20
+        if "LAN identity changed" in findings:
+            score += 25
+        return self.report(
+            timestamp,
+            "warning" if "LAN identity changed" in findings else "info",
+            "lan",
+            "lan_device_profile",
+            "LAN device profile",
+            self.lan_device_summary_text(data, findings),
+            evidence,
+            self.score_with_recency(score, last_seen_epoch, cap=95),
+            last_seen,
+            subject=self.lan_device_subject(data),
+        )
+
+    def lan_gateway_summary_text(self, data, findings):
+        """Return compact LAN gateway summary."""
+        parts = [
+            data.get("family") or "",
+            data.get("interface") and "via {}".format(data.get("interface")),
+            data.get("vendor_name") or data.get("vendor_prefix") or "",
+            "changed" if "Default gateway changed" in findings else "",
+        ]
+        return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def lan_device_summary_text(self, data, findings):
+        """Return compact LAN device summary."""
+        parts = [
+            ", ".join(data.get("ips") or []),
+            data.get("vendor_name") or data.get("vendor_prefix") or "",
+            "gateway" if data.get("gateway") else "",
+            "{} observation(s)".format(data.get("observation_count") or 0),
+            "changed" if "LAN identity changed" in findings else "",
+        ]
+        return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def lan_gateway_subject(self, data):
+        """Return LAN gateway report subject."""
+        return "LAN gateway {}".format(data.get("gateway_ip") or data.get("subject_key") or "")
+
+    def lan_device_subject(self, data):
+        """Return LAN device report subject."""
+        label = (
+            data.get("hostname")
+            or data.get("mac")
+            or data.get("ip")
+            or data.get("subject_key")
+            or "device"
+        )
+        return "LAN {}".format(label)
 
     def privacy_reports(self, wifi, bluetooth, timestamp):
         """Return aggregate privacy-exposure rows inside Reports."""
@@ -720,8 +1991,7 @@ class ReportsBuilder:
         security_text = ""
         if encryption:
             security_text = " using {}".format(", ".join(encryption))
-        return "{} was observed on {} BSSID(s){}{}.".format(
-            ssid,
+        return "Observed on {} BSSID(s){}{}.".format(
             len(bssids),
             vendor_text,
             security_text,
@@ -1095,8 +2365,8 @@ class ReportsBuilder:
                         "wifi_monitor",
                         "wifi_client_probe_activity",
                         "Wi-Fi client probe activity in report window",
-                        "{} sent {} probe request(s)".format(
-                            mac, client.get("probe_count")
+                        "{} probe request(s)".format(
+                            client.get("probe_count")
                         ),
                         evidence,
                         62,
@@ -1113,8 +2383,7 @@ class ReportsBuilder:
                         "wifi_monitor",
                         "wifi_client_disconnect_activity",
                         "Wi-Fi disconnect activity in report window",
-                        "{} had deauth={} disassoc={}".format(
-                            mac,
+                        "deauth={}; disassoc={}".format(
                             client.get("deauth_count") or 0,
                             client.get("disassoc_count") or 0,
                         ),
@@ -1131,8 +2400,7 @@ class ReportsBuilder:
                         "wifi_monitor",
                         "wifi_client_new_recent",
                         "New Wi-Fi client activity",
-                        "{} was first seen recently at {}".format(
-                            mac,
+                        "First seen recently at {}".format(
                             self.display_time(client, "first_seen") or "unknown time",
                         ),
                         evidence,
@@ -1276,6 +2544,18 @@ class ReportsBuilder:
             ("cluster", ("cluster",)),
             ("scanner", ("scanner", "collector", "quality")),
             ("privacy", ("privacy", "exposure")),
+            ("mobile", ("mobile",)),
+            ("movement", ("moved", "movement")),
+            ("weather", ("weather",)),
+            ("rain", ("rain",)),
+            ("wind", ("wind", "gust")),
+            ("message", ("message",)),
+            ("object", ("object",)),
+            ("hazard", ("hazard", "warning present", "noaa_alert")),
+            ("earthquake", ("earthquake", "usgs_earthquake")),
+            ("tsunami", ("tsunami",)),
+            ("tropical", ("tropical", "hurricane", "cyclone")),
+            ("LAN", ("lan_", "gateway", "default gateway")),
         ]
         for label, needles in candidates:
             if any(needle in text for needle in needles):
@@ -1317,6 +2597,16 @@ class ReportsBuilder:
             return "Medium"
         if source == "rayhunter":
             return "High" if evidence.get("warning_count") else "Medium"
+        if source == "aprsis":
+            if evidence.get("weather_count") or evidence.get("position_count"):
+                return "High" if evidence.get("packet_count") else "Medium"
+            return "Medium"
+        if source in ("noaa", "usgs"):
+            return "High"
+        if source == "lan":
+            if evidence.get("mac") or evidence.get("gateway_ip"):
+                return "Medium"
+            return "Low"
         return "Medium"
 
     def unique_ordered(self, values):

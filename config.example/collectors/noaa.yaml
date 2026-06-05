@@ -1,0 +1,30 @@
+key: noaa
+order: 80
+label: NOAA
+description: Optional internet-fed NOAA/NWS/NHC hazard feed
+has_subject_history: true
+enabled: false
+
+# NOAA is an internet-fed situational-awareness collector. It polls NWS active
+# alerts for a configured point/state and optional NHC tropical cyclone feeds.
+poll_interval_sec: 300
+request_timeout_sec: 15
+user_agent: "Skannr NOAA collector"
+
+# Prefer a point query for local NWS alerts.
+latitude: 37.7749
+longitude: -122.4194
+# state: CA
+
+nws:
+  enabled: true
+  # Optional override if you want a specific NWS API URL:
+  # url: "https://api.weather.gov/alerts/active?point=37.7749,-122.4194"
+
+nhc:
+  enabled: true
+  # Available basin names: atlantic, eastern_pacific, central_pacific.
+  basins:
+    - atlantic
+    - eastern_pacific
+    - central_pacific

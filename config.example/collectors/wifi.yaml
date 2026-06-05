@@ -2,7 +2,7 @@ key: wifi
 order: 10
 label: Wi-Fi Scan
 description: Lightweight Wi-Fi access-point scanning
-has_device_history: true
+has_subject_history: true
 enabled: true
 validation_timeout_sec: 10
 # Optional ordered list. When empty, Skannr chooses the best available Wi-Fi

@@ -27,6 +27,7 @@ from flask_socketio import SocketIO
 import yaml
 from werkzeug.serving import make_server
 
+from .alerts import AlertEngine
 from .bus import EventBus, local_now
 from .collectors import disabled_collector_statuses, load_actions, load_collectors
 from .collectors.metadata import (
@@ -64,6 +65,7 @@ from .paths import (
 )
 from .persistence import load_persistence
 from .reports import ReportsBuilder, save_reports
+from .subject_history import SubjectHistoryBuilder
 
 
 def read_app_version():
@@ -80,17 +82,18 @@ APP_VERSION = read_app_version()
 
 DERIVED_REFRESH_PHASES = {
     "refresh": {
-        "refresh_base": (1, 2, "Device and Findings History"),
+        "refresh_base": (1, 2, "Subject and Findings History"),
         "refresh_derived": (2, 2, "Insights analysis and Reports"),
     },
     "repair": {
         "repair_dependents": (1, 1, "Repair dependent summaries"),
     },
     "cached": {
-        "cached_findings_history": (1, 4, "Load cached Findings History"),
-        "cached_device_history": (2, 4, "Load cached Device History"),
-        "cached_history_analysis": (3, 4, "Load cached Insights analysis"),
-        "cached_reports": (4, 4, "Load cached Reports"),
+        "cached_findings_history": (1, 5, "Load cached Findings History"),
+        "cached_subject_history": (2, 5, "Load cached Subject History"),
+        "cached_device_history": (3, 5, "Load cached Device History"),
+        "cached_history_analysis": (4, 5, "Load cached Insights analysis"),
+        "cached_reports": (5, 5, "Load cached Reports"),
     },
 }
 
@@ -238,13 +241,16 @@ runtime = {
     "loop": None,
     "config": None,
     "persistence": None,
+    "alerts": AlertEngine(),
     "findings": FindingsEngine(),
     "tasks_by_key": {},
+    "task_names": {},
     "event_log": deque(maxlen=100),
     "live_observations": {"wifi_aps": {}, "bluetooth": {}},
     "live_observations_lock": threading.Lock(),
     "sse_clients": [],
     "shutting_down": False,
+    "subject_history": None,
     "device_history": None,
     "history_analysis": None,
     "findings_history": None,
@@ -275,6 +281,12 @@ def events():
     """Stream live dashboard events without depending on an external JS client."""
     client = queue.Queue(maxsize=runtime_int("sse_queue_size", 200, minimum=1))
     runtime["sse_clients"].append(client)
+    heartbeat_sec = runtime_int("sse_heartbeat_sec", 15, minimum=1)
+    logging.info(
+        "SSE client connected active_clients=%s heartbeat_sec=%s",
+        len(runtime["sse_clients"]),
+        heartbeat_sec,
+    )
 
     # A new browser needs the same initial snapshots that the old Socket.IO
     # connect handler sent. Queue them before the generator starts yielding.
@@ -284,6 +296,7 @@ def events():
         collector_statuses(),
     )
     enqueue_sse(client, "system_status", system_status())
+    enqueue_sse(client, "alerts_snapshot", runtime["alerts"].snapshot())
     enqueue_sse(client, "findings_snapshot", runtime["findings"].snapshot())
     enqueue_sse(
         client,
@@ -301,21 +314,30 @@ def events():
         # The generator owns removal from runtime["sse_clients"] so browsers can
         # disconnect/reconnect without leaking queue objects.
         try:
-            yield ": connected\n\n"
+            yield "retry: 3000\n: connected\n\n"
             while True:
-                name, payload = client.get()
+                try:
+                    name, payload = client.get(timeout=heartbeat_sec)
+                except queue.Empty:
+                    yield ": heartbeat\n\n"
+                    continue
                 yield format_sse(name, payload)
         finally:
             try:
                 runtime["sse_clients"].remove(client)
             except ValueError:
                 pass
+            logging.info(
+                "SSE client disconnected active_clients=%s",
+                len(runtime["sse_clients"]),
+            )
 
     return Response(
         stream(),
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
@@ -326,6 +348,30 @@ def collector_control():
     """Receive Start/Stop clicks from the local browser UI."""
     on_collector_control(request.get_json(silent=True) or {})
     return {"ok": True}
+
+
+@app.route("/alerts/ack", methods=["POST"])
+def alerts_ack():
+    """Acknowledge one active alert and refresh connected dashboards."""
+    payload = request.get_json(silent=True) or {}
+    alert_id = payload.get("id")
+    if not alert_id:
+        return {"ok": False, "error": "missing alert id"}, 400
+    acked = runtime["alerts"].ack(alert_id)
+    save_alert_state(force=True)
+    alerts = runtime["alerts"].snapshot()
+    broadcast("alerts_snapshot", alerts)
+    return {"ok": True, "acked": bool(acked), "alert": acked, "alerts": alerts}
+
+
+@app.route("/alerts/ack_all", methods=["POST"])
+def alerts_ack_all():
+    """Acknowledge every active alert and refresh connected dashboards."""
+    count = runtime["alerts"].ack_all()
+    save_alert_state(force=True)
+    alerts = runtime["alerts"].snapshot()
+    broadcast("alerts_snapshot", alerts)
+    return {"ok": True, "acked": count, "alerts": alerts}
 
 
 @app.route("/ble_identify", methods=["POST"])
@@ -567,6 +613,23 @@ def device_history():
     return derived_bundle_section("device_history", window_days)
 
 
+@app.route("/subject_history", methods=["GET"])
+def subject_history():
+    """Return normalized collector subjects for the selected view window."""
+    window_days = requested_window_days()
+    return derived_bundle_section("subject_history", window_days)
+
+
+@app.route("/subject_history/refresh", methods=["POST"])
+def subject_history_refresh():
+    """Compatibility route: refresh the full derived-data bundle."""
+    return derived_response(
+        lambda: build_derived_views(requested_window_days(), force=True)[
+            "subject_history"
+        ]
+    )
+
+
 @app.route("/derived_views", methods=["GET"])
 def derived_views():
     """Return a consistent Findings/History/Observations bundle."""
@@ -668,6 +731,7 @@ def on_connect():
         collector_statuses(),
     )
     socketio.emit("system_status", system_status())
+    socketio.emit("alerts_snapshot", runtime["alerts"].snapshot())
     socketio.emit("findings_snapshot", runtime["findings"].snapshot())
     socketio.emit(
         "skannr_event",
@@ -748,54 +812,130 @@ def enqueue_sse(client, name, payload):
 
 def broadcast(name, payload):
     """Send one dashboard message over both Socket.IO and local SSE."""
-    socketio.emit(name, payload)
+    try:
+        socketio.emit(name, payload)
+    except Exception as exc:
+        logging.exception("Socket.IO broadcast failed event=%s: %s", name, exc)
     for client in list(runtime["sse_clients"]):
-        enqueue_sse(client, name, payload)
+        try:
+            enqueue_sse(client, name, payload)
+        except Exception as exc:
+            logging.exception("SSE enqueue failed event=%s: %s", name, exc)
+
+
+def event_log_context(event):
+    """Return compact event identity for exception logs."""
+    data = event.get("data") if isinstance(event, dict) else None
+    data_keys = sorted(data.keys())[:20] if isinstance(data, dict) else []
+    return {
+        "collector": event.get("collector") if isinstance(event, dict) else None,
+        "type": event.get("type") if isinstance(event, dict) else None,
+        "timestamp": event.get("timestamp") if isinstance(event, dict) else None,
+        "data_keys": data_keys,
+    }
+
+
+def process_bus_event(event):
+    """Persist, analyze, and publish one collector event."""
+    persistence = runtime.get("persistence")
+    # Periodic status/channel-hop events are derived state. Persisting every
+    # copy would bury the useful radio/BLE/Wi-Fi observations.
+    high_rate_state_event = (
+        event.get("collector") == "system" and event.get("type") == "system_status"
+    ) or (
+        event.get("collector") == "aprsis"
+        and event.get("type") == "collector_status"
+    ) or (
+        event.get("collector") == "wifi_monitor"
+        and event.get("type") == "monitor_channel_changed"
+    )
+    if persistence and not high_rate_state_event:
+        try:
+            persistence.write(event)
+        except Exception as exc:
+            logging.exception("failed to persist event: %s", exc)
+    record_live_observation(event)
+    runtime["event_log"].appendleft(event)
+    broadcast("skannr_event", event)
+    try:
+        alert_events = runtime["alerts"].process(event)
+    except Exception as exc:
+        logging.exception("alert processing failed: %s", exc)
+        alert_events = []
+    for alert_event in alert_events:
+        if persistence:
+            try:
+                persistence.write(alert_event)
+            except Exception as exc:
+                logging.exception("failed to persist alert: %s", exc)
+        broadcast("skannr_event", alert_event)
+        broadcast("alerts_snapshot", runtime["alerts"].snapshot())
+    save_alert_state()
+    # Findings are generated synchronously from each event so the browser and
+    # JSONL logs see the finding immediately after the source event.
+    for finding in runtime["findings"].process(event):
+        finding_event = {
+            "collector": "findings",
+            "type": "finding",
+            "severity": finding["severity"],
+            "timestamp": finding["timestamp"],
+            "timestamp_epoch": finding.get("timestamp_epoch"),
+            "data": finding,
+        }
+        if persistence:
+            try:
+                persistence.write(finding_event)
+            except Exception as exc:
+                logging.exception("failed to persist finding: %s", exc)
+        broadcast("skannr_event", finding_event)
+    broadcast(
+        "collector_status",
+        collector_statuses(),
+    )
+    broadcast("system_status", system_status())
 
 
 async def consume_events(bus):
     """Fan out collector events to persistence and all connected browsers."""
     while True:
         event = await bus.next()
-        persistence = runtime.get("persistence")
-        # Periodic status/channel-hop events are derived state. Persisting every
-        # copy would bury the useful radio/BLE/Wi-Fi observations.
-        high_rate_state_event = (
-            event.get("collector") == "system" and event.get("type") == "system_status"
-        ) or (
-            event.get("collector") == "wifi_monitor"
-            and event.get("type") == "monitor_channel_changed"
+        try:
+            process_bus_event(event)
+        except Exception as exc:
+            logging.exception(
+                "event fan-out failed event=%s: %s",
+                event_log_context(event),
+                exc,
+            )
+
+
+def runtime_task_done(task):
+    """Log unexpected exits from collector and runtime background tasks."""
+    name = runtime["task_names"].pop(task, "background task")
+    if runtime.get("shutting_down"):
+        return
+    if task.cancelled():
+        logging.info("background task cancelled name=%s", name)
+        return
+    exc = task.exception()
+    if exc:
+        logging.error(
+            "background task failed name=%s",
+            name,
+            exc_info=(type(exc), exc, exc.__traceback__),
         )
-        if persistence and not high_rate_state_event:
-            try:
-                persistence.write(event)
-            except Exception as exc:
-                logging.exception("failed to persist event: %s", exc)
-        record_live_observation(event)
-        runtime["event_log"].appendleft(event)
-        broadcast("skannr_event", event)
-        # Findings are generated synchronously from each event so the browser and
-        # JSONL logs see the finding immediately after the source event.
-        for finding in runtime["findings"].process(event):
-            finding_event = {
-                "collector": "findings",
-                "type": "finding",
-                "severity": finding["severity"],
-                "timestamp": finding["timestamp"],
-                "timestamp_epoch": finding.get("timestamp_epoch"),
-                "data": finding,
-            }
-            if persistence:
-                try:
-                    persistence.write(finding_event)
-                except Exception as exc:
-                    logging.exception("failed to persist finding: %s", exc)
-            broadcast("skannr_event", finding_event)
-        broadcast(
-            "collector_status",
-            collector_statuses(),
-        )
-        broadcast("system_status", system_status())
+    else:
+        logging.warning("background task exited unexpectedly name=%s", name)
+
+
+def track_runtime_task(task, name, key=None):
+    """Register a background task so silent collector exits are visible."""
+    runtime["task_names"][task] = name
+    runtime["tasks"].append(task)
+    if key:
+        runtime["tasks_by_key"][key] = task
+    task.add_done_callback(runtime_task_done)
+    return task
 
 
 async def start_collectors(config, bus):
@@ -831,13 +971,18 @@ async def start_collectors(config, bus):
             continue
         # Python 3.6 lacks asyncio.create_task(), so use the loop method for Pi
         # installations that still run older system Python.
-        task = loop.create_task(collector.start())
-        runtime["tasks"].append(task)
-        runtime["tasks_by_key"][collector.config_key] = task
+        track_runtime_task(
+            loop.create_task(collector.start()),
+            "collector:{}".format(collector.config_key),
+            collector.config_key,
+        )
     # One task consumes the bus and pushes to browsers; another sends periodic
     # system snapshots so static probe status stays fresh.
-    runtime["tasks"].append(loop.create_task(consume_events(bus)))
-    runtime["tasks"].append(loop.create_task(publish_system_status(bus)))
+    track_runtime_task(loop.create_task(consume_events(bus)), "event fan-out")
+    track_runtime_task(
+        loop.create_task(publish_system_status(bus)),
+        "system status publisher",
+    )
     await bus.publish(
         {
             "collector": "system",
@@ -868,9 +1013,11 @@ async def start_collector(key):
                 }
             )
             return
-        task = loop.create_task(collector.start())
-        runtime["tasks"].append(task)
-        runtime["tasks_by_key"][key] = task
+        track_runtime_task(
+            loop.create_task(collector.start()),
+            "collector:{}".format(key),
+            key,
+        )
         await runtime["bus"].publish(
             {
                 "collector": "system",
@@ -1174,51 +1321,6 @@ def read_findings_history(window_days):
             ),
         },
     }
-
-
-def read_rayhunter_status_history(window_days):
-    """Return the latest Rayhunter status event for Reports.
-
-    Rayhunter is not a Wi-Fi/Bluetooth device, so it does not belong in Device
-    History. Reports only need the most recent endpoint state and compact
-    counters for the selected window.
-    """
-    log_dir = configured_log_dir()
-    latest = None
-    latest_epoch = None
-    records_read = 0
-    warning_events = 0
-    for event in read_jsonl_events(log_dir, "rayhunter", window_days):
-        event_type = event.get("type")
-        if event_type not in (
-            "rayhunter_status",
-            "collector_offline",
-            "collector_retrying",
-        ):
-            continue
-        records_read += 1
-        data = event.get("data") or {}
-        try:
-            warning_count = int(float(data.get("warning_count") or 0))
-        except (TypeError, ValueError):
-            warning_count = 0
-        if event_type != "rayhunter_status" or warning_count > 0:
-            warning_events += 1
-        epoch = event.get("timestamp_epoch") or timestamp_epoch(
-            event.get("timestamp")
-        )
-        if epoch is None:
-            continue
-        if latest_epoch is None or epoch >= latest_epoch:
-            latest = copy.deepcopy(event)
-            latest_epoch = epoch
-    if not latest:
-        return []
-    latest.setdefault("data", {})
-    latest["data"] = clean_rayhunter_data(latest["data"])
-    latest["data"]["events_in_window"] = records_read
-    latest["data"]["warning_events_in_window"] = warning_events
-    return [latest]
 
 
 def refresh_findings_history(window_days):
@@ -1582,16 +1684,16 @@ def build_derived_views_unlocked(window_days="default", force=False):
     mode = "refresh" if force else "cached"
     logging.info("derived views %s started; window=%s", mode, window_days)
     if force:
-        # Device History is the dependency for both analysis and reports. Build
-        # it once, while Findings History can refresh independently. Once
-        # Device History is available, Insights analysis and Reports can also
-        # be generated in parallel from the same immutable summary.
+        # Subject History is the dependency for both analysis and reports. Build
+        # it once, while Findings History can refresh independently. Once Subject
+        # History is available, Insights analysis and Reports can also be
+        # generated in parallel from the same immutable summary.
         run_parallel_derived_stages(
             "refresh_base",
             [
                 (
-                    "device_history",
-                    lambda: refresh_device_history(window_days, update_analysis=False),
+                    "subject_history",
+                    lambda: refresh_subject_history(window_days),
                 ),
                 (
                     "findings_history",
@@ -1611,6 +1713,13 @@ def build_derived_views_unlocked(window_days="default", force=False):
             "cached_findings_history",
             lambda: cached_derived_view(
                 "findings_history", load_cached_findings_history, window_days
+            ),
+            mode,
+        )
+        timed_derived_stage(
+            "cached_subject_history",
+            lambda: cached_derived_view(
+                "subject_history", load_cached_subject_history, window_days
             ),
             mode,
         )
@@ -1651,6 +1760,9 @@ def build_derived_views_unlocked(window_days="default", force=False):
             "findings": add_refresh_metadata(
                 runtime["findings_history"], generated_at, generated_at_epoch
             ),
+            "subject_history": add_refresh_metadata(
+                runtime["subject_history"], generated_at, generated_at_epoch
+            ),
             "device_history": add_refresh_metadata(
                 runtime["device_history"], generated_at, generated_at_epoch
             ),
@@ -1671,15 +1783,15 @@ def build_derived_views_unlocked(window_days="default", force=False):
 
 
 def refresh_stale_cached_dependents(window_days):
-    """Repair cached analysis/report summaries that lag Device History.
+    """Repair cached analysis/report summaries that lag Subject History.
 
     A cached `/derived_views` request should not read raw logs, but it can safely
-    rebuild summaries derived from the already-materialized Device History. This
+    rebuild summaries derived from already-materialized Subject History. This
     keeps Reports/Insights from presenting older generation times than the
-    Device History snapshot they are supposed to describe.
+    subject snapshot they are supposed to describe.
     """
     with runtime["derived_cache_lock"]:
-        history = runtime.get("device_history") or {}
+        history = runtime.get("subject_history") or {}
     if not isinstance(history, dict) or history.get("empty"):
         return
     history_epoch = summary_generated_epoch(history)
@@ -1725,16 +1837,16 @@ def refresh_stale_cached_dependents(window_days):
 
 
 def refresh_pending_raw_logs(window_days):
-    """Run a real refresh when cached Device History is behind raw JSONL logs."""
+    """Run a real refresh when cached Subject History is behind raw JSONL logs."""
     with runtime["derived_cache_lock"]:
-        history = runtime.get("device_history") or {}
-    if not device_history_has_pending_jsonl(history):
+        history = runtime.get("subject_history") or {}
+    if not subject_history_has_pending_jsonl(history):
         return None
     if recent_successful_derived_refresh():
         logging.info(
             "derived cached load found pending raw JSONL but recent refresh "
             "completed; deferring to normal refresh interval; window=%s "
-            "history_generated=%s",
+            "subject_history_generated=%s",
             window_days,
             history.get("generated_at") or "",
         )
@@ -1752,8 +1864,8 @@ def refresh_pending_raw_logs(window_days):
         )
         return active_derived_operation_response()
     logging.info(
-        "derived cached load found raw JSONL beyond Device History checkpoint; "
-        "starting background refresh; window=%s history_generated=%s",
+        "derived cached load found raw JSONL beyond Subject History checkpoint; "
+        "starting background refresh; window=%s subject_history_generated=%s",
         window_days,
         history.get("generated_at") or "",
     )
@@ -1805,13 +1917,13 @@ def pending_raw_log_refresh_cooldown_sec():
     return max(int(minutes * 60), 60)
 
 
-def device_history_has_pending_jsonl(history):
+def subject_history_has_pending_jsonl(history):
     """Return True when collector JSONL files contain unmaterialized bytes."""
     if not isinstance(history, dict) or history.get("empty"):
         return raw_history_files_have_bytes()
     checkpoint = history.get("checkpoint") or {}
     current = current_jsonl_checkpoint(
-        configured_log_dir(), DeviceHistoryBuilder.COLLECTORS
+        configured_log_dir(), SubjectHistoryBuilder.COLLECTORS
     )
     if not has_jsonl_checkpoint(history):
         return checkpoint_has_any_bytes(current)
@@ -1819,9 +1931,9 @@ def device_history_has_pending_jsonl(history):
 
 
 def raw_history_files_have_bytes():
-    """Return True when any retained Device History collector log has content."""
+    """Return True when any retained subject-history collector log has content."""
     checkpoint = current_jsonl_checkpoint(
-        configured_log_dir(), DeviceHistoryBuilder.COLLECTORS
+        configured_log_dir(), SubjectHistoryBuilder.COLLECTORS
     )
     return checkpoint_has_any_bytes(checkpoint)
 
@@ -1854,14 +1966,14 @@ def checkpoint_has_pending_bytes(previous, current):
 
 
 def repair_stale_cached_dependents_unlocked(window_days, history_epoch):
-    """Rebuild stale derived summaries from the cached Device History."""
+    """Rebuild stale derived summaries from cached Subject History."""
     with runtime["derived_cache_lock"]:
-        history = runtime.get("device_history") or {}
+        history = runtime.get("subject_history") or {}
         analysis = runtime.get("history_analysis") or {}
     if dependent_summary_is_stale(analysis, history_epoch, window_days):
         logging.info(
             "derived cached repair refreshing history_analysis; "
-            "history_generated=%s analysis_generated=%s",
+            "subject_history_generated=%s analysis_generated=%s",
             history.get("generated_at") or "",
             (analysis or {}).get("generated_at") or "",
         )
@@ -1871,7 +1983,7 @@ def repair_stale_cached_dependents_unlocked(window_days, history_epoch):
     if dependent_summary_is_stale(reports, history_epoch, window_days):
         logging.info(
             "derived cached repair refreshing reports; "
-            "history_generated=%s reports_generated=%s "
+            "subject_history_generated=%s reports_generated=%s "
             "reports_history_generated=%s",
             history.get("generated_at") or "",
             (reports or {}).get("generated_at") or "",
@@ -1881,7 +1993,7 @@ def repair_stale_cached_dependents_unlocked(window_days, history_epoch):
 
 
 def dependent_summary_is_stale(summary, history_epoch, window_days):
-    """Return True when a cached summary no longer matches Device History."""
+    """Return True when a cached summary no longer matches Subject History."""
     if not isinstance(summary, dict):
         return True
     if summary.get("empty") or summary.get("empty_reason"):
@@ -2118,6 +2230,18 @@ OBSERVATION_BROWSER_KEYS = {
     "type",
 }
 
+SUBJECT_BROWSER_KEYS = {
+    "collector",
+    "data",
+    "first_seen",
+    "first_seen_epoch",
+    "last_seen",
+    "last_seen_epoch",
+    "subject",
+    "subject_id",
+    "subject_type",
+}
+
 
 def compact_derived_bundle_for_browser(bundle):
     """Return the derived bundle shape needed by the browser.
@@ -2133,6 +2257,9 @@ def compact_derived_bundle_for_browser(bundle):
         return bundle
     compact = dict(bundle)
     compact["findings"] = compact_findings_for_browser(bundle.get("findings"))
+    compact["subject_history"] = compact_subject_history_for_browser(
+        bundle.get("subject_history")
+    )
     compact["device_history"] = compact_device_history_for_browser(
         bundle.get("device_history"), bundle.get("reports")
     )
@@ -2189,6 +2316,30 @@ def compact_reports_for_browser(summary):
         for item in (summary or {}).get("reports") or []
         if isinstance(item, dict)
     ]
+    return output
+
+
+def compact_subject_history_for_browser(summary):
+    """Keep normalized subject rows while dropping durable direct observations."""
+    output = compact_summary_top_level(summary)
+    if not isinstance(output, dict):
+        return output
+    row_limit = max_history_payload_rows()
+    subjects = [
+        item
+        for item in (summary or {}).get("subjects") or []
+        if isinstance(item, dict)
+    ]
+    output["subjects"] = [
+        compact_record_for_browser(item, SUBJECT_BROWSER_KEYS)
+        for item in subjects[:row_limit]
+    ]
+    output["subject_counts"] = (summary or {}).get("subject_counts") or {
+        "total": 0,
+        "by_collector": {},
+        "by_type": {},
+    }
+    output["total_subjects"] = len(subjects)
     return output
 
 
@@ -2565,6 +2716,11 @@ def device_history_path():
     return os.path.join(configured_log_dir(), "device_history", "device_history.json")
 
 
+def subject_history_path():
+    """Return the persisted Subject History summary path."""
+    return os.path.join(configured_log_dir(), "device_history", "subject_history.json")
+
+
 def findings_history_path():
     """Return the materialized Findings summary path."""
     return os.path.join(configured_log_dir(), "device_history", "findings_history.json")
@@ -2578,6 +2734,37 @@ def history_analysis_path():
 def reports_path():
     """Return the persisted report summary path."""
     return os.path.join(configured_log_dir(), "device_history", "reports.json")
+
+
+def alert_state_path():
+    """Return the persisted live alert state path."""
+    return os.path.join(configured_log_dir(), "alerts_state.json")
+
+
+def load_alert_state():
+    """Restore active alert ACK/dedupe state from the previous process."""
+    state = read_json_file(alert_state_path())
+    if isinstance(state, dict):
+        runtime["alerts"].load_state(state)
+        logging.info(
+            "loaded alert state path=%s active=%s",
+            alert_state_path(),
+            len(runtime["alerts"].active),
+        )
+
+
+def save_alert_state(force=False):
+    """Persist live alert ACK/dedupe state when it changed."""
+    alerts = runtime.get("alerts")
+    if not alerts:
+        return
+    if not force and not alerts.dirty:
+        return
+    try:
+        save_json_atomic(alert_state_path(), alerts.export_state())
+        alerts.dirty = False
+    except OSError as exc:
+        logging.exception("failed to persist alert state: %s", exc)
 
 
 def read_json_file(path):
@@ -2621,8 +2808,69 @@ def empty_findings_history(window_days):
     }
 
 
+def load_cached_subject_history(window_days):
+    """Load materialized Subject History without raw-log work."""
+    summary = read_json_file(subject_history_path())
+    if isinstance(summary, dict):
+        summary.setdefault("window", view_window_metadata(None))
+        summary.setdefault("generated_at_epoch", now_epoch())
+        summary.setdefault("generated_at", local_now(summary["generated_at_epoch"]))
+        summary["cached"] = True
+        # Subject History is persisted as an all-retained materialized summary;
+        # display_summary derives the selected view window without rereading logs.
+        return SubjectHistoryBuilder(
+            configured_log_dir(),
+            state_path=subject_history_path(),
+            device_history_state_path=device_history_path(),
+            window_days=window_days,
+        ).display_summary(summary, window_days)
+    return empty_subject_history(window_days)
+
+
+def empty_subject_history(window_days):
+    """Return an empty Subject History summary when no cache exists."""
+    generated_at_epoch = now_epoch()
+    return {
+        "schema": "subject_history.v1",
+        "generated_at": local_now(generated_at_epoch),
+        "generated_at_epoch": generated_at_epoch,
+        "cached": True,
+        "empty": True,
+        "log_dir": configured_log_dir(),
+        "state_path": subject_history_path(),
+        "device_history_state_path": device_history_path(),
+        "window": view_window_metadata(window_days),
+        "files_read": 0,
+        "records_read": 0,
+        "wifi": {"access_points": [], "clients": []},
+        "ble": {"devices": []},
+        "bluetooth": {"devices": []},
+        "aprsis": [],
+        "rayhunter": [],
+        "rtlsdr": [],
+        "noaa": [],
+        "usgs": [],
+        "swpc": [],
+        "lan": [],
+        "subjects": [],
+        "subject_counts": {
+            "total": 0,
+            "by_collector": {},
+            "by_type": {},
+        },
+    }
+
+
 def load_cached_device_history(window_days):
     """Load persisted Device History without falling back to raw-log parsing."""
+    with runtime["derived_cache_lock"]:
+        subject_history = runtime.get("subject_history")
+    if (
+        isinstance(subject_history, dict)
+        and not subject_history.get("empty")
+        and summary_matches_window(subject_history, window_days)
+    ):
+        return device_history_from_subject_history(subject_history, window_days)
     summary = read_json_file(device_history_path())
     if isinstance(summary, dict):
         summary.setdefault("window", view_window_metadata(None))
@@ -2636,6 +2884,56 @@ def load_cached_device_history(window_days):
         output["cached"] = True
         return output
     return empty_device_history(window_days)
+
+
+def device_history_from_subject_history(subject_history, window_days):
+    """Return the compatibility Device History view from Subject History."""
+    if not isinstance(subject_history, dict) or subject_history.get("empty"):
+        return empty_device_history(window_days)
+    output = {
+        key: value
+        for key, value in subject_history.items()
+        if key
+        not in (
+            "schema",
+            "aprsis",
+            "rayhunter",
+            "rtlsdr",
+            "noaa",
+            "usgs",
+            "swpc",
+            "lan",
+            "subjects",
+            "subject_counts",
+        )
+    }
+    output["state_path"] = device_history_path()
+    output["subject_history_state_path"] = subject_history.get("state_path")
+    output["window"] = view_window_metadata(window_days)
+    output["wifi"] = subject_history.get("wifi") or {
+        "access_points": [],
+        "clients": [],
+    }
+    output["ble"] = subject_history.get("ble") or {"devices": []}
+    output["bluetooth"] = subject_history.get("bluetooth") or output["ble"]
+    return output
+
+
+def analysis_history_from_subject_history(subject_history, window_days):
+    """Return the Device History compatibility input used by Insights."""
+    return device_history_from_subject_history(subject_history, window_days)
+
+
+def reports_history_from_subject_history(subject_history, window_days):
+    """Return the subject-based history contract consumed by Reports."""
+    if not isinstance(subject_history, dict) or subject_history.get("empty"):
+        return {}
+    history = dict(subject_history)
+    history["subject_history"] = subject_history
+    history["device_history"] = device_history_from_subject_history(
+        subject_history, window_days
+    )
+    return history
 
 
 def empty_device_history(window_days):
@@ -2658,7 +2956,7 @@ def empty_device_history(window_days):
 
 
 def load_cached_history_analysis(window_days):
-    """Load persisted analysis without triggering a Device History refresh."""
+    """Load persisted analysis without triggering a Subject History refresh."""
     analysis = read_json_file(history_analysis_path())
     if isinstance(analysis, dict):
         analysis.setdefault("window", view_window_metadata(None))
@@ -2993,23 +3291,27 @@ def format_log_epoch(epoch):
     return local_now(value) if value is not None else "none"
 
 
-def refresh_device_history(window_days="default", update_analysis=True):
-    """Build and cache device history from retained raw JSONL logs."""
+def refresh_subject_history(window_days="default"):
+    """Build Subject History and its Device History compatibility view."""
     window_days = resolve_window_days(window_days)
     log_dir = configured_log_dir()
-    builder = DeviceHistoryBuilder(log_dir, window_days=window_days)
+    device_builder = DeviceHistoryBuilder(
+        log_dir,
+        state_path=device_history_path(),
+        window_days=window_days,
+    )
     # Build the all-retained materialized summary once. Live observations are
     # applied before persisting so refresh does not rewrite the large summary
     # twice on small Pis.
     started = time.monotonic()
-    full_summary = builder.build_summary()
+    full_device_summary = device_builder.build_summary()
     logging.info(
         "derived device_history build_summary finished elapsed=%.2fs",
         time.monotonic() - started,
     )
     overlay_started = time.monotonic()
-    full_summary, overlay_stats = apply_live_observations_to_history(
-        full_summary,
+    full_device_summary, overlay_stats = apply_live_observations_to_history(
+        full_device_summary,
         copy_summary=False,
     )
     logging.info(
@@ -3044,8 +3346,8 @@ def refresh_device_history(window_days="default", update_analysis=True):
             format_log_epoch(overlay_stats.get("newest_history_bluetooth_epoch")),
         )
     prune_started = time.monotonic()
-    full_summary, pruned_bluetooth = builder.prune_low_value_bluetooth_devices(
-        full_summary
+    full_device_summary, pruned_bluetooth = (
+        device_builder.prune_low_value_bluetooth_devices(full_device_summary)
     )
     logging.info(
         "derived device_history prune finished elapsed=%.2fs pruned_bluetooth=%s",
@@ -3054,35 +3356,78 @@ def refresh_device_history(window_days="default", update_analysis=True):
     )
     try:
         save_started = time.monotonic()
-        save_json_file(device_history_path(), full_summary)
+        save_json_file(device_history_path(), full_device_summary)
         logging.info(
             "derived device_history save finished elapsed=%.2fs",
             time.monotonic() - save_started,
         )
     except OSError as exc:
         logging.exception("failed to persist device history: %s", exc)
-    display_started = time.monotonic()
-    display_summary = builder.display_summary(full_summary, window_days)
+
+    subject_builder = SubjectHistoryBuilder(
+        log_dir,
+        state_path=subject_history_path(),
+        device_history_state_path=device_history_path(),
+        window_days=window_days,
+    )
+    subject_started = time.monotonic()
+    full_subject_summary = subject_builder.build_summary(full_device_summary)
     logging.info(
-        "derived device_history display_summary finished elapsed=%.2fs",
+        "derived subject_history build_summary finished elapsed=%.2fs subjects=%s",
+        time.monotonic() - subject_started,
+        (full_subject_summary.get("subject_counts") or {}).get("total", 0),
+    )
+    try:
+        save_started = time.monotonic()
+        save_json_file(subject_history_path(), full_subject_summary)
+        logging.info(
+            "derived subject_history save finished elapsed=%.2fs",
+            time.monotonic() - save_started,
+        )
+    except OSError as exc:
+        logging.exception("failed to persist subject history: %s", exc)
+
+    display_started = time.monotonic()
+    subject_display = subject_builder.display_summary(
+        full_subject_summary, window_days
+    )
+    device_display = device_history_from_subject_history(
+        subject_display, window_days
+    )
+    logging.info(
+        "derived subject_history display_summary finished elapsed=%.2fs",
         time.monotonic() - display_started,
     )
     with runtime["derived_cache_lock"]:
-        runtime["device_history"] = display_summary
+        runtime["subject_history"] = subject_display
+        runtime["device_history"] = device_display
+    return subject_display
+
+
+def refresh_device_history(window_days="default", update_analysis=True):
+    """Compatibility wrapper: Device History is derived from Subject History."""
+    window_days = resolve_window_days(window_days)
+    subject_history = refresh_subject_history(window_days)
+    display_summary = device_history_from_subject_history(
+        subject_history, window_days
+    )
     if update_analysis:
         refresh_history_analysis(window_days)
     return display_summary
 
 
 def refresh_history_analysis(window_days="default"):
-    """Analyze the cached Device History summary and persist observations."""
+    """Analyze cached Subject History through the Device History compatibility view."""
     window_days = resolve_window_days(window_days)
     with runtime["derived_cache_lock"]:
-        history = runtime.get("device_history")
-    if history is None or not summary_matches_window(history, window_days):
-        # Analysis depends on Device History. Rebuild only that dependency when
+        subject_history = runtime.get("subject_history")
+    if subject_history is None or not summary_matches_window(
+        subject_history, window_days
+    ):
+        # Analysis depends on Subject History. Rebuild only that dependency when
         # the current cached history belongs to another View window.
-        history = refresh_device_history(window_days, update_analysis=False)
+        subject_history = refresh_subject_history(window_days)
+    history = analysis_history_from_subject_history(subject_history, window_days)
     if history is None:
         generated_at_epoch = now_epoch()
         return {
@@ -3124,21 +3469,16 @@ def refresh_history_analysis(window_days="default"):
 
 
 def refresh_reports(window_days="default"):
-    """Generate report-style summaries from the cached Device History."""
+    """Generate report-style summaries from cached Subject History."""
     window_days = resolve_window_days(window_days)
     with runtime["derived_cache_lock"]:
-        history = runtime.get("device_history")
-    if history is None or not summary_matches_window(history, window_days):
-        history = refresh_device_history(window_days, update_analysis=False)
+        subject_history = runtime.get("subject_history")
+    if subject_history is None or not summary_matches_window(
+        subject_history, window_days
+    ):
+        subject_history = refresh_subject_history(window_days)
     config = runtime.get("config") or {}
-    history = dict(history or {})
-    rayhunter_started = time.monotonic()
-    history["rayhunter"] = read_rayhunter_status_history(window_days)
-    logging.info(
-        "derived rayhunter status read finished elapsed=%.2fs events=%s",
-        time.monotonic() - rayhunter_started,
-        len(history.get("rayhunter") or []),
-    )
+    history = reports_history_from_subject_history(subject_history, window_days)
     builder = ReportsBuilder(config.get("reports", {}), window_days=window_days)
     build_started = time.monotonic()
     report = builder.build(history or {})
@@ -3169,8 +3509,15 @@ def run_loop(config):
     runtime["loop"] = loop
     bus = EventBus()
     runtime["bus"] = bus
-    loop.run_until_complete(start_collectors(config, bus))
-    loop.run_forever()
+    logging.info("collector event loop starting")
+    try:
+        loop.run_until_complete(start_collectors(config, bus))
+        loop.run_forever()
+    except Exception as exc:
+        logging.exception("collector event loop failed: %s", exc)
+        raise
+    finally:
+        logging.info("collector event loop stopped")
 
 
 async def shutdown_runtime():
@@ -3196,6 +3543,7 @@ async def shutdown_runtime():
         task.cancel()
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
+    save_alert_state(force=True)
     loop = runtime.get("loop")
     if loop and loop.is_running():
         loop.call_soon(loop.stop)
@@ -3278,12 +3626,45 @@ def open_debug_log_window(log_path):
     )
 
 
+def log_aprsis_config_summary(config):
+    """Log APRS-IS config source without exposing passcodes."""
+    aprsis = ((config or {}).get("collectors") or {}).get("aprsis") or {}
+    if not aprsis:
+        logging.info("Loaded APRS-IS config: not configured")
+        return
+    feeds = []
+    for feed in aprsis.get("feeds") or []:
+        if not isinstance(feed, dict):
+            continue
+        feeds.append(
+            {
+                "name": feed.get("name") or "",
+                "role": feed.get("role") or "",
+                "host": feed.get("host") or "",
+                "port": feed.get("port") or "",
+                "filter": feed.get("filter") or "",
+                "enforce_radius": bool(feed.get("enforce_radius")),
+            }
+        )
+    logging.info(
+        "Loaded APRS-IS config: file=%s enabled=%s feed_count=%s feeds=%s "
+        "top_level_host=%s top_level_filter_set=%s",
+        aprsis.get("config_file") or "",
+        aprsis.get("enabled"),
+        len(feeds),
+        feeds,
+        aprsis.get("host") or "",
+        bool(aprsis.get("filter")),
+    )
+
+
 def main():
     """Configure logging/persistence, start collectors, and serve the UI."""
     args = parse_args()
     config = load_config(args.config)
     runtime["config"] = config
     runtime["event_log"] = deque(maxlen=runtime_int("event_log_maxlen", 100, minimum=1))
+    runtime["alerts"] = AlertEngine(config.get("alerts", {}))
     runtime["findings"] = FindingsEngine(config.get("findings", {}))
     log_dir = configured_log_dir()
     os.makedirs(log_dir, exist_ok=True)
@@ -3300,6 +3681,8 @@ def main():
     if args.debug:
         logging.info("debug logging enabled; log_path=%s", log_path)
         open_debug_log_window(log_path)
+    load_alert_state()
+    log_aprsis_config_summary(config)
     runtime["persistence"] = load_persistence(config)
     bootstrap_findings()
     # Seed recent device identities from the materialized summary so a restart

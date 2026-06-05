@@ -115,6 +115,127 @@ h3 {
   background: var(--ok);
 }
 
+.tab-alert-count {
+  display: none;
+  min-width: 18px;
+  min-height: 18px;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--warn);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 16px;
+  text-align: center;
+}
+
+.tab-alert-count:not(:empty) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tab-alert-count.critical {
+  background: var(--alert);
+}
+
+.global-alerts {
+  display: grid;
+  gap: 6px;
+  padding: 10px 20px;
+  background: #fff7ed;
+  border-bottom: 1px solid #f1c99a;
+}
+
+.global-alert {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  border-left: 4px solid var(--warn);
+  border-radius: 4px;
+  background: #fff;
+  padding: 8px 10px;
+  color: var(--text);
+}
+
+.global-alert-critical {
+  border-left-color: var(--alert);
+}
+
+.global-alert-level {
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.global-alert-critical .global-alert-level {
+  color: var(--alert);
+}
+
+.global-alert-text,
+.global-alert-meta {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.global-alert-text {
+  font-weight: 650;
+}
+
+.global-alert-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.global-alert-actions {
+  display: inline-flex;
+  gap: 6px;
+  justify-content: end;
+}
+
+.global-alert-actions button,
+#alerts-list button {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.global-alert-actions button:hover,
+#alerts-list button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.alert-detail-items a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+@media (max-width: 700px) {
+  .global-alert {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .global-alert-meta,
+  .global-alert-actions {
+    grid-column: 2;
+  }
+
+  .global-alert-actions {
+    justify-content: start;
+  }
+}
+
 .subtabs {
   display: flex;
   flex-wrap: wrap;
@@ -256,6 +377,7 @@ main {
   color: var(--accent);
   font-weight: 650;
   margin: 10px 0;
+  white-space: pre-line;
 }
 
 .status-strip.ok {
@@ -364,9 +486,7 @@ table {
   white-space: nowrap;
 }
 
-.reports-table .report-col-generated,
-.reports-table .report-col-source,
-.reports-table .report-col-type {
+.reports-table .report-col-source {
   width: 1%;
   white-space: nowrap;
 }
@@ -389,18 +509,44 @@ table {
 }
 
 .reports-table .report-col-reasons {
-  min-width: 150px;
-  width: 150px;
+  min-width: 120px;
+  width: 120px;
 }
 
 .reports-table .report-col-summary {
-  min-width: 220px;
-  width: 24%;
+  min-width: 180px;
+  width: 18%;
 }
 
 .reports-table .report-col-evidence {
-  min-width: 170px;
-  max-width: 260px;
+  min-width: 420px;
+  max-width: none;
+  width: 46%;
+}
+
+.aprsis-events-table th:nth-child(2),
+.aprsis-events-table td:nth-child(2) {
+  min-width: 11ch;
+  width: 11ch;
+  white-space: nowrap;
+}
+
+.aprsis-events-table th:nth-child(3),
+.aprsis-events-table td:nth-child(3) {
+  min-width: 13ch;
+  width: 13ch;
+  white-space: nowrap;
+}
+
+.aprsis-events-table th:nth-child(6),
+.aprsis-events-table td:nth-child(6) {
+  max-width: 30ch;
+  width: 22%;
+}
+
+.aprsis-events-table th:nth-child(8),
+.aprsis-events-table td:nth-child(8) {
+  max-width: 26ch;
   width: 18%;
 }
 
@@ -472,10 +618,21 @@ table {
   overflow-wrap: anywhere;
 }
 
+.evidence-list dd.evidence-nowrap {
+  overflow-wrap: normal;
+  white-space: nowrap;
+}
+
 .collector-health-table th:nth-child(5),
 .collector-health-table td:nth-child(5) {
   min-width: 82px;
   width: 82px;
+  white-space: nowrap;
+}
+
+.collector-health-table th:nth-child(2),
+.collector-health-table td:nth-child(2) {
+  min-width: 10ch;
   white-space: nowrap;
 }
 
@@ -488,6 +645,60 @@ table {
 
 .collector-health-table td:nth-child(8) button {
   min-width: 58px;
+}
+
+.alerts-table th:nth-child(1),
+.alerts-table td:nth-child(1) {
+  min-width: 9ch;
+  white-space: nowrap;
+}
+
+.alerts-table th:nth-child(2),
+.alerts-table td:nth-child(2) {
+  min-width: 10ch;
+  white-space: nowrap;
+}
+
+.alerts-table th:nth-child(8),
+.alerts-table td:nth-child(8) {
+  min-width: 6ch;
+  white-space: nowrap;
+}
+
+.alerts-table th:nth-child(9),
+.alerts-table td:nth-child(9) {
+  min-width: 16ch;
+  white-space: nowrap;
+}
+
+.alerts-table th:nth-child(10),
+.alerts-table td:nth-child(10) {
+  min-width: 7ch;
+  white-space: nowrap;
+}
+
+.noaa-events-table th:nth-child(2),
+.noaa-events-table td:nth-child(2) {
+  min-width: 12ch;
+  white-space: nowrap;
+}
+
+.noaa-events-table th:nth-child(4),
+.noaa-events-table td:nth-child(4) {
+  min-width: 18ch;
+  white-space: nowrap;
+}
+
+.noaa-events-table th:nth-child(8),
+.noaa-events-table td:nth-child(8) {
+  min-width: 10ch;
+  white-space: nowrap;
+}
+
+.usgs-events-table th:nth-child(2),
+.usgs-events-table td:nth-child(2) {
+  min-width: 18ch;
+  white-space: nowrap;
 }
 
 th,

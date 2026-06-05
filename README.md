@@ -1,9 +1,10 @@
 # Skannr
 
-Skannr is a local wireless monitoring dashboard for Wi-Fi, Bluetooth, and
-RTL-SDR signals. It runs on Linux hosts such as Raspberry Pi OS or Kali, records
+Skannr is a local monitoring dashboard for Wi-Fi, Bluetooth, RTL-SDR signals,
+optional APRS-IS/NOAA/USGS/SWPC situational context, and passive LAN
+observations. It runs on Linux hosts such as Raspberry Pi OS or Kali, records
 local JSONL event logs, and provides live views plus deterministic Insights,
-Device History, and Reports through a browser UI.
+Subject History, and Reports through a browser UI.
 
 Skannr is designed for local monitoring of your own environment. It does not
 perform wireless attacks, packet injection, or cloud-based analysis.
@@ -29,7 +30,7 @@ Current version: see `VERSION`.
 Versioning policy:
 
 - `0.1.x`: bug fixes and documentation updates
-- `0.2.0`: meaningful feature additions or data format changes
+- `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
 The rest of this README is the operator manual.
@@ -257,16 +258,247 @@ Generic defaults for source upload and fresh installs live under
 cp -a config.example/. config/
 ```
 
-Important global sections:
+Changing YAML settings requires restarting Skannr so the browser receives the
+new metadata and collector configuration.
 
-- `skannr`: listen host, port, log level
-- `persistence`: log directory and retention
-- `runtime`: queue/status timing knobs
-- `findings`: live deterministic finding thresholds
-- `history_analysis`: Insight thresholds and recent-event lookback
-- `reports`: longitudinal Report thresholds
-- `ui`: table limits, Bluetooth live-row age, stale-data warning age, and
-  automatic derived refresh
+## YAML Parameter Reference
+
+The only shipped YAML files are:
+
+- `config/skannr.yaml`: global runtime, persistence, analysis, report, alert,
+  and UI settings
+- `config/collectors/*.yaml`: one collector or action per file
+
+`config.example/` carries generic templates for source upload and fresh
+installs. `config/` is machine-specific local state.
+
+### Global `skannr.yaml`
+
+`skannr`:
+
+- `listeners`: quoted `host:port` or `[IPv6]:port` HTTP listener strings.
+- `log_level`: Python logging level such as `INFO` or `DEBUG`.
+
+`persistence`:
+
+- `backend`: persistence implementation. The current implementation is
+  `filesystem`.
+- `filesystem.log_dir`: runtime log/materialized-state directory. Relative
+  paths are resolved under the Skannr project root.
+- `filesystem.retention_days`: raw JSONL retention. `0` removes retained JSONL
+  at startup rotation; large values effectively disable cleanup.
+
+`runtime`:
+
+- `event_log_maxlen`: in-memory recent-event count retained for browser
+  snapshots.
+- `sse_queue_size`: per-browser Server-Sent Events queue size before old events
+  are dropped for that client.
+- `sse_heartbeat_sec`: heartbeat interval for keeping `/events` connections
+  alive.
+- `system_status_interval_sec`: collector/system status broadcast cadence.
+- `shutdown_timeout_sec`: graceful stop timeout for collector tasks.
+
+`findings` controls live, low-memory event findings:
+
+- `enabled`: turn live findings on/off.
+- `max_items`: recent finding count kept in memory for browser snapshots.
+- `bootstrap_events`: persisted event count replayed on startup to rebuild
+  live-finding state.
+- `strong_wifi_rssi`, `strong_wifi_ap_rssi`, `strong_ble_rssi`: dBm thresholds
+  for strong Wi-Fi client/AP and BLE findings.
+- `rssi_change_db`: minimum RSSI delta before reporting a signal change.
+- `return_after_sec`, `lost_after_sec`: disappearance/reappearance windows.
+- `burst_window_sec`, `burst_count`: burst detector window and count.
+- `cooldown_sec`: per-finding de-duplication interval.
+- `persistent_signal_sec`: minimum duration for a persistent signal finding.
+- `aprs_move_km`: APRS station movement distance for a motion finding.
+- `aprs_temp_change_f`: APRS weather temperature-change threshold.
+- `aprs_rain_1h_high_in`: APRS weather high one-hour rain threshold.
+- `aprs_wind_high_mph`, `aprs_gust_high_mph`: APRS wind/gust thresholds.
+- `noaa_upgrade_severities`: NWS severity names that become upgrade findings.
+- `usgs_warning_magnitude`, `usgs_warning_distance_km`: USGS live warning
+  threshold and local-distance threshold.
+- `swpc_warning_xray_class`: minimum GOES X-ray flare class that becomes a
+  warning Insight. The default is `X1.0`; M/C flares are not warning Insights
+  by default.
+- `swpc_warning_radio_blackout`, `swpc_warning_solar_radiation_storm`,
+  `swpc_warning_geomagnetic_storm`, `swpc_warning_kp`: SWPC R/S/G/Kp warning
+  Insight thresholds. Defaults are `R3`, `S3`, `G3`, and Kp `7`.
+- `lan_return_after_sec`: LAN return-after-missing threshold.
+
+`alerts` controls high-attention live alerts:
+
+- `enabled`: turn AlertEngine on/off.
+- `max_items`: maximum active/remembered alert rows kept in memory.
+- `active_ttl_sec`: unacknowledged alert lifetime if the condition stops
+  recurring.
+- `dedupe_sec`: repeat window for coalescing the same unacknowledged alert.
+  ACKed active alerts stay ACKed unless their level escalates.
+- `ack_memory_ttl_sec`, `ack_memory_alert_types`: optional memory for
+  long-running alert families. By default, ACKed NOAA/NHC hazard advisories are
+  remembered for seven days so routine advisory-number updates do not require
+  repeated ACKs.
+- Every rule has `enabled` and `level`; some also have `critical_level`.
+- `drone_wifi.min_rssi`, `ssid_patterns`, `vendor_patterns`, `oui_prefixes`:
+  DJI/Remote ID style Wi-Fi alert matching.
+- `aprs_weather.rain_1h_in`, `critical_rain_1h_in`, `wind_gust_mph`,
+  `critical_wind_gust_mph`: APRS weather alert thresholds.
+- `rayhunter_warning`: alerts when Rayhunter reports non-zero warnings.
+- `wifi_disruption.window_sec`, `count`: deauth/disruption burst alert window.
+- `wifi_open_sensitive.ssid_patterns`: open SSIDs that should alert.
+- `ble_tracker.min_rssi`, `name_patterns`, `manufacturer_patterns`,
+  `service_uuid_patterns`: tracker-like BLE alert matching.
+- `collector_issue.ignored_reason_patterns`: reason patterns suppressed when
+  generic collector issue alerts are enabled. The rule is disabled by default
+  because System Status already shows collector setup problems.
+- `noaa_hazard.critical_events`, `critical_severities`: NWS/NHC hazard terms
+  and severities that escalate to the critical level.
+- `usgs_earthquake.warning_magnitude_nearby`,
+  `critical_magnitude_nearby`, `nearby_radius_km`,
+  `critical_alert_colors`: earthquake alert thresholds.
+- `swpc_space_weather.alert_min_xray_class`, `alert_min_radio_blackout`,
+  `alert_min_solar_radiation_storm`, `alert_min_geomagnetic_storm`,
+  `alert_min_kp`: SWPC alert thresholds. Defaults are `X1.0`, `R3`, `S3`,
+  `G3`, and Kp `7`.
+- `swpc_space_weather.critical_min_xray_class`,
+  `critical_min_radio_blackout`, `critical_min_solar_radiation_storm`,
+  `critical_min_geomagnetic_storm`, `critical_min_kp`: SWPC critical alert
+  thresholds. Defaults are `X5.0`, `R4`, `S4`, `G4`, and Kp `8`.
+- `lan_gateway_change`: alerts on default-gateway changes.
+- `lan_new_device`: alerts on new LAN devices. It is off by default because
+  normal LANs can be noisy.
+
+`history_analysis` controls tactical Insights from Subject History:
+
+- `new_device_window_sec`: how recent first-seen must be to call something new.
+- `strong_wifi_rssi`, `strong_ble_rssi`: strong-signal Insight thresholds.
+- `many_bssid_count`: BSSID count that makes an SSID look multi-BSSID.
+- `wifi_same_ap_bssid_prefix_bytes`, `wifi_same_ap_max_last_byte_span`: BSSID
+  similarity heuristic for one AP family.
+- `many_probe_ssid_count`, `blank_probe_count`, `deauth_count`: Wi-Fi Monitor
+  activity thresholds.
+- `randomized_mac_count`: randomized/private MAC churn threshold.
+- `ble_linger_sec`, `ble_lost_count`, `ble_recurring_min_sessions`,
+  `ble_recurring_window_min`: BLE presence/loss/recurrence thresholds.
+- `recent_activity_window_sec`: recent activity window for tactical Insights.
+- `insights_recent_hours`: upper age bound for Insights within the selected
+  dashboard View. `0` shows the whole selected View.
+- `wifi_short_lived_sec`: short-lived Wi-Fi AP/session threshold.
+- `sensitive_ssids`: SSID names/patterns treated as sensitive.
+
+`reports` controls longer-window intelligence Reports:
+
+- `ble_long_presence_sec`, `ble_recurring_min_days`,
+  `ble_private_address_group_min_count`, `ble_strong_rssi`: BLE report
+  thresholds.
+- `new_device_window_sec`: new-subject report window.
+- `wifi_strong_rssi`, `wifi_signal_swing_db`, `wifi_many_bssid_count`,
+  `wifi_recurring_min_days`, `wifi_long_presence_sec`,
+  `wifi_intermit_min_sessions`, `wifi_monitor_event_count`: Wi-Fi report
+  thresholds.
+- `aprs_mobile_min_distance_km`, `aprs_weather_temp_change_f`,
+  `aprs_weather_high_rain_1h_in`, `aprs_weather_high_wind_mph`,
+  `aprs_weather_high_gust_mph`: APRS Report thresholds.
+- `noaa_high_severities`: NOAA severities called out in Reports.
+- `usgs_nearby_radius_km`, `usgs_warning_magnitude`: USGS report thresholds.
+- `swpc_report_xray_class`, `swpc_report_radio_blackout`,
+  `swpc_report_solar_radiation_storm`, `swpc_report_geomagnetic_storm`,
+  `swpc_report_kp`: SWPC report thresholds. Defaults are `X1.0`, `R3`,
+  `S3`, `G3`, and Kp `7`.
+- `lan_report_new_devices`, `lan_report_gateway_changes`: include or suppress
+  LAN report families.
+
+`ui`:
+
+- `max_live_rows`: maximum rows in live collector tables.
+- `max_history_rows`: maximum rows in history/report-style tables.
+- `max_history_payload_rows`: backend cap for large history payload sections.
+- `max_event_log_items`: event log rows shown in the browser.
+- `max_rendered_findings`: browser cap for Findings rows.
+- `max_history_ssids`: SSIDs shown in compact history summaries.
+- `bluetooth_live_recent_sec`: BLE live-table age cutoff.
+- `derived_stale_after_min`: age before derived data is considered stale.
+- `derived_auto_refresh_min`: automatic derived-refresh cadence. `0` disables
+  automatic refresh.
+- `derived_refresh_timeout_sec`: browser/backend refresh timeout.
+- `insights_recent_after_min`: browser-side recent Insight marker threshold.
+
+Optional `view_window.default_days` sets the default dashboard View window
+without changing raw-log retention.
+
+### Collector YAML Metadata
+
+Every file under `config/collectors/` can use these shared keys:
+
+- `key`: stable collector/action key. It normally matches the filename.
+- `kind`: optional `action` for on-demand actions such as BLE Identify.
+- `order`: System Status/tab ordering.
+- `label`: UI label.
+- `description`: short operator-facing description.
+- `source_group`, `source_group_label`: group related collectors in the UI.
+- `has_subject_history`: whether the collector contributes to Subject History.
+- `enabled`: whether the collector or action is available.
+- `auto_start`: whether an enabled collector starts at Skannr startup.
+
+Collector-specific keys:
+
+- `wifi.yaml`: `validation_timeout_sec`, `interfaces`,
+  `managed_scan_interval_sec`, `scan_tool`, `retry_interval_sec`,
+  `retry_timeout_sec`.
+- `wifi_monitor.yaml`: `validation_timeout_sec`, `interface`, `interfaces`,
+  `interface_regex`, `bands`, `typical_channels_24`,
+  `typical_channels_5`, `include_seen_channels`, `dwell_sec`,
+  `retry_interval_sec`, `retry_timeout_sec`.
+- `ble.yaml`: `validation_timeout_sec`, `adapters`, `scan_interval_sec`,
+  `device_timeout_sec`, `active_scan`, `callback_scan`,
+  `bluez_duplicate_data`, `name_lookup_interval_sec`,
+  `classic_name_lookup`, `classic_name_timeout_sec`, `retry_interval_sec`,
+  `retry_timeout_sec`, `reset_after_in_progress`,
+  `wedged_warning_after_in_progress`.
+- `ble_identify.yaml`: `adapters`, `identify_timeout_sec`,
+  `identify_attempts`, `identify_retry_delay_sec`, `retry_interval_sec`,
+  `retry_timeout_sec`.
+- `bt_classic.yaml`: `adapters`, `scan_interval_sec`, `scan_timeout_sec`,
+  `device_timeout_sec`, `retry_interval_sec`.
+- `rtlsdr.yaml`: `validation`, `validation_timeout_sec`, `device_index`,
+  `scan_start_mhz`, `scan_end_mhz`, `step_khz`, `gain`, `threshold_db`,
+  `baseline_period_sec`, `retry_interval_sec`, `retry_timeout_sec`.
+- `rayhunter.yaml`: `endpoint`, `poll_interval_sec`, `request_timeout_sec`,
+  `retry_interval_sec`, `retry_timeout_sec`.
+- `aprsis.yaml`: `callsign`, `passcode`, `feeds`, `connect_timeout_sec`,
+  `preferred_server_timeout_sec`, `preferred_server_max_attempts`,
+  `read_timeout_sec`, `status_interval_sec`, `retry_interval_sec`,
+  `offline_event_interval_sec`, `max_events_per_minute`, `store_raw`,
+  `log_dropped_packets`, `emit_server_messages`.
+- `noaa.yaml`: `poll_interval_sec`, `request_timeout_sec`, `user_agent`,
+  `latitude`, `longitude`, `state`, `nws.enabled`, `nws.url`,
+  `nhc.enabled`, `nhc.basins`.
+- `usgs.yaml`: `poll_interval_sec`, `request_timeout_sec`, `user_agent`,
+  `latitude`, `longitude`, `radius_km`, `min_magnitude`, `orderby`,
+  `warning_magnitude_nearby`, `warning_magnitude_regional`,
+  `warning_nearby_radius_km`, `url`.
+- `swpc.yaml`: `poll_interval_sec`, `request_timeout_sec`, `user_agent`,
+  `products.alerts`, `products.noaa_scales`, `products.xray_flux`,
+  `products.planetary_k`, `urls.alerts`, `urls.noaa_scales`,
+  `urls.xray_flux`, `urls.planetary_k`, `xray_min_class`,
+  `feed_min_radio_blackout`, `feed_min_solar_radiation_storm`,
+  `feed_min_geomagnetic_storm`, `feed_min_kp`, `alert_min_xray_class`,
+  `alert_min_radio_blackout`, `alert_min_solar_radiation_storm`,
+  `alert_min_geomagnetic_storm`, `alert_min_kp`, and
+  `product_keyword_patterns`.
+- `lan.yaml`: `poll_interval_sec`, `command_timeout_sec`,
+  `collect_ip_neigh`, `collect_arp`, `dhcp_lease_paths`.
+
+APRS-IS `feeds` entries use:
+
+- `name`: local feed name such as `local` or `weather`.
+- `role`: semantic role used in status and event typing.
+- `host`, `port`: APRS-IS TCP endpoint.
+- `filter`: APRS-IS server filter, normally a range filter on port `14580`.
+- `enforce_radius`: apply Skannr-side distance filtering after decoding.
+- `include_callsigns`: optional explicit callsigns to request.
+- `preferred_server`: optional backend name, for pooled hosts such as CWOP.
 
 The Reports section includes Bluetooth privacy-address grouping:
 
@@ -289,9 +521,6 @@ Reports call a Wi-Fi AP, Wi-Fi client, or named/static Bluetooth device "new".
 The Wi-Fi thresholds add managed-scan presence signals to Reports: recurring
 AP/SSID days, long AP presence, intermittent AP windows, and large RSSI swings.
 
-Changing YAML settings requires restarting Skannr so the browser receives the
-new metadata and collector configuration.
-
 ## Logs, Retention, And Derived Data
 
 Runtime files are written under `<skannr-dir>/runtime/logs` by default:
@@ -299,11 +528,19 @@ Runtime files are written under `<skannr-dir>/runtime/logs` by default:
 ```text
 runtime/logs/<collector>/YYYY-MM-DD.jsonl
 runtime/logs/skannr.log
+runtime/logs/device_history/subject_history.json
 runtime/logs/device_history/device_history.json
 runtime/logs/device_history/findings_history.json
 runtime/logs/device_history/history_analysis.json
 runtime/logs/device_history/reports.json
 ```
+
+`subject_history.json` is the collector-neutral materialized layer for
+long-lived intelligence. Wi-Fi and Bluetooth subjects come through Device
+History, while APRS-IS, Rayhunter, RTL-SDR, NOAA, USGS, SWPC, and LAN keep
+compact normalized observations in Subject History so refreshes read only new
+JSONL bytes past the saved checkpoint. The browser receives the smaller
+subject/report views, not the retained direct-observation state.
 
 Raw collector events are JSONL. Skannr uses epoch seconds internally for time
 comparisons and durations. UI-facing local timestamps are derived from those
@@ -332,7 +569,7 @@ persistence:
 - `30`: keep roughly 30 days
 - `999999`: effectively disable cleanup
 
-Insights, Reports, and Device History use the selected dashboard View window.
+Insights, Reports, and Subject History use the selected dashboard View window.
 Skannr refreshes those derived views automatically while the browser page is
 open. The default interval is 15 minutes:
 
@@ -346,9 +583,12 @@ The derived views have different jobs:
 
 - Insights: recent event log, tactical/debuggable.
 - Reports: ranked intelligence summary, strategic/operator-facing.
-- Device History: state database view.
+- Subject History: collector-neutral subject rollup for reports, analysis, and
+  the History tab. It includes Wi-Fi/Bluetooth plus APRS-IS, Rayhunter,
+  RTL-SDR, NOAA, USGS, SWPC, and LAN subjects.
+- Device History: Wi-Fi/Bluetooth compatibility view derived from subjects.
 
-Insights are intentionally shorter-lived than Reports or Device History. They
+Insights are intentionally shorter-lived than Reports or Subject History. They
 use the selected dashboard View window as an upper bound, then apply the
 configured recent-event lookback:
 
@@ -358,7 +598,7 @@ history_analysis:
 ```
 
 Set `insights_recent_hours: 0` to show every Insight in the selected View
-window. Reports and Device History are not shortened by this setting.
+window. Reports and Subject History are not shortened by this setting.
 
 Set `derived_auto_refresh_min: 0` to disable automatic derived refresh. The
 status line shows the last refresh time and the next automatic refresh countdown.
@@ -376,9 +616,9 @@ another catch-up refresh. This avoids a continuous refresh loop on slower
 systems or large materialized histories.
 
 After a fresh log cleanup, the browser may initially load empty cached derived
-summaries before the first scan events have been folded into Device History. If
+summaries before the first scan events have been folded into Subject History. If
 live Wi-Fi/Bluetooth rows arrive, or collector status shows scan events have
-already happened while Device History is still empty, the browser starts a
+already happened while Subject History is still empty, the browser starts a
 throttled catch-up refresh instead of waiting for the normal automatic refresh
 interval. Catch-up refreshes use the same post-refresh cooldown as automatic
 refreshes, so an empty cached load cannot start repeated catch-up refreshes
@@ -392,12 +632,10 @@ While a derived refresh is running, the browser polls `/derived_views/status`
 and shows the numbered backend phase in the status strip. Use the same phase
 numbers in `runtime/logs/skannr.log` when debugging a long refresh:
 
-- Phase 1/4, Device History: fold new raw log bytes into the materialized
-  device-history cache.
-- Phase 2/4, Insights analysis: derive recent tactical observations from
-  Device History.
-- Phase 3/4, Reports: build the ranked operator-facing intelligence summary.
-- Phase 4/4, Findings History: load and window persisted finding records.
+- Phase 1/2, Subject and Findings History: fold raw collector logs into the
+  collector-neutral subject cache and load/window persisted finding records.
+- Phase 2/2, Insights analysis and Reports: derive tactical observations and
+  the ranked operator-facing intelligence summary from Subject History.
 
 If refresh appears stuck, check which phase is still running and compare its
 elapsed time with the previous completed phase lines in `runtime/logs/skannr.log`.
@@ -416,14 +654,13 @@ timestamps remain the strings generated by the Skannr host.
 Manual or automatic refresh of any derived tab refreshes the whole derived bundle
 in dependency order:
 
-1. Findings History
-2. Device History
-3. history-based Insights
-4. Reports
+1. Subject History and Findings History
+2. Device History compatibility view from Subject History
+3. history-based Insights and Reports
 
-Device History and Findings History are materialized summaries with JSONL
-checkpoints. After the first build, refresh normally reads only new raw-log
-bytes, not all old logs again.
+Subject History, Device History, and Findings History are materialized
+summaries with JSONL checkpoints. After the first build, refresh normally reads
+only new raw-log bytes, not all old logs again.
 
 Reports keeps a visible Type column for broad report families such as security,
 presence, signal, new-device, behavior, identity, collector, and analysis. The
@@ -677,6 +914,166 @@ gain: 40
 threshold_db: 10
 baseline_period_sec: 30
 ```
+
+## APRS-IS
+
+`APRS-IS` is an optional internet-fed situational-awareness collector. It does
+not prove that Skannr's local antenna heard a packet; it reads a filtered
+APRS-IS TCP feed for the configured area.
+
+Default config:
+
+```text
+config/collectors/aprsis.yaml
+```
+
+Use port `14580` with a server-side filter. Do not run an unfiltered full
+APRS-IS feed on a small host.
+
+```yaml
+enabled: true
+callsign: NOCALL
+passcode: -1
+feeds:
+  - name: local
+    role: local
+    host: noam.aprs2.net
+    port: 14580
+    filter: "r/37.7749/-122.4194/50"
+  - name: weather
+    role: weather
+    host: cwop.aprs.net
+    port: 14580
+    filter: "r/37.7749/-122.4194/50"
+    enforce_radius: true
+```
+
+If Skannr cannot connect to the configured APRS-IS endpoint, System Status and
+Insights show the collector as `OFFLINE`. When connected, it reports `ONLINE`
+or a per-feed `OFFLINE` status and emits compact station/object/message/status
+packet metadata. The APRS-IS top tab shows live feed events, while Subject
+History and Reports group APRS activity by callsign, object, or weather
+station.
+
+## NOAA
+
+`NOAA` is an optional internet-fed hazard collector. It polls NWS active alerts
+for a configured point/state and optional NHC tropical cyclone RSS feeds.
+
+Default config:
+
+```text
+config/collectors/noaa.yaml
+```
+
+The default template is disabled. Enable it and set your local point or state:
+
+```yaml
+enabled: true
+poll_interval_sec: 300
+latitude: 19.6875
+longitude: -155.9583
+nws:
+  enabled: true
+nhc:
+  enabled: true
+  basins:
+  - central_pacific
+```
+
+NOAA data feeds the NOAA live tab, Subject History, Reports, and Alerts.
+Alerts default to warning/critical for high-severity weather, tsunami, tornado,
+hurricane, and flash-flood conditions.
+
+## USGS
+
+`USGS` is an optional internet-fed earthquake collector. It polls the USGS
+GeoJSON earthquake API for a configured point, radius, and minimum magnitude.
+
+Default config:
+
+```text
+config/collectors/usgs.yaml
+```
+
+Example:
+
+```yaml
+enabled: true
+poll_interval_sec: 300
+latitude: 19.6875
+longitude: -155.9583
+radius_km: 300
+min_magnitude: 5.0
+```
+
+USGS data feeds the USGS live tab, Subject History, Reports, and Alerts.
+The shipped default only ingests magnitude 5+ earthquakes so common small
+regional quakes do not flood the dashboard. Lower `min_magnitude` only if you
+want local microseismic activity in the live feed and derived views. Alert
+defaults focus on nearby or larger earthquakes.
+
+## SWPC
+
+`SWPC` is an optional internet-fed NOAA Space Weather Prediction Center
+collector. It polls public SWPC products and emits compact space-weather
+events instead of retaining raw time-series samples.
+
+Default config:
+
+```text
+config/collectors/swpc.yaml
+```
+
+Example:
+
+```yaml
+enabled: true
+poll_interval_sec: 300
+products:
+  alerts: true
+  noaa_scales: true
+  xray_flux: true
+  planetary_k: true
+xray_min_class: X1.0
+feed_min_radio_blackout: R1
+feed_min_solar_radiation_storm: S1
+feed_min_geomagnetic_storm: G1
+feed_min_kp: 5
+```
+
+SWPC data feeds the SWPC live tab, Subject History, Reports, and Alerts. The
+default live feed shows X-class flares, R/S/G scale activity at level 1 or
+higher, and Kp 5 or higher. The default AlertEngine rule alerts only on X-class
+flares, R3+ radio blackouts, S3+ solar radiation storms, G3+ geomagnetic
+storms, or Kp 7+. Lower space-weather conditions remain visible as feed rows
+and derived context without becoming Alerts.
+
+## LAN
+
+`LAN` is an optional passive local-network collector. It reads local OS network
+state such as neighbor tables, ARP output, default routes, and optional DHCP
+lease files. It does not probe or scan the network.
+
+Default config:
+
+```text
+config/collectors/lan.yaml
+```
+
+Example:
+
+```yaml
+enabled: true
+poll_interval_sec: 60
+collect_ip_neigh: true
+collect_arp: true
+dhcp_lease_paths: []
+```
+
+LAN data feeds the LAN live tab, Subject History, Reports, and Alerts. Gateway
+change alerts are enabled by default; new LAN device alerts are disabled by
+default because normal networks can be noisy.
 
 ## Wi-Fi Manufacturer Names
 

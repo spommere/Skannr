@@ -4,8 +4,13 @@ Each collector owns its hardware/tool behavior. This module only maps
 collector keys from YAML metadata to concrete Python classes.
 """
 
+from .aprsis import APRSISCollector
+from .lan import LANCollector
+from .noaa import NOAACollector
 from .rtlsdr import RTLSDRCollector
 from .rayhunter import RayhunterCollector
+from .swpc import SWPCCollector
+from .usgs import USGSCollector
 from .ble import BLECollector
 from .ble_identify import BLEIdentifyCollector
 from .bt_classic import BluetoothClassicCollector
@@ -24,6 +29,11 @@ COLLECTOR_CLASS_BY_KEY = {
     "bt_classic": BluetoothClassicCollector,
     "rtlsdr": RTLSDRCollector,
     "rayhunter": RayhunterCollector,
+    "aprsis": APRSISCollector,
+    "noaa": NOAACollector,
+    "usgs": USGSCollector,
+    "swpc": SWPCCollector,
+    "lan": LANCollector,
 }
 
 ACTION_CLASS_BY_KEY = {
@@ -40,6 +50,8 @@ def load_collectors(config, bus):
             # Unknown keys can appear in config while a collector is being
             # developed. Ignore them instead of breaking the rest of the app.
             continue
+        if cls.config_key not in (config.get("collectors") or {}):
+            continue
         section = dict(config["collectors"].get(cls.config_key, {}))
         # Some collectors need global paths such as persistence.log_dir, but
         # passing the collector subsection keeps their normal config small.
@@ -55,8 +67,10 @@ def disabled_collector_statuses(config):
     collector_config = (config or {}).get("collectors") or {}
     for key in collector_keys(config, include_system=False):
         cls = COLLECTOR_CLASS_BY_KEY.get(key)
-        section = collector_config.get(key) or {}
-        if not cls or section.get("enabled", True):
+        section = collector_config.get(key)
+        if not cls:
+            continue
+        if section is not None and section.get("enabled", True):
             continue
         statuses.append(
             {
@@ -68,7 +82,7 @@ def disabled_collector_statuses(config):
                 "events_this_session": 0,
                 "last_event": None,
                 "last_event_epoch": None,
-                "warning": "",
+                "warning": "" if section is not None else "No local collector config file.",
                 "enabled": False,
             }
         )

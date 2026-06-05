@@ -26,13 +26,21 @@
   <nav class="tabs">
     <button class="tab active" data-tab="insights">Insights</button>
     <button class="tab" data-tab="reports">Reports</button>
-    <button class="tab" data-tab="history">Device History</button>
+    <button class="tab" data-tab="history">Subject History</button>
     <button class="tab" data-tab="wifi">Wi-Fi Scan <span class="tab-status-dots" data-status-tab="wifi"></span></button>
     <button class="tab" data-tab="wifi_monitor">Wi-Fi Monitor <span class="tab-status-dots" data-status-tab="wifi_monitor"></span></button>
     <button class="tab" data-tab="bluetooth">Bluetooth <span class="tab-status-dots" data-status-tab="bluetooth"></span></button>
     <button class="tab" data-tab="rtlsdr">RTL-SDR <span class="tab-status-dots" data-status-tab="rtlsdr"></span></button>
+    <button class="tab" data-tab="aprsis">APRS-IS <span class="tab-status-dots" data-status-tab="aprsis"></span></button>
+    <button class="tab" data-tab="noaa">NOAA <span class="tab-status-dots" data-status-tab="noaa"></span></button>
+    <button class="tab" data-tab="usgs">USGS <span class="tab-status-dots" data-status-tab="usgs"></span></button>
+    <button class="tab" data-tab="swpc">SWPC <span class="tab-status-dots" data-status-tab="swpc"></span></button>
+    <button class="tab" data-tab="lan">LAN <span class="tab-status-dots" data-status-tab="lan"></span></button>
     <button class="tab" data-tab="system">System Status</button>
+    <button class="tab" data-tab="alerts">Alerts <span id="alerts-tab-count" class="tab-alert-count"></span></button>
   </nav>
+
+  <div id="global-alerts" class="global-alerts" hidden></div>
 
   <main>
     <section id="tab-insights" class="panel active">
@@ -89,12 +97,12 @@
 
     <section id="tab-history" class="panel">
       <div class="panel-head">
-        <h2>Device History</h2>
+        <h2>Subject History</h2>
         <button id="history-refresh" class="action-button">Manual Refresh</button>
       </div>
-      <div id="history-status" class="status-strip muted">Waiting for device history</div>
+      <div id="history-status" class="status-strip muted">Waiting for subject history</div>
       <div class="filter-bar">
-        <div class="source-filter" data-subtab-group="history" aria-label="Device history source filter"></div>
+        <div class="source-filter" data-subtab-group="history" aria-label="Subject history source filter"></div>
         <label>Search
           <input id="history-search" type="search" placeholder="Filter visible columns">
         </label>
@@ -125,7 +133,52 @@
       </div>
       <div id="history-rtlsdr-panel" class="subpanel history-source-panel" data-source="rtlsdr">
         <h3>RTL-SDR</h3>
-        <div class="status-strip muted">No RTL-SDR device-history summary yet</div>
+        <table>
+          <thead><tr><th>Subject</th><th>Type</th><th>First Seen</th><th>Last Seen</th><th>Activity</th><th>Signal</th></tr></thead>
+          <tbody id="history-rtlsdr-subjects"></tbody>
+        </table>
+      </div>
+      <div id="history-aprsis-panel" class="subpanel history-source-panel" data-source="aprsis">
+        <h3>APRS-IS Subjects</h3>
+        <table>
+          <thead><tr><th>Callsign / Object</th><th>Type</th><th>First Seen</th><th>Last Seen</th><th>Packets</th><th>Position</th><th>Weather / Motion</th><th>Route / Feed</th></tr></thead>
+          <tbody id="history-aprsis-subjects"></tbody>
+        </table>
+      </div>
+      <div id="history-rayhunter-panel" class="subpanel history-source-panel" data-source="rayhunter">
+        <h3>Rayhunter Subjects</h3>
+        <table>
+          <thead><tr><th>Endpoint</th><th>First Seen</th><th>Last Seen</th><th>Warnings</th><th>Events</th><th>Recording</th></tr></thead>
+          <tbody id="history-rayhunter-subjects"></tbody>
+        </table>
+      </div>
+      <div id="history-noaa-panel" class="subpanel history-source-panel" data-source="noaa">
+        <h3>NOAA Subjects</h3>
+        <table>
+          <thead><tr><th>Subject</th><th>Type</th><th>First Seen</th><th>Last Seen</th><th>Severity</th><th>Area</th><th>Timing</th><th>Source</th></tr></thead>
+          <tbody id="history-noaa-subjects"></tbody>
+        </table>
+      </div>
+      <div id="history-usgs-panel" class="subpanel history-source-panel" data-source="usgs">
+        <h3>USGS Subjects</h3>
+        <table>
+          <thead><tr><th>Subject</th><th>Magnitude</th><th>First Seen</th><th>Last Seen</th><th>Event Time</th><th>Location</th><th>Depth / Distance</th><th>Status</th></tr></thead>
+          <tbody id="history-usgs-subjects"></tbody>
+        </table>
+      </div>
+      <div id="history-swpc-panel" class="subpanel history-source-panel" data-source="swpc">
+        <h3>SWPC Subjects</h3>
+        <table>
+          <thead><tr><th>Subject</th><th>Type</th><th>First Seen</th><th>Last Seen</th><th>Event Time</th><th>Level</th><th>Summary</th><th>Source</th></tr></thead>
+          <tbody id="history-swpc-subjects"></tbody>
+        </table>
+      </div>
+      <div id="history-lan-panel" class="subpanel history-source-panel" data-source="lan">
+        <h3>LAN Subjects</h3>
+        <table>
+          <thead><tr><th>Subject</th><th>Type</th><th>First Seen</th><th>Last Seen</th><th>IP / MAC</th><th>Identity</th><th>Interface / State</th><th>Activity</th></tr></thead>
+          <tbody id="history-lan-subjects"></tbody>
+        </table>
       </div>
     </section>
 
@@ -234,12 +287,119 @@
       <ul id="rtlsdr-events" class="event-list"></ul>
     </section>
 
+    <section id="tab-aprsis" class="panel">
+      <div class="panel-head">
+        <h2>APRS-IS</h2>
+        <div id="aprsis-status" class="badge">Waiting</div>
+      </div>
+      <div id="aprsis-banner" class="status-strip muted">Waiting for collector status</div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="aprsis-search" type="search" placeholder="Callsign, destination, path, message">
+        </label>
+      </div>
+      <h3>Live APRS-IS Events</h3>
+      <table class="aprsis-events-table">
+        <thead><tr><th>Time</th><th>Type</th><th>Callsign</th><th>Target</th><th>Path / Igate</th><th>Message / Comment</th><th>Position</th><th>Motion / Weather</th></tr></thead>
+        <tbody id="aprsis-events"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-noaa" class="panel">
+      <div class="panel-head">
+        <h2>NOAA</h2>
+        <div id="noaa-status" class="badge">Waiting</div>
+      </div>
+      <div id="noaa-banner" class="status-strip muted">Waiting for collector status</div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="noaa-search" type="search" placeholder="Event, area, severity">
+        </label>
+      </div>
+      <h3>Live NOAA Events</h3>
+      <table class="noaa-events-table">
+        <thead><tr><th>Time</th><th>Type</th><th>Severity</th><th>Event Time</th><th>Event</th><th>Area</th><th>Timing</th><th>Source</th></tr></thead>
+        <tbody id="noaa-events"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-usgs" class="panel">
+      <div class="panel-head">
+        <h2>USGS</h2>
+        <div id="usgs-status" class="badge">Waiting</div>
+      </div>
+      <div id="usgs-banner" class="status-strip muted">Waiting for collector status</div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="usgs-search" type="search" placeholder="Place, magnitude, status">
+        </label>
+      </div>
+      <h3>Live USGS Events</h3>
+      <table class="usgs-events-table">
+        <thead><tr><th>Time</th><th>Event Time</th><th>Event</th><th>Magnitude</th><th>Place</th><th>Distance</th><th>Depth</th><th>Alert</th><th>Status</th></tr></thead>
+        <tbody id="usgs-events"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-swpc" class="panel">
+      <div class="panel-head">
+        <h2>SWPC</h2>
+        <div id="swpc-status" class="badge">Waiting</div>
+      </div>
+      <div id="swpc-banner" class="status-strip muted">Waiting for collector status</div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="swpc-search" type="search" placeholder="Event, level, source">
+        </label>
+      </div>
+      <h3>Live SWPC Events</h3>
+      <table class="swpc-events-table">
+        <thead><tr><th>Time</th><th>Event Time</th><th>Type</th><th>Level</th><th>Event</th><th>Timing</th><th>Details</th><th>Source</th></tr></thead>
+        <tbody id="swpc-events"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-lan" class="panel">
+      <div class="panel-head">
+        <h2>LAN</h2>
+        <div id="lan-status" class="badge">Waiting</div>
+      </div>
+      <div id="lan-banner" class="status-strip muted">Waiting for collector status</div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="lan-search" type="search" placeholder="IP, MAC, host, vendor, interface">
+        </label>
+      </div>
+      <h3>Live LAN Events</h3>
+      <table>
+        <thead><tr><th>Time</th><th>Type</th><th>IP / MAC</th><th>Identity</th><th>Interface / State</th><th>Source</th><th>Gateway</th><th>Change</th></tr></thead>
+        <tbody id="lan-events"></tbody>
+      </table>
+    </section>
+
     <section id="tab-system" class="panel">
       <h2>System Status</h2>
       <h3>Collector Health</h3>
       <table class="collector-health-table">
         <thead><tr><th>Name</th><th>State</th><th>Hardware</th><th>Software</th><th>Events</th><th>Last Event</th><th>Warning</th><th>Control</th></tr></thead>
         <tbody id="collector-health"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-alerts" class="panel">
+      <div class="panel-head">
+        <h2>Alerts</h2>
+        <button id="alerts-ack-all" class="action-button">ACK All</button>
+      </div>
+      <div id="alerts-status" class="status-strip muted">No active alerts</div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="alerts-search" type="search" placeholder="Level, source, subject, summary, details">
+        </label>
+      </div>
+      <table class="alerts-table">
+        <thead><tr><th>Level</th><th>Source</th><th>Subject</th><th>Summary</th><th>Details</th><th>First Seen</th><th>Last Seen</th><th>Seen</th><th>State</th><th>Action</th></tr></thead>
+        <tbody id="alerts-list"></tbody>
       </table>
     </section>
   </main>

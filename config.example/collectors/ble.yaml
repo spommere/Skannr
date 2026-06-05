@@ -4,7 +4,7 @@ label: BLE Scan
 description: Bluetooth Low Energy advertisement scanning
 source_group: bluetooth
 source_group_label: Bluetooth
-has_device_history: true
+has_subject_history: true
 enabled: true
 validation_timeout_sec: 10
 # Optional ordered list. When empty, Skannr ranks available BlueZ adapters and
