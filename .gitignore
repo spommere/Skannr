@@ -6,6 +6,7 @@
 /pcaps/
 /VERSION_PLAN.md
 /VERSION_HISTORY.md
+/scripts
 
 # Python caches.
 __pycache__/
