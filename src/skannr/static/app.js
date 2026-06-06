@@ -878,10 +878,6 @@ function renderReports(reportBundle) {
   }
   rows.reports = sortReports(latestReports.reports || []);
   renderReportsHeader();
-  const tbody = document.getElementById("reports-list");
-  if (!tbody) return;
-  tbody.innerHTML = "";
-  let rendered = 0;
   const maxRendered = uiNumber("max_rendered_findings");
   const needle = reportSearchNeedle();
   const visibleReports = [];
@@ -891,13 +887,46 @@ function renderReports(reportBundle) {
       const tr = buildReportRow(report);
       if (!reportRowMatchesSearch(tr, needle)) return;
       visibleReports.push(report);
-      if (rendered < maxRendered) {
-        tbody.appendChild(tr);
-        rendered += 1;
-      }
     });
+  const patternReports = visibleReports.filter(reportIsCrossSubjectReport);
+  const subjectReports = visibleReports.filter((report) => !reportIsCrossSubjectReport(report));
+  const rendered = renderReportSection("pattern", patternReports, maxRendered, 0);
+  renderReportSection("subject", subjectReports, maxRendered, rendered);
   updateReportsStatus(latestReports, visibleReports);
   updateReportsSummary(visibleReports);
+}
+
+function renderReportSection(kind, reports, maxRendered, alreadyRendered) {
+  const tbody = document.getElementById(`reports-${kind}-list`);
+  const section = document.getElementById(`reports-${kind}-section`);
+  const empty = document.getElementById(`reports-${kind}-empty`);
+  const table = tbody ? tbody.closest("table") : null;
+  if (!tbody) return alreadyRendered || 0;
+  tbody.innerHTML = "";
+  const items = reports || [];
+  const hasRows = items.length > 0;
+  const canRender = hasRows && (alreadyRendered || 0) < maxRendered;
+  if (section) section.hidden = false;
+  if (empty) {
+    empty.hidden = canRender;
+    if (!hasRows) {
+      empty.textContent = kind === "pattern"
+        ? "No cross-subject patterns match the current view"
+        : "No subject reports match the current view";
+    } else if (!canRender) {
+      empty.textContent = "Render limit reached before this section";
+    } else {
+      empty.textContent = "";
+    }
+  }
+  if (table) table.hidden = !canRender;
+  let rendered = alreadyRendered || 0;
+  items.forEach((report) => {
+    if (rendered >= maxRendered) return;
+    tbody.appendChild(buildReportRow(report));
+    rendered += 1;
+  });
+  return rendered;
 }
 
 function buildReportRow(report) {
@@ -939,17 +968,19 @@ function reportIsPresenceReport(report) {
 }
 
 function renderReportsHeader() {
-  const head = document.getElementById("reports-head");
-  if (!head) return;
-  const tr = document.createElement("tr");
-  reportColumns({}).forEach((column) => {
-    const th = document.createElement("th");
-    th.className = `report-col-${column.key}`;
-    th.textContent = column.label;
-    tr.appendChild(th);
+  const heads = document.querySelectorAll(".reports-head");
+  const targets = heads.length ? heads : [document.getElementById("reports-head")].filter(Boolean);
+  targets.forEach((head) => {
+    const tr = document.createElement("tr");
+    reportColumns({}).forEach((column) => {
+      const th = document.createElement("th");
+      th.className = `report-col-${column.key}`;
+      th.textContent = column.label;
+      tr.appendChild(th);
+    });
+    head.innerHTML = "";
+    head.appendChild(tr);
   });
-  head.innerHTML = "";
-  head.appendChild(tr);
 }
 
 
@@ -1630,6 +1661,8 @@ function renderLiveTables() {
   renderAprsisTable();
   renderNoaaTable();
   renderUsgsTable();
+  renderSwpcTable();
+  renderPwsTable();
   renderLanTable();
 }
 
@@ -1661,7 +1694,7 @@ function prunePollFeedRows() {
   const maxItems = uiNumber("max_live_rows");
   rows.noaa = pruneRecentArray(
     rows.noaa,
-    ["updated", "onset", "effective", "last_seen"],
+    ["event_time", "forecast_generated", "updated", "onset", "effective", "first_period_start", "last_seen"],
     ttlMs,
     maxItems
   );
@@ -1673,7 +1706,7 @@ function prunePollFeedRows() {
   );
   rows.swpc = pruneRecentArray(
     rows.swpc,
-    ["event_time", "peak_time", "issue", "updated", "last_seen"],
+    ["event_time", "peak_time", "issue", "issue_time", "updated", "last_seen"],
     ttlMs,
     maxItems
   );
@@ -2191,7 +2224,69 @@ function recordTimestampMs(item, key) {
   if (!item) return null;
   const epoch = Number(item[`${key}_epoch`]);
   if (Number.isFinite(epoch) && epoch > 0) return epoch * 1000;
-  return null;
+  if (key === "issue_time") {
+    const issueEpoch = Number(item.issue_epoch);
+    if (Number.isFinite(issueEpoch) && issueEpoch > 0) return issueEpoch * 1000;
+  }
+  return parseTimestampStringMs(item[key]);
+}
+
+function parseTimestampStringMs(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const match = text.match(
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(?:\s*(Z|GMT|UTC)|([+-]\d{2}):?(\d{2}))?$/i
+  );
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    const second = Number(match[6] || 0);
+    if (match[7]) {
+      return Date.UTC(year, month, day, hour, minute, second);
+    }
+    if (match[8]) {
+      const sign = match[8].startsWith("-") ? -1 : 1;
+      const offsetHours = Math.abs(Number(match[8]));
+      const offsetMinutes = Number(match[9] || 0);
+      const offsetMs = sign * ((offsetHours * 60 + offsetMinutes) * 60 * 1000);
+      return Date.UTC(year, month, day, hour, minute, second) - offsetMs;
+    }
+    return new Date(year, month, day, hour, minute, second).getTime();
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function displayTimestamp(item, key) {
+  const timestampMs = recordTimestampMs(item, key);
+  if (timestampMs) return formatTimestampMs(timestampMs);
+  return String((item || {})[key] || "");
+}
+
+function displayFirstTimestamp(item, keys) {
+  for (const key of keys || []) {
+    const text = displayTimestamp(item, key);
+    if (text) return text;
+  }
+  return "";
+}
+
+function formatTimestampMs(timestampMs) {
+  const date = new Date(timestampMs);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join("-") + " " + [
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds())
+  ].join(":");
 }
 
 function uiNonNegativeNumber(key) {
@@ -2299,7 +2394,9 @@ function updateReportsSummary(visible) {
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
     .slice(0, 4)
     .map(([key, count]) => `${reportFilterTypeLabel(key)}: ${count}`);
-  summary.textContent = `Report mix: ${top.join(" | ")}`;
+  const patternCount = reports.filter(reportIsCrossSubjectReport).length;
+  const subjectCount = reports.length - patternCount;
+  summary.textContent = `Report scope: Patterns: ${patternCount} | Subjects: ${subjectCount} | Mix: ${top.join(" | ")}`;
 }
 
 function reportTypeCategory(report) {
@@ -2310,6 +2407,12 @@ function reportTypeCategory(report) {
   if (text.includes("new")) return "new";
   if (reportIsPresenceReport(report)) return "presence";
   return categoryForType(text || "report");
+}
+
+function reportIsCrossSubjectReport(report) {
+  const scope = String((report || {}).report_scope || "").toLowerCase();
+  if (["population", "collector", "quality"].includes(scope)) return true;
+  return Boolean(((report || {}).evidence || {}).population_kind);
 }
 
 function reportFilterTypeLabel(type) {
@@ -2331,6 +2434,8 @@ function sortReports(items) {
   return (items || []).sort((left, right) => {
     const severity = severityRank(right.severity) - severityRank(left.severity);
     if (severity !== 0) return severity;
+    const scope = reportScopeRank(right) - reportScopeRank(left);
+    if (scope !== 0) return scope;
     const score = Number(right.score || 0) - Number(left.score || 0);
     if (score !== 0) return score;
     const leftMs = recordTimestampMs(left, "last_seen") || recordTimestampMs(left, "timestamp");
@@ -2340,6 +2445,13 @@ function sortReports(items) {
     if (!leftMs && rightMs) return 1;
     return String(right.last_seen || right.timestamp || "").localeCompare(String(left.last_seen || left.timestamp || ""));
   });
+}
+
+function reportScopeRank(report) {
+  const scope = String((report || {}).report_scope || "").toLowerCase();
+  if (scope === "population" || ((report || {}).evidence || {}).population_kind) return 3;
+  if (scope === "collector" || scope === "quality") return 2;
+  return 1;
 }
 
 function sourceMatchesSubtab(source, mode) {
@@ -3201,8 +3313,21 @@ function noaaLiveEventKey(item) {
 }
 
 function renderNoaaTable() {
-  const events = rows.noaa.filter(noaaEventMatchesSearch);
+  const events = rows.noaa
+    .filter(noaaEventMatchesSearch)
+    .sort(compareNoaaEvents);
   renderSchemaTable("noaa-events", events, "noaaEvents", {preserveOrder: true});
+}
+
+function compareNoaaEvents(left, right) {
+  return noaaEventSortMs(right) - noaaEventSortMs(left);
+}
+
+function noaaEventSortMs(item) {
+  return firstRecordTimestampMs(
+    item,
+    ["event_time", "forecast_generated", "updated", "onset", "effective", "first_period_start", "last_seen"]
+  ) || 0;
 }
 
 function noaaEventMatchesSearch(item) {
@@ -3282,13 +3407,13 @@ function noaaKeyFragment(value) {
 function noaaTimingText(item) {
   const isForecast = (item || {}).alert_kind === "forecast";
   return [
-    !isForecast && item.effective ? `effective ${item.effective}` : "",
-    item.onset ? `onset ${item.onset}` : "",
-    item.first_period_start ? `from ${item.first_period_start}` : "",
-    item.next_precip_start ? `next precip ${item.next_precip_start}` : "",
-    !isForecast && item.expires ? `expires ${item.expires}` : "",
-    item.last_period_end ? `through ${item.last_period_end}` : "",
-    item.updated ? `updated ${item.updated}` : ""
+    !isForecast && item.effective ? `effective ${displayTimestamp(item, "effective")}` : "",
+    item.onset ? `onset ${displayTimestamp(item, "onset")}` : "",
+    item.first_period_start ? `from ${displayTimestamp(item, "first_period_start")}` : "",
+    item.next_precip_start ? `next precip ${displayTimestamp(item, "next_precip_start")}` : "",
+    !isForecast && item.expires ? `expires ${displayTimestamp(item, "expires")}` : "",
+    item.last_period_end ? `through ${displayTimestamp(item, "last_period_end")}` : "",
+    item.updated ? `updated ${displayTimestamp(item, "updated")}` : ""
   ].filter(Boolean).join("; ");
 }
 
@@ -3313,7 +3438,10 @@ function noaaForecastText(item) {
 }
 
 function noaaEventTimeText(item) {
-  return item.forecast_generated || item.updated || item.onset || item.effective || "";
+  return displayFirstTimestamp(
+    item,
+    ["event_time", "forecast_generated", "updated", "onset", "effective", "first_period_start"]
+  );
 }
 
 function renderUsgsEvent(event) {
@@ -3355,8 +3483,18 @@ function usgsLiveEventKey(item) {
 }
 
 function renderUsgsTable() {
-  const events = rows.usgs.filter(usgsEventMatchesSearch);
+  const events = rows.usgs
+    .filter(usgsEventMatchesSearch)
+    .sort(compareUsgsEvents);
   renderSchemaTable("usgs-events", events, "usgsEvents", {preserveOrder: true});
+}
+
+function compareUsgsEvents(left, right) {
+  return usgsEventSortMs(right) - usgsEventSortMs(left);
+}
+
+function usgsEventSortMs(item) {
+  return firstRecordTimestampMs(item, ["event_time", "updated", "last_seen"]) || 0;
 }
 
 function usgsEventMatchesSearch(item) {
@@ -3456,6 +3594,7 @@ function compareSwpcEvents(left, right) {
 function swpcEventSortMs(item) {
   return recordTimestampMs(item, "event_time") ||
     recordTimestampMs(item, "peak_time") ||
+    recordTimestampMs(item, "issue_time") ||
     recordTimestampMs(item, "issue") ||
     recordTimestampMs(item, "last_seen") ||
     0;
@@ -3519,12 +3658,19 @@ function formatKpIndex(value) {
 
 function swpcTimingText(item) {
   return [
-    (item || {}).start_time ? `start ${(item || {}).start_time}` : "",
-    (item || {}).peak_time ? `peak ${(item || {}).peak_time}` : "",
-    (item || {}).end_time ? `end ${(item || {}).end_time}` : "",
-    (item || {}).issue_time ? `issued ${(item || {}).issue_time}` : "",
-    (item || {}).updated ? `updated ${(item || {}).updated}` : ""
+    (item || {}).start_time ? `start ${displayTimestamp(item, "start_time")}` : "",
+    (item || {}).peak_time ? `peak ${displayTimestamp(item, "peak_time")}` : "",
+    (item || {}).end_time ? `end ${displayTimestamp(item, "end_time")}` : "",
+    (item || {}).issue_time ? `issued ${displayTimestamp(item, "issue_time")}` : "",
+    (item || {}).updated ? `updated ${displayTimestamp(item, "updated")}` : ""
   ].filter(Boolean).join("; ");
+}
+
+function swpcEventTimeText(item) {
+  return displayFirstTimestamp(
+    item,
+    ["event_time", "peak_time", "issue_time", "issue", "updated"]
+  );
 }
 
 function swpcDetailsText(item) {
@@ -3704,10 +3850,17 @@ function pwsRainText(item) {
   if (week !== null) parts.push(`week ${week.toFixed(2)} in`);
   if (month !== null) parts.push(`month ${month.toFixed(2)} in`);
   if (year !== null) parts.push(`year ${year.toFixed(2)} in`);
-  if ((item || {}).last_rain_time) parts.push(`last rain ${(item || {}).last_rain_time}`);
+  const lastRain = pwsLastRainText(item);
+  if (lastRain) parts.push(`last rain ${lastRain}`);
   const transition = pwsRainTransitionText(item || {});
   if (transition) parts.push(transition);
   return parts.join("; ");
+}
+
+function pwsLastRainText(item) {
+  return displayTimestamp(item, "last_rain") ||
+    displayTimestamp(item, "last_rain_time") ||
+    String((item || {}).last_rain_time || "");
 }
 
 function pwsRainTransitionText(item) {
@@ -4578,14 +4731,14 @@ function buildPwsSubjectDetail(key) {
         ["Elevation", pwsElevationText(data)]
       ]),
       detailSection("Weather", [
-        ["Sample Time", data.event_time],
-        ["API Date", data.ambient_date],
+        ["Sample Time", displayTimestamp(data, "event_time")],
+        ["API Date", displayTimestamp(data, "ambient_date")],
         ["Timezone", data.timezone],
         ["Temperature", pwsWeatherText(data, {includeIndoor: false})],
         ["Indoor", pwsIndoorText(data)],
         ["Wind", pwsWindText(data)],
         ["Rain", pwsRainText(data)],
-        ["Last Rain", data.last_rain_time],
+        ["Last Rain", pwsLastRainText(data)],
         ["Pressure", pwsPressureText(data)],
         ["Solar / UV", pwsSolarText(data)],
         ["Battery", data.battery]

@@ -90,10 +90,22 @@
         </label>
       </div>
       <div id="reports-summary" class="status-strip muted"></div>
-      <table class="reports-table">
-        <thead id="reports-head"></thead>
-        <tbody id="reports-list"></tbody>
-      </table>
+      <div id="reports-pattern-section" class="reports-section">
+        <h3>Cross-Subject Patterns</h3>
+        <div id="reports-pattern-empty" class="status-strip muted"></div>
+        <table class="reports-table">
+          <thead id="reports-pattern-head" class="reports-head"></thead>
+          <tbody id="reports-pattern-list"></tbody>
+        </table>
+      </div>
+      <div id="reports-subject-section" class="reports-section">
+        <h3>Subject Reports</h3>
+        <div id="reports-subject-empty" class="status-strip muted"></div>
+        <table class="reports-table">
+          <thead id="reports-subject-head" class="reports-head"></thead>
+          <tbody id="reports-subject-list"></tbody>
+        </table>
+      </div>
     </section>
 
     <section id="tab-history" class="panel">
@@ -176,7 +188,7 @@
       </div>
       <div id="history-pws-panel" class="subpanel history-source-panel" data-source="pws">
         <h3>PWS Subjects</h3>
-        <table>
+        <table class="history-pws-subjects-table">
           <thead><tr><th>Station</th><th>First Seen</th><th>Last Seen</th><th>Sample Time</th><th>Weather</th><th>Wind</th><th>Rain</th><th>Source</th></tr></thead>
           <tbody id="history-pws-subjects"></tbody>
         </table>
@@ -326,7 +338,7 @@
       </div>
       <h3>Live NOAA Events</h3>
       <table class="noaa-events-table">
-        <thead><tr><th>Time</th><th>Type</th><th>Severity</th><th>Event Time</th><th>Event</th><th>Area</th><th>Timing</th><th>Source</th></tr></thead>
+        <thead><tr><th>Time</th><th>Type</th><th>Severity</th><th>Event Time (desc)</th><th>Event</th><th>Area</th><th>Timing</th><th>Source</th></tr></thead>
         <tbody id="noaa-events"></tbody>
       </table>
     </section>
@@ -344,7 +356,7 @@
       </div>
       <h3>Live USGS Events</h3>
       <table class="usgs-events-table">
-        <thead><tr><th>Time</th><th>Event Time</th><th>Event</th><th>Magnitude</th><th>Place</th><th>Distance</th><th>Depth</th><th>Alert</th><th>Status</th></tr></thead>
+        <thead><tr><th>Time</th><th>Event Time (desc)</th><th>Event</th><th>Magnitude</th><th>Place</th><th>Distance</th><th>Depth</th><th>Alert</th><th>Status</th></tr></thead>
         <tbody id="usgs-events"></tbody>
       </table>
     </section>
@@ -362,7 +374,7 @@
       </div>
       <h3>Live SWPC Events</h3>
       <table class="swpc-events-table">
-        <thead><tr><th>Time</th><th>Event Time</th><th>Type</th><th>Level</th><th>Event</th><th>Timing</th><th>Details</th></tr></thead>
+        <thead><tr><th>Time</th><th>Event Time (desc)</th><th>Type</th><th>Level</th><th>Event</th><th>Timing</th><th>Details</th></tr></thead>
         <tbody id="swpc-events"></tbody>
       </table>
     </section>

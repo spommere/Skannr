@@ -49,7 +49,7 @@ const TABLE_SCHEMAS = {
     (item) => formatAprsisMotion(item)
   ],
   noaaEvents: [
-    (item) => item.last_seen || "",
+    (item) => displayTimestamp(item, "last_seen"),
     (item) => item.alert_kind || item.event_type || "",
     (item) => noaaSeverityText(item),
     (item) => noaaEventTimeText(item),
@@ -59,8 +59,8 @@ const TABLE_SCHEMAS = {
     (item) => item.source || ""
   ],
   usgsEvents: [
-    (item) => item.last_seen || "",
-    (item) => item.event_time || item.last_seen || "",
+    (item) => displayTimestamp(item, "last_seen"),
+    (item) => displayTimestamp(item, "event_time") || displayTimestamp(item, "last_seen"),
     (item) => usgsSubjectLink(item),
     (item) => usgsMagnitudeText(item),
     (item) => item.place || "",
@@ -70,8 +70,8 @@ const TABLE_SCHEMAS = {
     (item) => item.status || ""
   ],
   swpcEvents: [
-    (item) => item.last_seen || "",
-    (item) => item.event_time || item.peak_time || item.issue_time || "",
+    (item) => displayTimestamp(item, "last_seen"),
+    (item) => swpcEventTimeText(item),
     (item) => swpcKindText(item),
     (item) => swpcLevelText(item),
     (item) => swpcSubjectLink(item),
@@ -79,9 +79,9 @@ const TABLE_SCHEMAS = {
     (item) => swpcDetailsText(item)
   ],
   pwsEvents: [
-    (item) => item.last_seen || "",
+    (item) => displayTimestamp(item, "last_seen"),
     (item) => pwsSubjectLink(item),
-    (item) => item.event_time || "",
+    (item) => displayTimestamp(item, "event_time"),
     (item) => pwsWeatherText(item),
     (item) => pwsWindText(item),
     (item) => pwsRainText(item),

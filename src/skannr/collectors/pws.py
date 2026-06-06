@@ -33,6 +33,7 @@ def clean_pws_data(data):
     numeric_keys = {
         "timestamp_epoch",
         "event_time_epoch",
+        "ambient_date_epoch",
         "latitude",
         "longitude",
         "temperature_f",
@@ -272,6 +273,8 @@ class PWSCollector(BaseCollector):
             or parse_time_value(last_data.get("date"))
             or parse_time_value(device.get("lastDataDate"))
         )
+        ambient_date_epoch = parse_time_value(last_data.get("date"))
+        last_rain_epoch = parse_time_value(last_data.get("lastRain"))
         coords = self.device_coords(info)
         coords_info = info.get("coords") if isinstance(info.get("coords"), dict) else {}
         latitude = first_number(
@@ -297,7 +300,12 @@ class PWSCollector(BaseCollector):
             "event_time": format_epoch(event_time_epoch) if event_time_epoch else "",
             "event_time_epoch": event_time_epoch,
             "timestamp_epoch": event_time_epoch,
-            "ambient_date": compact_pws_text(last_data.get("date")),
+            "ambient_date": (
+                format_epoch(ambient_date_epoch)
+                if ambient_date_epoch
+                else compact_pws_text(last_data.get("date"))
+            ),
+            "ambient_date_epoch": ambient_date_epoch,
             "timezone": compact_pws_text(last_data.get("tz")),
             "temperature_f": first_number(last_data, ("tempf", "tempF")),
             "humidity_percent": first_number(last_data, ("humidity", "humidityout")),
@@ -320,8 +328,12 @@ class PWSCollector(BaseCollector):
             "rain_month_in": first_number(last_data, ("monthlyrainin",)),
             "rain_year_in": first_number(last_data, ("yearlyrainin",)),
             "rain_total_in": first_number(last_data, ("totalrainin",)),
-            "last_rain_time": compact_pws_text(last_data.get("lastRain")),
-            "last_rain_epoch": parse_time_value(last_data.get("lastRain")),
+            "last_rain_time": (
+                format_epoch(last_rain_epoch)
+                if last_rain_epoch
+                else compact_pws_text(last_data.get("lastRain"))
+            ),
+            "last_rain_epoch": last_rain_epoch,
             "pressure_rel_inhg": first_number(last_data, ("baromrelin",)),
             "pressure_abs_inhg": first_number(last_data, ("baromabsin",)),
             "solar_w_m2": first_number(last_data, ("solarradiation",)),
@@ -357,7 +369,7 @@ class PWSCollector(BaseCollector):
                 "pressure_rel_inhg",
                 "solar_w_m2",
                 "uv_index",
-                "last_rain_time",
+                "last_rain_epoch",
                 "battery",
             ),
         )

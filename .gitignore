@@ -1,4 +1,5 @@
 # Local runtime state and generated artifacts.
+/.codex/
 /.venv/
 /config/
 /runtime/

@@ -2183,8 +2183,9 @@ class ReportsBuilder:
             parts.append("month {:.2f} in".format(month))
         if year is not None:
             parts.append("year {:.2f} in".format(year))
-        if data.get("last_rain_time"):
-            parts.append("last rain {}".format(data.get("last_rain_time")))
+        last_rain = self.pws_last_rain_text(data)
+        if last_rain:
+            parts.append("last rain {}".format(last_rain))
         return ", ".join(parts)
 
     def pws_pressure_text(self, data):
@@ -2228,12 +2229,14 @@ class ReportsBuilder:
 
     def pws_sample_time_text(self, data):
         """Return sample time and source timezone text."""
+        sample_time = data.get("event_time") or self.pws_epoch_text(
+            data, "event_time_epoch"
+        )
         return "; ".join(
             item
             for item in (
-                data.get("event_time") or "",
+                sample_time,
                 data.get("timezone") and "tz {}".format(data.get("timezone")),
-                data.get("ambient_date") and "api date {}".format(data.get("ambient_date")),
             )
             if item
         )
@@ -2252,6 +2255,17 @@ class ReportsBuilder:
                     stopped, started
                 )
         return "rain {}{}".format(transition, " {}".format(when) if when else "")
+
+    def pws_last_rain_text(self, data):
+        """Return last-rain timestamp in Skannr local display format."""
+        return self.pws_epoch_text(data, "last_rain_epoch", "last_rain_time")
+
+    def pws_epoch_text(self, data, epoch_key, fallback_key=None):
+        """Return a timestamp field in Skannr local display format."""
+        epoch = self.to_number((data or {}).get(epoch_key))
+        if epoch:
+            return local_now(epoch)
+        return (data or {}).get(fallback_key) if fallback_key else ""
 
     def pws_source_text(self, data):
         """Return source and URL as one compact evidence row."""

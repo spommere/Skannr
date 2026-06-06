@@ -524,6 +524,20 @@ table {
   width: 46%;
 }
 
+.reports-section {
+  margin-top: 16px;
+}
+
+.reports-section + .reports-section {
+  border-top: 1px solid var(--line);
+  margin-top: 24px;
+  padding-top: 16px;
+}
+
+.reports-section h3 {
+  margin-bottom: 8px;
+}
+
 .aprsis-events-table th:nth-child(2),
 .aprsis-events-table td:nth-child(2) {
   min-width: 11ch;
@@ -746,6 +760,12 @@ table {
 .pws-events-table th:nth-child(2),
 .pws-events-table td:nth-child(2) {
   min-width: 12ch;
+  white-space: nowrap;
+}
+
+.history-pws-subjects-table th:nth-child(1),
+.history-pws-subjects-table td:nth-child(1) {
+  min-width: 13ch;
   white-space: nowrap;
 }
 
