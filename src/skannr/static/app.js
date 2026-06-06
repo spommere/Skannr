@@ -6354,6 +6354,32 @@ function mapLink(label, latitude, longitude, radiusKm) {
   return {node: link, text};
 }
 
+function coordinateTokenLooksPrecise(value) {
+  const text = String(value || "");
+  const decimal = text.match(/\.(\d+)$/);
+  return Boolean(decimal && decimal[1].length >= 3);
+}
+
+function coordinateContextLooksExplicit(text, start, end) {
+  const before = text.slice(Math.max(0, start - 48), start);
+  const after = text.slice(end, Math.min(text.length, end + 48));
+  return /\b(lat|lon|latitude|longitude|coord|coords|coordinate|coordinates|position|location|center|centre)\b/i.test(`${before} ${after}`);
+}
+
+function coordinatePairLooksLikeTime(text, start, end) {
+  return text[start - 1] === ":" || text[end] === ":";
+}
+
+function shouldLinkCoordinatePair(text, match, isRangeFilter) {
+  if (isRangeFilter) return true;
+  const start = match.index;
+  const end = start + match[0].length;
+  if (coordinatePairLooksLikeTime(text, start, end)) return false;
+  const hasCoordinatePrecision = coordinateTokenLooksPrecise(match[5]) &&
+    coordinateTokenLooksPrecise(match[6]);
+  return hasCoordinatePrecision || coordinateContextLooksExplicit(text, start, end);
+}
+
 function appendMapLinkedText(parent, value) {
   const text = String(value === null || value === undefined ? "" : value);
   if (!text) return;
@@ -6367,6 +6393,7 @@ function appendMapLinkedText(parent, value) {
     const lon = Number(isRangeFilter ? match[3] : match[6]);
     const radius = isRangeFilter ? Number(match[4]) : undefined;
     if (!validLatLon(lat, lon)) continue;
+    if (!shouldLinkCoordinatePair(text, match, isRangeFilter)) continue;
     if (match.index > lastIndex) {
       parent.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
     }
