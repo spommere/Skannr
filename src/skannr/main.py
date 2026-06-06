@@ -80,6 +80,30 @@ def read_app_version():
 APP_VERSION = read_app_version()
 
 
+def alert_engine_config(config):
+    """Return AlertEngine config enriched with effective collector subfeed state."""
+    alert_config = copy.deepcopy((config or {}).get("alerts") or {})
+    disabled_noaa_sources = {
+        str(item or "").strip().lower()
+        for item in alert_config.get("_disabled_noaa_sources") or []
+        if str(item or "").strip()
+    }
+    noaa = ((config or {}).get("collectors") or {}).get("noaa") or {}
+    if noaa:
+        if not bool(noaa.get("enabled", False)):
+            disabled_noaa_sources.add("noaa")
+        else:
+            nws = noaa.get("nws") or {}
+            if not bool(nws.get("enabled", True)):
+                disabled_noaa_sources.add("nws")
+            nhc = noaa.get("nhc") or {}
+            if not bool(nhc.get("enabled", True)):
+                disabled_noaa_sources.add("nhc")
+    if disabled_noaa_sources:
+        alert_config["_disabled_noaa_sources"] = sorted(disabled_noaa_sources)
+    return alert_config
+
+
 DERIVED_REFRESH_PHASES = {
     "refresh": {
         "refresh_base": (1, 2, "Subject and Findings History"),
@@ -3664,7 +3688,7 @@ def main():
     config = load_config(args.config)
     runtime["config"] = config
     runtime["event_log"] = deque(maxlen=runtime_int("event_log_maxlen", 100, minimum=1))
-    runtime["alerts"] = AlertEngine(config.get("alerts", {}))
+    runtime["alerts"] = AlertEngine(alert_engine_config(config))
     runtime["findings"] = FindingsEngine(config.get("findings", {}))
     log_dir = configured_log_dir()
     os.makedirs(log_dir, exist_ok=True)

@@ -29,6 +29,7 @@ DEFAULT_ALERT_CONFIG = {
     "dedupe_sec": 900,
     "ack_memory_ttl_sec": 604800,
     "ack_memory_alert_types": ["noaa_hazard"],
+    "_disabled_noaa_sources": [],
     "drone_wifi": {
         "enabled": True,
         "level": "critical",
@@ -167,6 +168,11 @@ LEVEL_PRIORITY = {
 }
 
 ACK_KEY_VERSION = 3
+POLL_FEED_ACK_ALERT_TYPES = {
+    "noaa_hazard",
+    "usgs_earthquake",
+    "swpc_space_weather",
+}
 
 
 class AlertEngine:
@@ -184,9 +190,14 @@ class AlertEngine:
         self.active_ttl_sec = float(self.config.get("active_ttl_sec", 3600))
         self.dedupe_sec = float(self.config.get("dedupe_sec", 900))
         self.ack_memory_ttl_sec = float(self.config.get("ack_memory_ttl_sec", 604800))
-        self.ack_memory_alert_types = {
+        self.ack_memory_alert_types = POLL_FEED_ACK_ALERT_TYPES | {
             str(item or "").strip()
             for item in self.config.get("ack_memory_alert_types") or []
+            if str(item or "").strip()
+        }
+        self.disabled_noaa_sources = {
+            str(item or "").strip().lower()
+            for item in self.config.get("_disabled_noaa_sources") or []
             if str(item or "").strip()
         }
         self.active = {}
@@ -286,6 +297,9 @@ class AlertEngine:
             alert["acked"] = bool(alert.get("acked"))
             alert["evidence"] = clean_evidence(alert.get("evidence") or {})
             alert["count"] = int(float(alert.get("count") or 1))
+            if self.alert_source_disabled(alert):
+                self.dirty = True
+                continue
             if (
                 alert.get("acked")
                 and self.is_nhc_noaa_alert(alert)
@@ -692,6 +706,8 @@ class AlertEngine:
         if not rule.get("enabled", True):
             return []
         data = clean_noaa_data(data)
+        if self.noaa_source_disabled(event_type, data):
+            return []
         if not self.noaa_matches_alert(data, rule):
             return []
         event_id = data.get("event_id") or data.get("headline") or data.get("event") or "noaa"
@@ -1139,6 +1155,46 @@ class AlertEngine:
             return False
         evidence = dict((alert or {}).get("evidence") or {})
         return evidence.get("source") == "NHC" or evidence.get("alert_kind") == "tropical"
+
+    def alert_source_disabled(self, alert):
+        """Return True when a restored alert belongs to a disabled source."""
+        if (alert or {}).get("alert_type") != "noaa_hazard":
+            return False
+        evidence = dict((alert or {}).get("evidence") or {})
+        event_type = (
+            "noaa_tropical_advisory"
+            if self.is_nhc_noaa_alert(alert)
+            else "noaa_weather_alert"
+        )
+        data = {
+            "source": evidence.get("source") or (alert or {}).get("source") or "",
+            "event": evidence.get("event") or (alert or {}).get("subject") or "",
+            "headline": evidence.get("headline") or (alert or {}).get("subject") or "",
+            "area_desc": evidence.get("area_desc") or "",
+            "basin": evidence.get("basin") or "",
+            "alert_kind": evidence.get("alert_kind") or "",
+        }
+        return self.noaa_source_disabled(event_type, data)
+
+    def noaa_source_disabled(self, event_type, data):
+        """Return True when a NOAA event comes from a disabled NOAA subfeed."""
+        disabled = self.disabled_noaa_sources
+        if not disabled:
+            return False
+        if "noaa" in disabled:
+            return True
+        data = data or {}
+        source = str(data.get("source") or "").strip().lower()
+        alert_kind = str(data.get("alert_kind") or "").strip().lower()
+        basin = str(data.get("basin") or "").strip()
+        is_nhc = (
+            source == "nhc"
+            or event_type == "noaa_tropical_advisory"
+            or alert_kind in ("tropical", "tropical_outlook")
+            or bool(basin)
+        )
+        is_nws = source == "nws" or event_type == "noaa_weather_alert"
+        return ("nhc" in disabled and is_nhc) or ("nws" in disabled and is_nws)
 
     def collapse_equivalent_active_alert(self, key, alert_type):
         """Collapse old persisted IDs that now map to this canonical key."""

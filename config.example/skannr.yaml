@@ -67,11 +67,13 @@ alerts:
   # Repeated sightings of the same unacknowledged alert are coalesced for this
   # long. ACKed active alerts stay ACKed unless their level escalates.
   dedupe_sec: 900
-  # Keep ACK memory for long-running alert families, so updated NOAA/NHC
-  # advisories do not require repeated ACKs after the active row expires.
+  # Keep ACK memory for poll-feed alert events, so retained NOAA/USGS/SWPC
+  # feed entries do not require repeated ACKs after the active row expires.
   ack_memory_ttl_sec: 604800
   ack_memory_alert_types:
   - noaa_hazard
+  - usgs_earthquake
+  - swpc_space_weather
   drone_wifi:
     enabled: true
     level: critical

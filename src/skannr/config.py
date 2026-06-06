@@ -76,7 +76,11 @@ DEFAULT_CONFIG = {
         "active_ttl_sec": 3600,
         "dedupe_sec": 900,
         "ack_memory_ttl_sec": 604800,
-        "ack_memory_alert_types": ["noaa_hazard"],
+        "ack_memory_alert_types": [
+            "noaa_hazard",
+            "usgs_earthquake",
+            "swpc_space_weather",
+        ],
         "drone_wifi": {
             "enabled": True,
             "level": "critical",

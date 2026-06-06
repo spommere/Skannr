@@ -390,10 +390,10 @@ installs. `config/` is machine-specific local state.
   recurring.
 - `dedupe_sec`: repeat window for coalescing the same unacknowledged alert.
   ACKed active alerts stay ACKed unless their level escalates.
-- `ack_memory_ttl_sec`, `ack_memory_alert_types`: optional memory for
-  long-running alert families. By default, ACKed NOAA/NHC hazard advisories are
-  remembered for seven days so routine advisory-number updates do not require
-  repeated ACKs.
+- `ack_memory_ttl_sec`, `ack_memory_alert_types`: memory for exact poll-feed
+  alert events. NOAA/NHC, USGS, and SWPC alert fingerprints are remembered by
+  default for seven days so retained upstream feed entries do not require
+  repeated ACKs after restart or after the active row expires.
 - Every rule has `enabled` and `level`; some also have `critical_level`.
 - `drone_wifi.min_rssi`, `ssid_patterns`, `vendor_patterns`, `oui_prefixes`:
   DJI/Remote ID style Wi-Fi alert matching.
