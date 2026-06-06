@@ -7,6 +7,40 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.2.3 - 2026-06-05
+
+- Added optional Ambient Weather PWS collection with live feed, Subject History,
+  Insights, Reports, and Alerts. PWS rows keep station weather, wind, rain
+  rates/totals, pressure, solar/UV, indoor readings, location/elevation, and
+  battery context while keeping Ambient API keys and street addresses out of
+  persisted/displayed data.
+- Added NWS hourly forecast summaries to the NOAA collector. Forecast rows are
+  treated as state-like poll subjects: repeated polls update one latest row per
+  configured point, and forecast detail links work before the next materialized
+  Subject History/Reports refresh.
+- Added OpenStreetMap links for rendered latitude/longitude text and APRS range
+  filters, plus first/latest APRS movement coordinates where retained.
+- Added population-first Reports ordering. Cross-subject pattern rows now appear
+  before per-subject rows for APRS-IS, NOAA, USGS, SWPC, LAN, and existing
+  Wi-Fi/BLE/privacy aggregate reports.
+- Added optional SWPC space-weather collection with live feed, Subject History,
+  Reports, and Alerts for X-class flares, R/S/G scale conditions, Kp storms,
+  and relevant SWPC alert/watch/warning products.
+- Added explicit collector acquisition metadata (`scan`, `poll`, `listen`) and
+  documented the subject-identity contract used by Subject History, live
+  feed de-duplication, Reports, and Alerts.
+- Tightened NOAA/USGS/SWPC poll-feed behavior so repeated polls update one
+  event/subject row, while different NOAA areas, NHC product families/advisory
+  numbers, USGS event IDs, and SWPC event IDs stay distinct.
+- Made SWPC polling tolerant of partial product failures, matching NOAA's
+  sub-feed behavior: successful SWPC product rows still update while failed
+  products appear as collector warning status.
+- Fixed PWS rain-transition report evidence so a stopped rain episode keeps the
+  episode start/stop context in one place rather than leaving ambiguous
+  start/stop rows.
+- Added `ui.poll_feed_live_ttl_sec` and a collector contract validation script
+  for future collector changes.
+
 ## 0.2.2 - 2026-06-04
 
 - Added collector-neutral Subject History as the main derived layer. Wi-Fi,

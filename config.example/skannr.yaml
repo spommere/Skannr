@@ -42,6 +42,10 @@ findings:
   aprs_rain_1h_high_in: 0.25
   aprs_wind_high_mph: 25
   aprs_gust_high_mph: 35
+  pws_temp_change_f: 5
+  pws_rain_1h_high_in: 0.25
+  pws_wind_high_mph: 25
+  pws_gust_high_mph: 35
   noaa_upgrade_severities:
   - Severe
   - Extreme
@@ -91,6 +95,14 @@ alerts:
     oui_prefixes:
     - 60:60:1f
   aprs_weather:
+    enabled: true
+    level: warning
+    critical_level: critical
+    rain_1h_in: 1.0
+    critical_rain_1h_in: 2.0
+    wind_gust_mph: 40
+    critical_wind_gust_mph: 60
+  pws_weather:
     enabled: true
     level: warning
     critical_level: critical
@@ -214,6 +226,10 @@ reports:
   aprs_weather_high_rain_1h_in: 0.25
   aprs_weather_high_wind_mph: 25
   aprs_weather_high_gust_mph: 35
+  pws_weather_temp_change_f: 5
+  pws_weather_high_rain_1h_in: 0.25
+  pws_weather_high_wind_mph: 25
+  pws_weather_high_gust_mph: 35
   noaa_high_severities:
   - Severe
   - Extreme
@@ -234,6 +250,9 @@ ui:
   max_rendered_findings: 1000
   max_history_ssids: 8
   bluetooth_live_recent_sec: 600
+  # Live NOAA/USGS/SWPC feed rows older than this event/update age are hidden.
+  # Raw logs, Subject History, Reports, and Alerts are not deleted by this.
+  poll_feed_live_ttl_sec: 86400
   derived_stale_after_min: 15
   derived_auto_refresh_min: 15
   derived_refresh_timeout_sec: 600

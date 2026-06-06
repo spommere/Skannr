@@ -14,6 +14,7 @@ from .bus import local_now
 from .collectors.lan import clean_lan_data
 from .collectors.noaa import clean_noaa_data, stable_noaa_event_key
 from .collectors.aprsis import aprsis_distance_km, aprsis_float, clean_aprs_data
+from .collectors.pws import clean_pws_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
 from .collectors.swpc import clean_swpc_data, number_or_none, swpc_event_is_alert
 from .collectors.usgs import clean_usgs_data
@@ -44,6 +45,7 @@ class SubjectHistoryBuilder:
         "noaa",
         "usgs",
         "swpc",
+        "pws",
         "lan",
     )
     COLLECTORS = DEVICE_COLLECTORS + DIRECT_COLLECTORS
@@ -104,6 +106,9 @@ class SubjectHistoryBuilder:
         swpc_events, swpc_records = self.build_swpc_history(
             direct_observations.get("swpc") or [], None
         )
+        pws_events, pws_records = self.build_pws_history(
+            direct_observations.get("pws") or [], None
+        )
         lan_events, lan_records = self.build_lan_history(
             direct_observations.get("lan") or [], None
         )
@@ -117,6 +122,7 @@ class SubjectHistoryBuilder:
                 "noaa": noaa_records,
                 "usgs": usgs_records,
                 "swpc": swpc_records,
+                "pws": pws_records,
                 "lan": lan_records,
             },
         )
@@ -166,6 +172,7 @@ class SubjectHistoryBuilder:
             "noaa": noaa_events,
             "usgs": usgs_events,
             "swpc": swpc_events,
+            "pws": pws_events,
             "lan": lan_events,
         }
         summary["subjects"] = self.build_subject_records(summary)
@@ -223,11 +230,12 @@ class SubjectHistoryBuilder:
                 "aprsis",
                 "rayhunter",
                 "rtlsdr",
-            "noaa",
-            "usgs",
-            "swpc",
-            "lan",
-            "subjects",
+                "noaa",
+                "usgs",
+                "swpc",
+                "pws",
+                "lan",
+                "subjects",
                 "subject_counts",
                 "direct_observations",
             )
@@ -261,6 +269,9 @@ class SubjectHistoryBuilder:
         )
         output["swpc"], _ = self.build_swpc_history(
             direct_observations.get("swpc") or [], window_days
+        )
+        output["pws"], _ = self.build_pws_history(
+            direct_observations.get("pws") or [], window_days
         )
         output["lan"], _ = self.build_lan_history(
             direct_observations.get("lan") or [], window_days
@@ -394,6 +405,7 @@ class SubjectHistoryBuilder:
             return event_type in (
                 "noaa_weather_alert",
                 "noaa_tropical_advisory",
+                "noaa_forecast_summary",
                 "collector_offline",
                 "collector_retrying",
             )
@@ -406,6 +418,12 @@ class SubjectHistoryBuilder:
         if collector == "swpc":
             return event_type in (
                 "swpc_event",
+                "collector_offline",
+                "collector_retrying",
+            )
+        if collector == "pws":
+            return event_type in (
+                "pws_weather",
                 "collector_offline",
                 "collector_retrying",
             )
@@ -434,6 +452,8 @@ class SubjectHistoryBuilder:
             return clean_usgs_data(data)
         if collector == "swpc":
             return clean_swpc_data(data)
+        if collector == "pws":
+            return clean_pws_data(data)
         if collector == "lan":
             return clean_lan_data(data)
         return {}
@@ -746,14 +766,31 @@ class SubjectHistoryBuilder:
         rain_1h = aprsis_float(data.get("rain_1h_in"))
         if rain_1h is not None:
             previous_rain = station.get("_last_rain_1h_in")
+            if previous_rain is None and rain_1h > 0:
+                station["rain_started"] = True
+                station["rain_started_at"] = local_now(epoch)
+                station["rain_started_epoch"] = epoch
+                station["rain_episode_started_at"] = local_now(epoch)
+                station["rain_episode_started_epoch"] = epoch
+                station.pop("rain_stopped", None)
+                station.pop("rain_stopped_at", None)
+                station.pop("rain_stopped_epoch", None)
+                station.pop("rain_episode_stopped_at", None)
+                station.pop("rain_episode_stopped_epoch", None)
+                station["rain_last_transition"] = "started"
+                station["rain_last_transition_at"] = local_now(epoch)
+                station["rain_last_transition_epoch"] = epoch
             if previous_rain is not None and previous_rain <= 0 < rain_1h:
                 station["rain_started"] = True
                 station["rain_started_at"] = local_now(epoch)
                 station["rain_started_epoch"] = epoch
                 station["rain_episode_started_at"] = local_now(epoch)
                 station["rain_episode_started_epoch"] = epoch
-                station["_rain_current_start_at"] = local_now(epoch)
-                station["_rain_current_start_epoch"] = epoch
+                station.pop("rain_stopped", None)
+                station.pop("rain_stopped_at", None)
+                station.pop("rain_stopped_epoch", None)
+                station.pop("rain_episode_stopped_at", None)
+                station.pop("rain_episode_stopped_epoch", None)
                 station["rain_last_transition"] = "started"
                 station["rain_last_transition_at"] = local_now(epoch)
                 station["rain_last_transition_epoch"] = epoch
@@ -762,18 +799,16 @@ class SubjectHistoryBuilder:
                 station["rain_stopped_at"] = local_now(epoch)
                 station["rain_stopped_epoch"] = epoch
                 station["rain_episode_started_at"] = (
-                    station.get("_rain_current_start_at")
-                    or station.get("rain_episode_started_at")
-                    or ""
+                    station.get("rain_episode_started_at") or ""
                 )
                 station["rain_episode_started_epoch"] = (
-                    station.get("_rain_current_start_epoch")
-                    or station.get("rain_episode_started_epoch")
+                    station.get("rain_episode_started_epoch")
                 )
                 station["rain_episode_stopped_at"] = local_now(epoch)
                 station["rain_episode_stopped_epoch"] = epoch
-                station.pop("_rain_current_start_at", None)
-                station.pop("_rain_current_start_epoch", None)
+                station.pop("rain_started", None)
+                station.pop("rain_started_at", None)
+                station.pop("rain_started_epoch", None)
                 station["rain_last_transition"] = "stopped"
                 station["rain_last_transition_at"] = local_now(epoch)
                 station["rain_last_transition_epoch"] = epoch
@@ -995,6 +1030,7 @@ class SubjectHistoryBuilder:
             if event_type not in (
                 "noaa_weather_alert",
                 "noaa_tropical_advisory",
+                "noaa_forecast_summary",
                 "collector_offline",
                 "collector_retrying",
             ):
@@ -1032,10 +1068,19 @@ class SubjectHistoryBuilder:
                     "internet_fed": True,
                 },
             )
-            fingerprint = data.get("fingerprint") or "|".join(
-                str(data.get(field) or "")
-                for field in ("event", "headline", "updated", "summary", "source_url")
-            )
+            if data.get("alert_kind") == "tropical_outlook":
+                # Older NOAA rows included feed timestamp/link churn in their
+                # fingerprint. For outlook state, count material text changes,
+                # not every refreshed "no tropical cyclones" publication.
+                fingerprint = "|".join(
+                    str(data.get(field) or "")
+                    for field in ("event", "headline", "severity", "summary", "basin")
+                )
+            else:
+                fingerprint = data.get("fingerprint") or "|".join(
+                    str(data.get(field) or "")
+                    for field in ("event", "headline", "updated", "summary", "source_url")
+                )
             if fingerprint not in fingerprints[event_id]:
                 fingerprints[event_id].add(fingerprint)
                 record["update_count"] += 1
@@ -1052,7 +1097,7 @@ class SubjectHistoryBuilder:
         output = [
             {
                 "collector": "noaa",
-                "type": "noaa_alert_summary",
+                "type": record.get("event_type") or "noaa_alert_summary",
                 "timestamp": record.get("last_seen"),
                 "timestamp_epoch": record.get("last_seen_epoch"),
                 "severity": "warning"
@@ -1247,6 +1292,217 @@ class SubjectHistoryBuilder:
             )
         return output, records_read
 
+    def build_pws_history(self, observations, window_days):
+        """Return compact per-station PWS summaries."""
+        stations = {}
+        latest_health = None
+        latest_health_epoch = None
+        records_read = 0
+        for event in observations or []:
+            if not event_in_window(event, window_days):
+                continue
+            event_type = event.get("type") or ""
+            if event_type not in (
+                "pws_weather",
+                "collector_offline",
+                "collector_retrying",
+            ):
+                continue
+            epoch = event_time_epoch(event)
+            if epoch is None:
+                continue
+            records_read += 1
+            data = clean_pws_data(event.get("data") or {})
+            if event_type in ("collector_offline", "collector_retrying"):
+                latest_health = {
+                    "collector_state": "OFFLINE"
+                    if event_type == "collector_offline"
+                    else "RETRYING",
+                    "reason": data.get("reason") or "",
+                    "last_seen": local_now(epoch),
+                    "last_seen_epoch": epoch,
+                }
+                latest_health_epoch = epoch
+                continue
+            station_id = (
+                data.get("station_id")
+                or data.get("station_name")
+                or data.get("mac_address")
+                or "unknown"
+            )
+            record = stations.setdefault(
+                station_id,
+                {
+                    "station_id": station_id,
+                    "first_seen": local_now(epoch),
+                    "first_seen_epoch": epoch,
+                    "last_seen": local_now(epoch),
+                    "last_seen_epoch": epoch,
+                    "observation_count": 0,
+                    "update_count": 0,
+                    "sample_battery": [],
+                },
+            )
+            self.update_pws_weather_summary(record, data, epoch)
+        output = [
+            {
+                "collector": "pws",
+                "type": "pws_weather_summary",
+                "timestamp": record.get("last_seen"),
+                "timestamp_epoch": record.get("last_seen_epoch"),
+                "severity": "info",
+                "data": clean_pws_data(record),
+            }
+            for record in sorted(
+                stations.values(),
+                key=lambda item: item.get("last_seen_epoch") or 0,
+                reverse=True,
+            )
+        ]
+        if latest_health and not output:
+            output.append(
+                {
+                    "collector": "pws",
+                    "type": "pws_collector_summary",
+                    "timestamp": local_now(latest_health_epoch),
+                    "timestamp_epoch": latest_health_epoch,
+                    "severity": "warning",
+                    "data": clean_pws_data(latest_health),
+                }
+            )
+        return output, records_read
+
+    def update_pws_weather_summary(self, record, data, epoch):
+        """Fold one PWS sample into its station summary."""
+        record["observation_count"] = int(record.get("observation_count") or 0) + 1
+        record["update_count"] = int(record.get("update_count") or 0) + 1
+        if epoch < record.get("first_seen_epoch", epoch):
+            record["first_seen_epoch"] = epoch
+            record["first_seen"] = local_now(epoch)
+        if epoch >= record.get("last_seen_epoch", 0):
+            previous_rain = record.get("latest_rain_1h_in")
+            rain = data.get("rain_1h_in")
+            record["last_seen_epoch"] = epoch
+            record["last_seen"] = local_now(epoch)
+            for key in (
+                "station_id",
+                "station_name",
+                "mac_address",
+                "model",
+                "latitude",
+                "longitude",
+                "location_name",
+                "elevation_m",
+                "elevation_ft",
+                "event_time",
+                "event_time_epoch",
+                "ambient_date",
+                "timezone",
+                "temperature_f",
+                "humidity_percent",
+                "dewpoint_f",
+                "feels_like_f",
+                "indoor_temperature_f",
+                "indoor_humidity_percent",
+                "indoor_dewpoint_f",
+                "indoor_feels_like_f",
+                "wind_direction_deg",
+                "wind_direction_avg_10m_deg",
+                "wind_speed_mph",
+                "wind_speed_avg_10m_mph",
+                "wind_gust_mph",
+                "max_daily_gust_mph",
+                "rain_1h_in",
+                "rain_event_in",
+                "rain_day_in",
+                "rain_week_in",
+                "rain_month_in",
+                "rain_year_in",
+                "rain_total_in",
+                "last_rain_time",
+                "last_rain_epoch",
+                "pressure_rel_inhg",
+                "pressure_abs_inhg",
+                "solar_w_m2",
+                "uv_index",
+                "weather_summary",
+                "source",
+                "source_url",
+            ):
+                if data.get(key) not in (None, "", []):
+                    record[key] = data.get(key)
+            if data.get("battery"):
+                self.sample_direct_value(record, "sample_battery", data.get("battery"), 8)
+            record["latest_rain_1h_in"] = rain
+            self.update_pws_rain_transition(record, previous_rain, rain, epoch)
+        if record.get("first_temperature_f") is None and data.get("temperature_f") is not None:
+            record["first_temperature_f"] = data.get("temperature_f")
+        self.update_min_max_numeric(record, "temperature_min_f", "temperature_max_f", data.get("temperature_f"))
+        if record.get("temperature_f") is not None and record.get("first_temperature_f") is not None:
+            try:
+                record["temperature_change_f"] = round(
+                    float(record.get("temperature_f")) - float(record.get("first_temperature_f")),
+                    1,
+                )
+            except (TypeError, ValueError):
+                pass
+        self.update_max_numeric(record, "rain_1h_max_in", data.get("rain_1h_in"))
+        self.update_max_numeric(record, "wind_speed_max_mph", data.get("wind_speed_mph"))
+        self.update_max_numeric(record, "wind_gust_max_mph", data.get("wind_gust_mph"))
+
+    def update_pws_rain_transition(self, record, previous_rain, rain, epoch):
+        """Track simple PWS rain start/stop transitions."""
+        try:
+            previous = float(previous_rain) if previous_rain is not None else None
+            current = float(rain) if rain is not None else None
+        except (TypeError, ValueError):
+            return
+        if current is None:
+            return
+        record["rain_active"] = current > 0
+        if previous is None:
+            if current > 0:
+                record["rain_started"] = True
+                record["rain_started_at"] = local_now(epoch)
+                record["rain_started_epoch"] = epoch
+                record["rain_episode_started_at"] = local_now(epoch)
+                record["rain_episode_started_epoch"] = epoch
+                record.pop("rain_stopped", None)
+                record.pop("rain_stopped_at", None)
+                record.pop("rain_stopped_epoch", None)
+                record.pop("rain_episode_stopped_at", None)
+                record.pop("rain_episode_stopped_epoch", None)
+                record["rain_last_transition"] = "started"
+                record["rain_last_transition_at"] = local_now(epoch)
+                record["rain_last_transition_epoch"] = epoch
+            return
+        if previous <= 0 < current:
+            record["rain_started"] = True
+            record["rain_started_at"] = local_now(epoch)
+            record["rain_started_epoch"] = epoch
+            record["rain_episode_started_at"] = local_now(epoch)
+            record["rain_episode_started_epoch"] = epoch
+            record.pop("rain_stopped", None)
+            record.pop("rain_stopped_at", None)
+            record.pop("rain_stopped_epoch", None)
+            record.pop("rain_episode_stopped_at", None)
+            record.pop("rain_episode_stopped_epoch", None)
+            record["rain_last_transition"] = "started"
+            record["rain_last_transition_at"] = local_now(epoch)
+            record["rain_last_transition_epoch"] = epoch
+        elif previous > 0 and current <= 0:
+            record["rain_stopped"] = True
+            record["rain_stopped_at"] = local_now(epoch)
+            record["rain_stopped_epoch"] = epoch
+            record["rain_episode_stopped_at"] = local_now(epoch)
+            record["rain_episode_stopped_epoch"] = epoch
+            record.pop("rain_started", None)
+            record.pop("rain_started_at", None)
+            record.pop("rain_started_epoch", None)
+            record["rain_last_transition"] = "stopped"
+            record["rain_last_transition_at"] = local_now(epoch)
+            record["rain_last_transition_epoch"] = epoch
+
     def build_lan_history(self, observations, window_days):
         """Return compact per-device and per-gateway LAN summaries."""
         devices = {}
@@ -1435,6 +1691,17 @@ class SubjectHistoryBuilder:
         old = record.get(key)
         record[key] = number if old is None else max(float(old), number)
 
+    def update_min_max_numeric(self, record, min_key, max_key, value):
+        """Update min/max numeric fields when a collector reports a number."""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return
+        old_min = record.get(min_key)
+        old_max = record.get(max_key)
+        record[min_key] = number if old_min is None else min(float(old_min), number)
+        record[max_key] = number if old_max is None else max(float(old_max), number)
+
     def build_subject_records(self, summary):
         """Return normalized subject rows for every collector family."""
         subjects = []
@@ -1448,6 +1715,7 @@ class SubjectHistoryBuilder:
         self.add_noaa_subjects(subjects, (summary or {}).get("noaa") or [])
         self.add_usgs_subjects(subjects, (summary or {}).get("usgs") or [])
         self.add_swpc_subjects(subjects, (summary or {}).get("swpc") or [])
+        self.add_pws_subjects(subjects, (summary or {}).get("pws") or [])
         self.add_lan_subjects(subjects, (summary or {}).get("lan") or [])
         subjects.sort(
             key=lambda item: (
@@ -1761,6 +2029,8 @@ class SubjectHistoryBuilder:
             if event_type == "noaa_collector_summary":
                 subject_type = "noaa_collector"
                 subject = "NOAA collector"
+            elif data.get("alert_kind") == "forecast":
+                subject_type = "noaa_forecast"
             elif data.get("alert_kind") == "tropical":
                 subject_type = "noaa_tropical_advisory"
             elif data.get("alert_kind") == "tropical_outlook":
@@ -1806,6 +2076,38 @@ class SubjectHistoryBuilder:
                         "source": data.get("source") or "",
                         "source_url": data.get("source_url") or "",
                         "basin": data.get("basin") or "",
+                        "latitude": data.get("latitude"),
+                        "longitude": data.get("longitude"),
+                        "forecast_generated": data.get("forecast_generated") or "",
+                        "forecast_generated_epoch": data.get(
+                            "forecast_generated_epoch"
+                        ),
+                        "forecast_window_hours": data.get("forecast_window_hours"),
+                        "forecast_soon_hours": data.get("forecast_soon_hours"),
+                        "forecast_hour_count": data.get("forecast_hour_count"),
+                        "current_forecast": data.get("current_forecast") or "",
+                        "current_temperature_f": data.get("current_temperature_f"),
+                        "current_precip_probability": data.get(
+                            "current_precip_probability"
+                        ),
+                        "temperature_min_f": data.get("temperature_min_f"),
+                        "temperature_max_f": data.get("temperature_max_f"),
+                        "temperature_change_f": data.get("temperature_change_f"),
+                        "max_precip_probability": data.get("max_precip_probability"),
+                        "precip_probability_threshold": data.get(
+                            "precip_probability_threshold"
+                        ),
+                        "precip_likely_soon": data.get("precip_likely_soon"),
+                        "next_precip_start": data.get("next_precip_start") or "",
+                        "next_precip_end": data.get("next_precip_end") or "",
+                        "next_precip_probability": data.get(
+                            "next_precip_probability"
+                        ),
+                        "next_precip_forecast": data.get("next_precip_forecast")
+                        or "",
+                        "max_wind_mph": data.get("max_wind_mph"),
+                        "first_period_start": data.get("first_period_start") or "",
+                        "last_period_end": data.get("last_period_end") or "",
                         "update_count": data.get("update_count") or 0,
                         "internet_fed": True,
                         "reason": data.get("reason") or "",
@@ -1928,6 +2230,126 @@ class SubjectHistoryBuilder:
         if kp is not None:
             parts.append("Kp {:.1f}".format(kp))
         return " ".join(str(part) for part in parts if part)
+
+    def add_pws_subjects(self, subjects, events):
+        """Add PWS station subjects."""
+        for event in events:
+            data = clean_pws_data((event or {}).get("data") or {})
+            event_type = (event or {}).get("type") or ""
+            if event_type == "pws_collector_summary":
+                subject_id = "pws"
+                subject = "PWS collector"
+                subject_type = "pws_collector"
+            else:
+                subject_id = data.get("station_id") or data.get("mac_address") or "unknown"
+                subject = data.get("station_id") or data.get("station_name") or subject_id
+                subject_type = "pws_weather_station"
+            subjects.append(
+                self.subject_record(
+                    "pws",
+                    subject_type,
+                    subject_id,
+                    subject,
+                    {
+                        "first_seen": data.get("first_seen") or event.get("timestamp"),
+                        "first_seen_epoch": data.get("first_seen_epoch")
+                        or event.get("timestamp_epoch"),
+                        "last_seen": data.get("last_seen") or event.get("timestamp"),
+                        "last_seen_epoch": data.get("last_seen_epoch")
+                        or event.get("timestamp_epoch"),
+                    },
+                    {
+                        "station_id": data.get("station_id") or "",
+                        "station_name": data.get("station_name") or "",
+                        "mac_address": data.get("mac_address") or "",
+                        "model": data.get("model") or "",
+                        "latitude": data.get("latitude"),
+                        "longitude": data.get("longitude"),
+                        "location_name": data.get("location_name") or "",
+                        "elevation_m": data.get("elevation_m"),
+                        "elevation_ft": data.get("elevation_ft"),
+                        "event_time": data.get("event_time") or "",
+                        "event_time_epoch": data.get("event_time_epoch"),
+                        "ambient_date": data.get("ambient_date") or "",
+                        "timezone": data.get("timezone") or "",
+                        "temperature_f": data.get("temperature_f"),
+                        "humidity_percent": data.get("humidity_percent"),
+                        "dewpoint_f": data.get("dewpoint_f"),
+                        "feels_like_f": data.get("feels_like_f"),
+                        "indoor_temperature_f": data.get("indoor_temperature_f"),
+                        "indoor_humidity_percent": data.get(
+                            "indoor_humidity_percent"
+                        ),
+                        "indoor_dewpoint_f": data.get("indoor_dewpoint_f"),
+                        "indoor_feels_like_f": data.get("indoor_feels_like_f"),
+                        "temperature_min_f": data.get("temperature_min_f"),
+                        "temperature_max_f": data.get("temperature_max_f"),
+                        "temperature_change_f": data.get("temperature_change_f"),
+                        "wind_direction_deg": data.get("wind_direction_deg"),
+                        "wind_direction_avg_10m_deg": data.get(
+                            "wind_direction_avg_10m_deg"
+                        ),
+                        "wind_speed_mph": data.get("wind_speed_mph"),
+                        "wind_speed_avg_10m_mph": data.get(
+                            "wind_speed_avg_10m_mph"
+                        ),
+                        "wind_gust_mph": data.get("wind_gust_mph"),
+                        "max_daily_gust_mph": data.get("max_daily_gust_mph"),
+                        "wind_speed_max_mph": data.get("wind_speed_max_mph"),
+                        "wind_gust_max_mph": data.get("wind_gust_max_mph"),
+                        "rain_1h_in": data.get("rain_1h_in"),
+                        "latest_rain_1h_in": data.get("latest_rain_1h_in"),
+                        "rain_1h_max_in": data.get("rain_1h_max_in"),
+                        "rain_event_in": data.get("rain_event_in"),
+                        "rain_day_in": data.get("rain_day_in"),
+                        "rain_week_in": data.get("rain_week_in"),
+                        "rain_month_in": data.get("rain_month_in"),
+                        "rain_year_in": data.get("rain_year_in"),
+                        "rain_total_in": data.get("rain_total_in"),
+                        "last_rain_time": data.get("last_rain_time") or "",
+                        "last_rain_epoch": data.get("last_rain_epoch"),
+                        "rain_started": data.get("rain_started"),
+                        "rain_started_at": data.get("rain_started_at") or "",
+                        "rain_started_epoch": data.get("rain_started_epoch"),
+                        "rain_stopped": data.get("rain_stopped"),
+                        "rain_stopped_at": data.get("rain_stopped_at") or "",
+                        "rain_stopped_epoch": data.get("rain_stopped_epoch"),
+                        "rain_active": bool(data.get("rain_active")),
+                        "rain_last_transition": data.get("rain_last_transition") or "",
+                        "rain_last_transition_at": data.get("rain_last_transition_at")
+                        or "",
+                        "rain_last_transition_epoch": data.get(
+                            "rain_last_transition_epoch"
+                        ),
+                        "rain_episode_started_at": data.get(
+                            "rain_episode_started_at"
+                        )
+                        or "",
+                        "rain_episode_started_epoch": data.get(
+                            "rain_episode_started_epoch"
+                        ),
+                        "rain_episode_stopped_at": data.get(
+                            "rain_episode_stopped_at"
+                        )
+                        or "",
+                        "rain_episode_stopped_epoch": data.get(
+                            "rain_episode_stopped_epoch"
+                        ),
+                        "pressure_rel_inhg": data.get("pressure_rel_inhg"),
+                        "pressure_abs_inhg": data.get("pressure_abs_inhg"),
+                        "solar_w_m2": data.get("solar_w_m2"),
+                        "uv_index": data.get("uv_index"),
+                        "battery": data.get("battery") or "",
+                        "sample_battery": data.get("sample_battery") or [],
+                        "weather_summary": data.get("weather_summary") or "",
+                        "source": data.get("source") or "",
+                        "source_url": data.get("source_url") or "",
+                        "observation_count": data.get("observation_count") or 0,
+                        "update_count": data.get("update_count") or 0,
+                        "reason": data.get("reason") or "",
+                    },
+                )
+            )
 
     def add_lan_subjects(self, subjects, events):
         """Add LAN device and gateway subjects."""

@@ -5,7 +5,7 @@ label: BLE Identify
 description: On-demand active BLE Device Information Service reader
 source_group: bluetooth
 source_group_label: Bluetooth
-has_subject_history: true
+acquisition_mode: scan
 enabled: true
 auto_start: false
 validation_timeout_sec: 10

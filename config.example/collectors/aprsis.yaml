@@ -2,7 +2,7 @@ key: aprsis
 order: 70
 label: APRS-IS
 description: Optional internet-fed APRS-IS local-area situational feed
-has_subject_history: true
+acquisition_mode: listen
 enabled: false
 
 # APRS-IS is an internet source, not evidence that Skannr's local antenna heard

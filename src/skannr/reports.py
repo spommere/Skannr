@@ -13,12 +13,14 @@ from .bus import local_now
 from .collectors.aprsis import clean_aprs_data
 from .collectors.lan import clean_lan_data
 from .collectors.noaa import clean_noaa_data
+from .collectors.pws import clean_pws_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
 from .collectors.swpc import (
     clean_swpc_data,
     number_or_none,
     swpc_event_is_alert,
     swpc_event_is_critical,
+    xray_class_to_flux,
 )
 from .collectors.usgs import clean_usgs_data
 from .log_utils import (
@@ -50,6 +52,10 @@ DEFAULT_REPORT_CONFIG = {
     "aprs_weather_high_rain_1h_in": 0.25,
     "aprs_weather_high_wind_mph": 25,
     "aprs_weather_high_gust_mph": 35,
+    "pws_weather_temp_change_f": 5,
+    "pws_weather_high_rain_1h_in": 0.25,
+    "pws_weather_high_wind_mph": 25,
+    "pws_weather_high_gust_mph": 35,
     "noaa_high_severities": ["Severe", "Extreme"],
     "usgs_nearby_radius_km": 100,
     "usgs_warning_magnitude": 4.0,
@@ -111,6 +117,9 @@ class ReportsBuilder:
             self.swpc_reports((history or {}).get("swpc") or [], generated_at)
         )
         reports.extend(
+            self.pws_reports((history or {}).get("pws") or [], generated_at)
+        )
+        reports.extend(
             self.lan_reports((history or {}).get("lan") or [], generated_at)
         )
         reports.extend(self.privacy_reports(wifi, bluetooth, generated_at))
@@ -119,6 +128,7 @@ class ReportsBuilder:
             self.enrich_report_metadata(report)
         reports.sort(
             key=lambda item: (
+                self.report_scope_rank(item),
                 self.severity_rank(item["severity"]),
                 item.get("score", 0),
                 item.get("last_seen_epoch") or 0,
@@ -247,16 +257,194 @@ class ReportsBuilder:
     def aprsis_reports(self, events, timestamp):
         """Return APRS-IS report rows grouped by source callsign."""
         reports = []
+        station_entries = []
         for event in events or []:
             data = clean_aprs_data(event.get("data") or {})
             event_type = event.get("type") or ""
             if event_type == "aprsis_collector_summary":
                 report = self.aprsis_collector_report(data, event, timestamp)
+                if report:
+                    reports.append(report)
             else:
-                report = self.aprsis_station_report(data, event, timestamp)
+                station_entries.append((data, event))
+        reports.extend(self.aprsis_population_reports(station_entries, timestamp))
+        for data, event in station_entries:
+            report = self.aprsis_station_report(data, event, timestamp)
             if report:
                 reports.append(report)
         return reports
+
+    def aprsis_population_reports(self, entries, timestamp):
+        """Return area-level APRS-IS population rows before station rows."""
+        subjects = [
+            (data, event)
+            for data, event in entries or []
+            if self.to_int(data.get("packet_count")) > 0
+        ]
+        if not subjects:
+            return []
+        reports = []
+        weather = [
+            (data, event)
+            for data, event in subjects
+            if self.to_int(data.get("weather_count")) > 0
+        ]
+        if len(weather) >= 2:
+            reports.append(self.aprsis_weather_population_report(weather, timestamp))
+
+        mobile = [
+            (data, event)
+            for data, event in subjects
+            if self.aprsis_station_is_mobile(data)
+        ]
+        if len(mobile) >= 2:
+            reports.append(self.aprsis_mobile_population_report(mobile, timestamp))
+        return [report for report in reports if report]
+
+    def aprsis_station_is_mobile(self, data):
+        """Return True when an APRS station looks mobile within the window."""
+        if not self.to_int(data.get("position_count")):
+            return False
+        return (
+            bool(data.get("movement_detected"))
+            or (self.to_number(data.get("position_span_km")) or 0)
+            >= float(self.config["aprs_mobile_min_distance_km"])
+            or (self.to_number(data.get("max_speed_kmh")) or 0) >= 5
+        )
+
+    def aprsis_weather_population_report(self, entries, timestamp):
+        """Return an area-level APRS weather-station report row."""
+        datasets = [data for data, _event in entries or []]
+        first_seen, last_seen, last_seen_epoch = self.population_time_range(entries)
+        rain_max = self.max_numeric(datasets, "rain_1h_max_in")
+        wind_max = self.max_numeric(datasets, "wind_speed_max_mph")
+        gust_max = self.max_numeric(datasets, "wind_gust_max_mph")
+        temp_min = self.min_numeric(
+            datasets, "temperature_min_f", fallback_key="temperature_f"
+        )
+        temp_max = self.max_numeric(
+            datasets, "temperature_max_f", fallback_key="temperature_f"
+        )
+        active_rain = sum(1 for data in datasets if data.get("rain_active"))
+        findings = ["APRS weather station population"]
+        if active_rain:
+            findings.append("{} station(s) reporting active rain".format(active_rain))
+        if rain_max is not None and rain_max >= float(
+            self.config["aprs_weather_high_rain_1h_in"]
+        ):
+            findings.append("High rain rate")
+        if wind_max is not None and wind_max >= float(
+            self.config["aprs_weather_high_wind_mph"]
+        ):
+            findings.append("High wind")
+        if gust_max is not None and gust_max >= float(
+            self.config["aprs_weather_high_gust_mph"]
+        ):
+            findings.append("High wind gust")
+        station_count = len(datasets)
+        packet_count = sum(self.to_int(data.get("packet_count")) for data in datasets)
+        report_count = sum(self.to_int(data.get("weather_count")) for data in datasets)
+        summary_parts = [
+            "{} weather station(s)".format(station_count),
+            "{} weather report(s)".format(report_count),
+        ]
+        if temp_min is not None and temp_max is not None:
+            summary_parts.append("temperature {:.0f}-{:.0f} F".format(temp_min, temp_max))
+        if rain_max is not None:
+            summary_parts.append("max rain rate {:.2f} in/hr".format(rain_max))
+        if gust_max is not None:
+            summary_parts.append("max gust {:.0f} mph".format(gust_max))
+        evidence = self.clean_evidence(
+            {
+                "findings": self.unique_ordered(findings),
+                "population_kind": "aprs_weather",
+                "station_count": station_count,
+                "packet_count": packet_count,
+                "weather_count": report_count,
+                "stations": self.population_subjects(datasets, "callsign"),
+                "temperature_min_f": temp_min,
+                "temperature_max_f": temp_max,
+                "rain_1h_max_in": rain_max,
+                "wind_speed_max_mph": wind_max,
+                "wind_gust_max_mph": gust_max,
+                "rain_active_stations": active_rain,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        score = 45 + min(station_count * 5, 20)
+        if rain_max is not None and rain_max >= float(
+            self.config["aprs_weather_high_rain_1h_in"]
+        ):
+            score += 25
+        if gust_max is not None and gust_max >= float(
+            self.config["aprs_weather_high_gust_mph"]
+        ):
+            score += 20
+        return self.report(
+            timestamp,
+            "warning" if self.aprsis_warning_findings(findings) else "info",
+            "aprsis",
+            "aprsis_weather_population",
+            "APRS weather station pattern",
+            "; ".join(summary_parts) + ".",
+            evidence,
+            self.score_with_recency(score, last_seen_epoch, cap=95),
+            last_seen,
+            subject="APRS-IS weather stations",
+            report_scope="population",
+        )
+
+    def aprsis_mobile_population_report(self, entries, timestamp):
+        """Return an area-level APRS mobile-station report row."""
+        datasets = [data for data, _event in entries or []]
+        first_seen, last_seen, last_seen_epoch = self.population_time_range(entries)
+        max_span = self.max_numeric(datasets, "position_span_km")
+        max_speed = self.max_numeric(datasets, "max_speed_kmh")
+        station_count = len(datasets)
+        packet_count = sum(self.to_int(data.get("packet_count")) for data in datasets)
+        position_count = sum(
+            self.to_int(data.get("position_count")) for data in datasets
+        )
+        findings = ["Mobile stations moved through area"]
+        summary_parts = [
+            "{} mobile station(s)".format(station_count),
+            "{} position report(s)".format(position_count),
+        ]
+        if max_span is not None:
+            summary_parts.append("max span {:.2f} km".format(max_span))
+        if max_speed is not None:
+            summary_parts.append("max speed {:.1f} km/h".format(max_speed))
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "population_kind": "aprs_mobile",
+                "station_count": station_count,
+                "packet_count": packet_count,
+                "position_count": position_count,
+                "stations": self.population_subjects(datasets, "callsign"),
+                "position_span_km": max_span,
+                "max_speed_kmh": max_speed,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        score = 50 + min(station_count * 7, 25)
+        return self.report(
+            timestamp,
+            "info",
+            "aprsis",
+            "aprsis_mobile_population",
+            "APRS mobile station pattern",
+            "; ".join(summary_parts) + ".",
+            evidence,
+            self.score_with_recency(score, last_seen_epoch, cap=90),
+            last_seen,
+            subject="APRS-IS mobile stations",
+            report_scope="population",
+        )
 
     def aprsis_collector_report(self, data, event, timestamp):
         """Return a collector-health row only when APRS-IS is not online."""
@@ -515,6 +703,10 @@ class ReportsBuilder:
             "addressee": data.get("addressee") or "",
             "message": data.get("message") or "",
             "comment": data.get("comment") or "",
+            "first_latitude": data.get("first_latitude"),
+            "first_longitude": data.get("first_longitude"),
+            "last_latitude": data.get("last_latitude"),
+            "last_longitude": data.get("last_longitude"),
             "latitude": data.get("latitude"),
             "longitude": data.get("longitude"),
             "position_span_km": data.get("position_span_km"),
@@ -582,6 +774,94 @@ class ReportsBuilder:
             for key, value in (evidence or {}).items()
             if value not in ("", [], None)
         }
+
+    def population_time_range(self, entries):
+        """Return first/last display times for aggregate report rows."""
+        first_epochs = []
+        last_epochs = []
+        for data, event in entries or []:
+            first_epoch = (
+                self.to_number(data.get("first_seen_epoch"))
+                or record_time_epoch(data, "first_seen")
+                or record_time_epoch(event, "timestamp")
+            )
+            last_epoch = (
+                self.to_number(data.get("last_seen_epoch"))
+                or record_time_epoch(data, "last_seen")
+                or record_time_epoch(event, "timestamp")
+            )
+            if first_epoch is not None:
+                first_epochs.append(first_epoch)
+            if last_epoch is not None:
+                last_epochs.append(last_epoch)
+        first_epoch = min(first_epochs) if first_epochs else None
+        last_epoch = max(last_epochs) if last_epochs else None
+        first_seen = format_epoch(first_epoch) if first_epoch is not None else ""
+        last_seen = format_epoch(last_epoch) if last_epoch is not None else ""
+        return first_seen, last_seen, last_epoch
+
+    def population_values(self, datasets, key, limit=12):
+        """Return compact unique string values for aggregate evidence."""
+        values = []
+        seen = set()
+        for data in datasets or []:
+            raw = data.get(key)
+            raw_values = raw if isinstance(raw, list) else [raw]
+            for value in raw_values:
+                text = str(value or "").strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                values.append(text)
+                if len(values) >= limit:
+                    return values
+        return values
+
+    def population_subjects(self, datasets, key, limit=12):
+        """Return sorted unique subject identifiers for aggregate evidence."""
+        return sorted(self.population_values(datasets, key, limit=1000))[:limit]
+
+    def min_numeric(self, datasets, key, fallback_key=None):
+        """Return the minimum numeric value for a data key."""
+        values = self.numeric_values(datasets, key, fallback_key=fallback_key)
+        return min(values) if values else None
+
+    def max_numeric(self, datasets, key, fallback_key=None):
+        """Return the maximum numeric value for a data key."""
+        values = self.numeric_values(datasets, key, fallback_key=fallback_key)
+        return max(values) if values else None
+
+    def numeric_values(self, datasets, key, fallback_key=None):
+        """Return numeric values for a key with an optional fallback key."""
+        values = []
+        for data in datasets or []:
+            value = self.to_number(data.get(key))
+            if value is None and fallback_key:
+                value = self.to_number(data.get(fallback_key))
+            if value is not None:
+                values.append(value)
+        return values
+
+    def counter_labels(self, counter, limit=8):
+        """Return compact counter labels sorted by count then name."""
+        return [
+            "{} {}".format(key, count)
+            for key, count in sorted(
+                (counter or {}).items(),
+                key=lambda item: (-item[1], str(item[0])),
+            )[:limit]
+            if key
+        ]
+
+    def highest_xray_class(self, datasets):
+        """Return the strongest SWPC X-ray class label in a product set."""
+        best = ("", 0.0)
+        for data in datasets or []:
+            label = str(data.get("xray_class") or "").strip().upper()
+            flux = xray_class_to_flux(label) if label else None
+            if flux is not None and flux > best[1]:
+                best = (label, flux)
+        return best[0]
 
     def aprsis_subject(self, data):
         """Return the APRS report subject centered on the source callsign."""
@@ -740,16 +1020,143 @@ class ReportsBuilder:
     def noaa_reports(self, events, timestamp):
         """Return NOAA/NWS/NHC report rows."""
         reports = []
+        alert_entries = []
         for event in events or []:
             data = clean_noaa_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
             if event_type == "noaa_collector_summary":
                 report = self.noaa_collector_report(data, event, timestamp)
+                if report:
+                    reports.append(report)
             else:
-                report = self.noaa_alert_report(data, event, timestamp)
+                alert_entries.append((data, event))
+        reports.extend(self.noaa_population_reports(alert_entries, timestamp))
+        for data, event in alert_entries:
+            report = self.noaa_alert_report(data, event, timestamp)
             if report:
                 reports.append(report)
         return reports
+
+    def noaa_population_reports(self, entries, timestamp):
+        """Return NOAA/NHC area/product population rows before event rows."""
+        subjects = [
+            (data, event)
+            for data, event in entries or []
+            if data.get("event_id") or data.get("event") or data.get("headline")
+        ]
+        if not subjects:
+            return []
+        reports = []
+        tropical = [
+            (data, event)
+            for data, event in subjects
+            if data.get("alert_kind") == "tropical"
+        ]
+        if len(tropical) >= 2:
+            reports.append(self.noaa_tropical_population_report(tropical, timestamp))
+        hazards = [
+            (data, event)
+            for data, event in subjects
+            if data.get("alert_kind") not in ("tropical", "tropical_outlook", "forecast")
+        ]
+        if len(hazards) >= 2:
+            reports.append(self.noaa_hazard_population_report(hazards, timestamp))
+        return [report for report in reports if report]
+
+    def noaa_tropical_population_report(self, entries, timestamp):
+        """Return a population report for active tropical-cyclone products."""
+        datasets = [data for data, _event in entries or []]
+        first_seen, last_seen, last_seen_epoch = self.population_time_range(entries)
+        event_count = len(datasets)
+        basins = self.population_values(datasets, "basin")
+        products = self.population_values(datasets, "event", limit=8)
+        sources = self.population_values(datasets, "source")
+        update_count = sum(self.to_int(data.get("update_count")) for data in datasets)
+        findings = ["Tropical cyclone product set"]
+        summary_parts = [
+            "{} tropical product(s)".format(event_count),
+            "basins {}".format(", ".join(basins)) if basins else "",
+            "sources {}".format(", ".join(sources)) if sources else "",
+        ]
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "population_kind": "noaa_tropical",
+                "event_count": event_count,
+                "events": products,
+                "basins": basins,
+                "sources": sources,
+                "update_count": update_count,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning",
+            "noaa",
+            "noaa_tropical_population",
+            "NOAA tropical cyclone episode",
+            "; ".join(part for part in summary_parts if part) + ".",
+            evidence,
+            self.score_with_recency(75 + min(event_count * 2, 15), last_seen_epoch),
+            last_seen,
+            subject="NOAA/NHC tropical products",
+            report_scope="population",
+        )
+
+    def noaa_hazard_population_report(self, entries, timestamp):
+        """Return a population report for multiple or high NOAA hazards."""
+        if not entries:
+            return None
+        datasets = [data for data, _event in entries or []]
+        first_seen, last_seen, last_seen_epoch = self.population_time_range(entries)
+        event_count = len(datasets)
+        high = [
+            data
+            for data in datasets
+            if self.noaa_warning_findings(self.noaa_findings(data))
+        ]
+        event_names = self.population_values(datasets, "event", limit=8)
+        areas = self.population_values(datasets, "area_desc", limit=6)
+        severity_counts = Counter(
+            str(data.get("severity") or "unknown") for data in datasets
+        )
+        findings = ["NOAA hazard population"]
+        if high:
+            findings.append("{} high-attention hazard(s)".format(len(high)))
+        summary_parts = [
+            "{} NOAA hazard subject(s)".format(event_count),
+            "{} warning/high-severity".format(len(high)) if high else "",
+            "areas {}".format(", ".join(areas)) if areas else "",
+        ]
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "population_kind": "noaa_hazards",
+                "event_count": event_count,
+                "events": event_names,
+                "areas": areas,
+                "severity_counts": self.counter_labels(severity_counts),
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning" if high else "info",
+            "noaa",
+            "noaa_hazard_population",
+            "NOAA area hazard pattern",
+            "; ".join(part for part in summary_parts if part) + ".",
+            evidence,
+            self.score_with_recency(55 + len(high) * 12, last_seen_epoch, cap=95),
+            last_seen,
+            subject="NOAA/NWS hazards",
+            report_scope="population",
+        )
 
     def noaa_collector_report(self, data, event, timestamp):
         """Return NOAA collector-health row only when not healthy."""
@@ -817,6 +1224,30 @@ class ReportsBuilder:
                 "updated": data.get("updated") or "",
                 "source": data.get("source") or "",
                 "source_url": data.get("source_url") or "",
+                "latitude": data.get("latitude"),
+                "longitude": data.get("longitude"),
+                "forecast_generated": data.get("forecast_generated") or "",
+                "forecast_window_hours": data.get("forecast_window_hours"),
+                "forecast_soon_hours": data.get("forecast_soon_hours"),
+                "forecast_hour_count": data.get("forecast_hour_count"),
+                "current_forecast": data.get("current_forecast") or "",
+                "current_temperature_f": data.get("current_temperature_f"),
+                "current_precip_probability": data.get("current_precip_probability"),
+                "temperature_min_f": data.get("temperature_min_f"),
+                "temperature_max_f": data.get("temperature_max_f"),
+                "temperature_change_f": data.get("temperature_change_f"),
+                "max_precip_probability": data.get("max_precip_probability"),
+                "precip_probability_threshold": data.get(
+                    "precip_probability_threshold"
+                ),
+                "precip_likely_soon": data.get("precip_likely_soon"),
+                "next_precip_start": data.get("next_precip_start") or "",
+                "next_precip_end": data.get("next_precip_end") or "",
+                "next_precip_probability": data.get("next_precip_probability"),
+                "next_precip_forecast": data.get("next_precip_forecast") or "",
+                "max_wind_mph": data.get("max_wind_mph"),
+                "first_period_start": data.get("first_period_start") or "",
+                "last_period_end": data.get("last_period_end") or "",
                 "update_count": data.get("update_count") or 0,
                 "first_seen": data.get("first_seen") or "",
                 "first_seen_epoch": data.get("first_seen_epoch"),
@@ -850,6 +1281,13 @@ class ReportsBuilder:
             findings.append("Tropical cyclone advisory")
         elif kind == "tropical_outlook":
             findings.append("Tropical weather outlook")
+        elif kind == "forecast":
+            findings.append("Point forecast context")
+            if data.get("precip_likely_soon"):
+                findings.append("Precipitation likely soon")
+            max_wind = self.to_number(data.get("max_wind_mph"))
+            if max_wind is not None and max_wind >= 25:
+                findings.append("Breezy forecast")
         else:
             findings.append("Weather hazard")
         if str(severity).lower() in {
@@ -884,6 +1322,10 @@ class ReportsBuilder:
             score += 30
         if "Warning present" in findings:
             score += 20
+        if "Precipitation likely soon" in findings:
+            score += 10
+        if "Breezy forecast" in findings:
+            score += 5
         if str(data.get("urgency") or "").lower() == "immediate":
             score += 15
         return self.score_with_recency(score, last_seen_epoch, cap=98)
@@ -894,6 +1336,8 @@ class ReportsBuilder:
             return "NOAA tropical advisory"
         if data.get("alert_kind") == "tropical_outlook":
             return "NOAA tropical outlook"
+        if data.get("alert_kind") == "forecast":
+            return "NOAA point forecast"
         if data.get("alert_kind") == "tsunami":
             return "NOAA tsunami alert"
         return "NOAA weather alert"
@@ -903,8 +1347,16 @@ class ReportsBuilder:
         parts = [
             data.get("severity") or "",
             data.get("area_desc") or "",
-            data.get("headline") if data.get("headline") != data.get("event") else "",
-            data.get("expires") and "expires {}".format(data.get("expires")),
+            data.get("headline")
+            if data.get("alert_kind") == "forecast"
+            else "",
+            data.get("headline")
+            if data.get("alert_kind") != "forecast"
+            and data.get("headline") != data.get("event")
+            else "",
+            data.get("expires")
+            and data.get("alert_kind") != "forecast"
+            and "expires {}".format(data.get("expires")),
         ]
         return "{}.".format("; ".join(str(part) for part in parts if part))
 
@@ -916,16 +1368,97 @@ class ReportsBuilder:
     def usgs_reports(self, events, timestamp):
         """Return USGS earthquake report rows."""
         reports = []
+        earthquake_entries = []
         for event in events or []:
             data = clean_usgs_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
             if event_type == "usgs_collector_summary":
                 report = self.usgs_collector_report(data, event, timestamp)
+                if report:
+                    reports.append(report)
             else:
-                report = self.usgs_earthquake_report(data, event, timestamp)
+                earthquake_entries.append((data, event))
+        reports.extend(self.usgs_population_reports(earthquake_entries, timestamp))
+        for data, event in earthquake_entries:
+            report = self.usgs_earthquake_report(data, event, timestamp)
             if report:
                 reports.append(report)
         return reports
+
+    def usgs_population_reports(self, entries, timestamp):
+        """Return cross-earthquake USGS rows before event rows."""
+        quakes = [
+            (data, event)
+            for data, event in entries or []
+            if data.get("event_id")
+        ]
+        if len(quakes) < 2:
+            return []
+        return [self.usgs_earthquake_population_report(quakes, timestamp)]
+
+    def usgs_earthquake_population_report(self, entries, timestamp):
+        """Return a population report for seismic activity in the window."""
+        datasets = [data for data, _event in entries or []]
+        first_seen, last_seen, last_seen_epoch = self.population_time_range(entries)
+        magnitudes = [self.to_number(data.get("magnitude")) for data in datasets]
+        magnitudes = [value for value in magnitudes if value is not None]
+        distances = [self.to_number(data.get("distance_km")) for data in datasets]
+        distances = [value for value in distances if value is not None]
+        depths = [self.to_number(data.get("depth_km")) for data in datasets]
+        depths = [value for value in depths if value is not None]
+        alert_colors = self.population_values(datasets, "alert_color")
+        event_ids = self.population_values(datasets, "event_id", limit=10)
+        notable = sum(
+            1
+            for data in datasets
+            if self.usgs_warning_findings(self.usgs_findings(data))
+        )
+        findings = ["USGS earthquake population"]
+        if notable:
+            findings.append("{} notable earthquake(s)".format(notable))
+        summary_parts = ["{} earthquake(s)".format(len(datasets))]
+        if magnitudes:
+            summary_parts.append(
+                "magnitude {:.1f}-{:.1f}".format(min(magnitudes), max(magnitudes))
+            )
+        if distances:
+            summary_parts.append("nearest {:.1f} km".format(min(distances)))
+        if depths:
+            summary_parts.append("shallowest {:.1f} km".format(min(depths)))
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "population_kind": "usgs_earthquakes",
+                "event_count": len(datasets),
+                "event_ids": event_ids,
+                "magnitude_min": min(magnitudes) if magnitudes else None,
+                "magnitude_max": max(magnitudes) if magnitudes else None,
+                "nearest_distance_km": min(distances) if distances else None,
+                "shallowest_depth_km": min(depths) if depths else None,
+                "notable_count": notable,
+                "alert_colors": alert_colors,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning" if notable else "info",
+            "usgs",
+            "usgs_earthquake_population",
+            "USGS seismic activity pattern",
+            "; ".join(summary_parts) + ".",
+            evidence,
+            self.score_with_recency(
+                45 + min(len(datasets) * 4, 20) + min(notable * 10, 30),
+                last_seen_epoch,
+                cap=95,
+            ),
+            last_seen,
+            subject="USGS earthquakes",
+            report_scope="population",
+        )
 
     def usgs_collector_report(self, data, event, timestamp):
         """Return USGS collector-health row only when not healthy."""
@@ -1082,16 +1615,96 @@ class ReportsBuilder:
     def swpc_reports(self, events, timestamp):
         """Return SWPC space-weather report rows."""
         reports = []
+        swpc_entries = []
         for event in events or []:
             data = clean_swpc_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
             if event_type == "swpc_collector_summary":
                 report = self.swpc_collector_report(data, event, timestamp)
+                if report:
+                    reports.append(report)
             else:
-                report = self.swpc_event_report(data, event, timestamp)
+                swpc_entries.append((data, event))
+        reports.extend(self.swpc_population_reports(swpc_entries, timestamp))
+        for data, event in swpc_entries:
+            report = self.swpc_event_report(data, event, timestamp)
             if report:
                 reports.append(report)
         return reports
+
+    def swpc_population_reports(self, entries, timestamp):
+        """Return cross-product SWPC rows before event rows."""
+        products = [
+            (data, event)
+            for data, event in entries or []
+            if data.get("event_id") or data.get("event") or data.get("summary")
+        ]
+        if len(products) < 2:
+            return []
+        return [self.swpc_space_weather_population_report(products, timestamp)]
+
+    def swpc_space_weather_population_report(self, entries, timestamp):
+        """Return a population report for related space-weather products."""
+        datasets = [data for data, _event in entries or []]
+        first_seen, last_seen, last_seen_epoch = self.population_time_range(entries)
+        kind_counts = Counter(data.get("event_kind") or "unknown" for data in datasets)
+        alert_count = sum(
+            1
+            for data in datasets
+            if swpc_event_is_alert(data, self.swpc_report_thresholds())
+        )
+        critical_count = sum(1 for data in datasets if swpc_event_is_critical(data))
+        max_kp = self.max_numeric(datasets, "kp_index")
+        highest_xray = self.highest_xray_class(datasets)
+        scale_labels = self.population_values(datasets, "scale_label")
+        events = self.population_values(datasets, "event", limit=8)
+        findings = ["SWPC space-weather product set"]
+        if alert_count:
+            findings.append("{} alert-threshold product(s)".format(alert_count))
+        if critical_count:
+            findings.append("{} critical SWPC product(s)".format(critical_count))
+        summary_parts = [
+            "{} SWPC product(s)".format(len(datasets)),
+            "kinds {}".format(", ".join(self.counter_labels(kind_counts, limit=5))),
+        ]
+        if highest_xray:
+            summary_parts.append("highest flare {}".format(highest_xray))
+        if max_kp is not None:
+            summary_parts.append("max Kp {:.1f}".format(max_kp))
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "population_kind": "swpc_space_weather",
+                "event_count": len(datasets),
+                "events": events,
+                "kind_counts": self.counter_labels(kind_counts, limit=8),
+                "alert_count": alert_count,
+                "critical_count": critical_count,
+                "highest_xray_class": highest_xray,
+                "max_kp": max_kp,
+                "scale_labels": scale_labels,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning" if alert_count else "info",
+            "swpc",
+            "swpc_space_weather_population",
+            "SWPC space-weather episode",
+            "; ".join(part for part in summary_parts if part) + ".",
+            evidence,
+            self.score_with_recency(
+                45 + min(len(datasets) * 3, 20) + min(alert_count * 15, 35),
+                last_seen_epoch,
+                cap=98,
+            ),
+            last_seen,
+            subject="SWPC space weather",
+            report_scope="population",
+        )
 
     def swpc_collector_report(self, data, event, timestamp):
         """Return SWPC collector-health row only when not healthy."""
@@ -1275,21 +1888,469 @@ class ReportsBuilder:
             parts.append("Kp {:.1f}".format(kp))
         return " ".join(str(part) for part in parts if part)
 
+    def pws_reports(self, events, timestamp):
+        """Return PWS weather station report rows."""
+        reports = []
+        station_entries = []
+        for event in events or []:
+            data = clean_pws_data((event or {}).get("data") or {})
+            event_type = (event or {}).get("type") or ""
+            if event_type == "pws_collector_summary":
+                report = self.pws_collector_report(data, event, timestamp)
+                if report:
+                    reports.append(report)
+            else:
+                station_entries.append((data, event))
+        if len(station_entries) >= 2:
+            reports.append(self.pws_population_report(station_entries, timestamp))
+        for data, event in station_entries:
+            report = self.pws_station_report(data, event, timestamp)
+            if report:
+                reports.append(report)
+        return [report for report in reports if report]
+
+    def pws_population_report(self, entries, timestamp):
+        """Return a population report when multiple PWS stations are configured."""
+        datasets = [data for data, _event in entries or []]
+        first_seen, last_seen, last_seen_epoch = self.population_time_range(entries)
+        station_ids = self.population_values(datasets, "station_id", limit=8)
+        max_rain = self.max_numeric(datasets, "rain_1h_max_in")
+        max_gust = self.max_numeric(datasets, "wind_gust_max_mph")
+        findings = ["PWS station population"]
+        summary_parts = ["{} PWS station(s)".format(len(datasets))]
+        if max_rain is not None:
+            summary_parts.append("max 1h rain rate {:.2f} in/hr".format(max_rain))
+        if max_gust is not None:
+            summary_parts.append("max gust {:.0f} mph".format(max_gust))
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "population_kind": "pws_stations",
+                "station_count": len(datasets),
+                "stations": station_ids,
+                "max_rain_1h_in": max_rain,
+                "max_gust_mph": max_gust,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning"
+            if self.to_number(max_rain) is not None
+            and max_rain >= float(self.config.get("pws_weather_high_rain_1h_in", 0.25))
+            else "info",
+            "pws",
+            "pws_weather_population",
+            "PWS weather station pattern",
+            "; ".join(summary_parts) + ".",
+            evidence,
+            self.score_with_recency(45 + min(len(datasets) * 4, 20), last_seen_epoch),
+            last_seen,
+            subject="PWS stations",
+            report_scope="population",
+        )
+
+    def pws_collector_report(self, data, event, timestamp):
+        """Return PWS collector-health row only when not healthy."""
+        state = str(data.get("collector_state") or "").upper()
+        if state not in ("OFFLINE", "RETRYING"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        evidence = self.clean_evidence(
+            {
+                "findings": ["PWS collector offline"],
+                "collector_state": state,
+                "reason": data.get("reason") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning",
+            "pws",
+            "pws_collector_offline",
+            "PWS feed offline",
+            data.get("reason") or "PWS feed is offline.",
+            evidence,
+            self.score_with_recency(75, last_seen_epoch),
+            last_seen,
+            subject="PWS collector",
+        )
+
+    def pws_station_report(self, data, event, timestamp):
+        """Return one PWS station report row."""
+        station = data.get("station_id") or data.get("station_name") or ""
+        if not station:
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = self.pws_findings(data)
+        warning = self.pws_warning_findings(findings)
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "station_id": station,
+                "station_name": data.get("station_name") or "",
+                "mac_address": data.get("mac_address") or "",
+                "model": data.get("model") or "",
+                "location": self.pws_location_text(data),
+                "sample_time": self.pws_sample_time_text(data),
+                "weather": self.pws_weather_text(data),
+                "wind": self.pws_wind_text(data),
+                "rain": self.pws_rain_text(data),
+                "pressure": self.pws_pressure_text(data),
+                "solar": self.pws_solar_text(data),
+                "rain_transition": self.pws_rain_transition_text(data),
+                "battery": data.get("battery") or "",
+                "observations": data.get("observation_count") or 0,
+                "first_seen": data.get("first_seen") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+                "source": self.pws_source_text(data),
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning" if warning else "info",
+            "pws",
+            "pws_weather_station",
+            "PWS weather station",
+            self.pws_summary_text(data),
+            evidence,
+            self.score_pws_station(data, findings, last_seen_epoch),
+            last_seen,
+            subject=station,
+        )
+
+    def pws_findings(self, data):
+        """Return deterministic PWS report findings."""
+        findings = ["PWS weather station"]
+        temp_change = self.to_number(data.get("temperature_change_f"))
+        if temp_change is not None and abs(temp_change) >= float(
+            self.config.get("pws_weather_temp_change_f", 5)
+        ):
+            findings.append("Temperature changed {:+.0f} F".format(temp_change))
+        rain_max = self.to_number(data.get("rain_1h_max_in"))
+        if rain_max is not None and rain_max >= float(
+            self.config.get("pws_weather_high_rain_1h_in", 0.25)
+        ):
+            findings.append("High 1h rain rate")
+        wind_max = self.to_number(data.get("wind_speed_max_mph"))
+        gust_max = self.to_number(data.get("wind_gust_max_mph"))
+        if wind_max is not None and wind_max >= float(
+            self.config.get("pws_weather_high_wind_mph", 25)
+        ):
+            findings.append("High wind")
+        if gust_max is not None and gust_max >= float(
+            self.config.get("pws_weather_high_gust_mph", 35)
+        ):
+            findings.append("High gust")
+        if data.get("rain_last_transition"):
+            findings.append("Rain {}".format(data.get("rain_last_transition")))
+        return self.unique_ordered(findings)
+
+    def pws_warning_findings(self, findings):
+        """Return True for PWS findings that should sort as warnings."""
+        return any(
+            str(item or "").startswith(("High 1h rain", "High wind", "High gust"))
+            for item in findings or []
+        )
+
+    def score_pws_station(self, data, findings, last_seen_epoch):
+        """Return attention score for a PWS station report."""
+        score = 35
+        if "High 1h rain rate" in findings:
+            score += 30
+        if "High wind" in findings:
+            score += 18
+        if "High gust" in findings:
+            score += 22
+        if any(str(item or "").startswith("Temperature changed") for item in findings):
+            score += 8
+        if data.get("rain_last_transition"):
+            score += 8
+        return self.score_with_recency(score, last_seen_epoch, cap=95)
+
+    def pws_summary_text(self, data):
+        """Return compact PWS report summary."""
+        parts = [
+            self.pws_weather_text(data),
+            self.pws_wind_text(data),
+            self.pws_rain_text(data),
+            self.pws_rain_transition_text(data),
+            data.get("event_time") and "sample {}".format(data.get("event_time")),
+        ]
+        return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def pws_weather_text(self, data):
+        """Return temperature/humidity text."""
+        parts = []
+        temp = self.to_number(data.get("temperature_f"))
+        if temp is not None:
+            parts.append("temp {:.0f} F".format(temp))
+        feels = self.to_number(data.get("feels_like_f"))
+        if feels is not None:
+            parts.append("feels {:.0f} F".format(feels))
+        dew = self.to_number(data.get("dewpoint_f"))
+        if dew is not None:
+            parts.append("dew {:.0f} F".format(dew))
+        temp_min = self.to_number(data.get("temperature_min_f"))
+        temp_max = self.to_number(data.get("temperature_max_f"))
+        if temp_min is not None and temp_max is not None and temp_min != temp_max:
+            parts.append("range {:.0f}-{:.0f} F".format(temp_min, temp_max))
+        humidity = self.to_number(data.get("humidity_percent"))
+        if humidity is not None:
+            parts.append("humidity {:.0f}%".format(humidity))
+        indoor = self.pws_indoor_text(data)
+        if indoor:
+            parts.append("indoor {}".format(indoor))
+        return ", ".join(parts)
+
+    def pws_indoor_text(self, data):
+        """Return indoor temperature/humidity text."""
+        parts = []
+        temp = self.to_number(data.get("indoor_temperature_f"))
+        humidity = self.to_number(data.get("indoor_humidity_percent"))
+        feels = self.to_number(data.get("indoor_feels_like_f"))
+        dew = self.to_number(data.get("indoor_dewpoint_f"))
+        if temp is not None:
+            parts.append("{:.0f} F".format(temp))
+        if humidity is not None:
+            parts.append("{:.0f}%".format(humidity))
+        if feels is not None:
+            parts.append("feels {:.0f} F".format(feels))
+        if dew is not None:
+            parts.append("dew {:.0f} F".format(dew))
+        return ", ".join(parts)
+
+    def pws_wind_text(self, data):
+        """Return wind/gust text."""
+        parts = []
+        wind = self.to_number(data.get("wind_speed_mph"))
+        gust = self.to_number(data.get("wind_gust_mph"))
+        gust_max = self.to_number(data.get("wind_gust_max_mph"))
+        direction = self.to_number(data.get("wind_direction_deg"))
+        avg_dir = self.to_number(data.get("wind_direction_avg_10m_deg"))
+        avg_speed = self.to_number(data.get("wind_speed_avg_10m_mph"))
+        if direction is not None:
+            parts.append("dir {:.0f} deg".format(direction))
+        if wind is not None:
+            parts.append("wind {:.0f} mph".format(wind))
+        if avg_dir is not None or avg_speed is not None:
+            avg_parts = []
+            if avg_dir is not None:
+                avg_parts.append("{:.0f} deg".format(avg_dir))
+            if avg_speed is not None:
+                avg_parts.append("{:.1f} mph".format(avg_speed))
+            parts.append("10m avg {}".format(" ".join(avg_parts)))
+        if gust is not None:
+            parts.append("gust {:.0f} mph".format(gust))
+        if gust_max is not None and (gust is None or gust_max != gust):
+            parts.append("max gust {:.0f} mph".format(gust_max))
+        return ", ".join(parts)
+
+    def pws_rain_text(self, data):
+        """Return rain-rate/total text."""
+        parts = []
+        rain = self.to_number(data.get("rain_1h_in"))
+        rain_max = self.to_number(data.get("rain_1h_max_in"))
+        event = self.to_number(data.get("rain_event_in"))
+        day = self.to_number(data.get("rain_day_in"))
+        week = self.to_number(data.get("rain_week_in"))
+        month = self.to_number(data.get("rain_month_in"))
+        year = self.to_number(data.get("rain_year_in"))
+        if rain is not None:
+            parts.append("1h rain rate {:.2f} in/hr".format(rain))
+        if rain_max is not None and (rain is None or rain_max != rain):
+            parts.append("max rate {:.2f} in/hr".format(rain_max))
+        if event is not None:
+            parts.append("event {:.2f} in".format(event))
+        if day is not None:
+            parts.append("daily rain {:.2f} in".format(day))
+        if week is not None:
+            parts.append("week {:.2f} in".format(week))
+        if month is not None:
+            parts.append("month {:.2f} in".format(month))
+        if year is not None:
+            parts.append("year {:.2f} in".format(year))
+        if data.get("last_rain_time"):
+            parts.append("last rain {}".format(data.get("last_rain_time")))
+        return ", ".join(parts)
+
+    def pws_pressure_text(self, data):
+        """Return pressure text."""
+        rel = self.to_number(data.get("pressure_rel_inhg"))
+        abs_value = self.to_number(data.get("pressure_abs_inhg"))
+        parts = []
+        if rel is not None:
+            parts.append("rel {:.2f} inHg".format(rel))
+        if abs_value is not None:
+            parts.append("abs {:.2f} inHg".format(abs_value))
+        return ", ".join(parts)
+
+    def pws_solar_text(self, data):
+        """Return solar/UV text."""
+        parts = []
+        solar = self.to_number(data.get("solar_w_m2"))
+        uv = self.to_number(data.get("uv_index"))
+        if solar is not None:
+            parts.append("{:.0f} W/m2".format(solar))
+        if uv is not None:
+            parts.append("UV {:.1f}".format(uv))
+        return ", ".join(parts)
+
+    def pws_location_text(self, data):
+        """Return coordinate text."""
+        parts = []
+        if data.get("location_name"):
+            parts.append(data.get("location_name"))
+        lat = self.to_number(data.get("latitude"))
+        lon = self.to_number(data.get("longitude"))
+        if lat is not None and lon is not None:
+            parts.append("{:.5f}, {:.5f}".format(lat, lon))
+        elevation_ft = self.to_number(data.get("elevation_ft"))
+        elevation_m = self.to_number(data.get("elevation_m"))
+        if elevation_ft is not None:
+            parts.append("elev {:.0f} ft".format(elevation_ft))
+        elif elevation_m is not None:
+            parts.append("elev {:.0f} m".format(elevation_m))
+        return "; ".join(parts)
+
+    def pws_sample_time_text(self, data):
+        """Return sample time and source timezone text."""
+        return "; ".join(
+            item
+            for item in (
+                data.get("event_time") or "",
+                data.get("timezone") and "tz {}".format(data.get("timezone")),
+                data.get("ambient_date") and "api date {}".format(data.get("ambient_date")),
+            )
+            if item
+        )
+
+    def pws_rain_transition_text(self, data):
+        """Return last PWS rain transition text."""
+        transition = data.get("rain_last_transition")
+        when = data.get("rain_last_transition_at")
+        if not transition:
+            return ""
+        if str(transition).lower() == "stopped":
+            stopped = data.get("rain_episode_stopped_at") or when or ""
+            started = data.get("rain_episode_started_at") or ""
+            if stopped and started:
+                return "rain stopped {}; episode started {}".format(
+                    stopped, started
+                )
+        return "rain {}{}".format(transition, " {}".format(when) if when else "")
+
+    def pws_source_text(self, data):
+        """Return source and URL as one compact evidence row."""
+        return "; ".join(
+            item
+            for item in (
+                data.get("source") or "",
+                data.get("source_url") or "",
+            )
+            if item
+        )
+
     def lan_reports(self, events, timestamp):
         """Return LAN device and gateway report rows."""
         reports = []
+        gateway_entries = []
+        device_entries = []
         for event in events or []:
             data = clean_lan_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
             if event_type == "lan_collector_summary":
                 report = self.lan_collector_report(data, event, timestamp)
+                if report:
+                    reports.append(report)
             elif event_type == "lan_gateway_summary":
-                report = self.lan_gateway_report(data, event, timestamp)
+                gateway_entries.append((data, event))
             else:
-                report = self.lan_device_report(data, event, timestamp)
+                device_entries.append((data, event))
+        reports.extend(
+            self.lan_population_reports(gateway_entries, device_entries, timestamp)
+        )
+        for data, event in gateway_entries:
+            report = self.lan_gateway_report(data, event, timestamp)
+            if report:
+                reports.append(report)
+        for data, event in device_entries:
+            report = self.lan_device_report(data, event, timestamp)
             if report:
                 reports.append(report)
         return reports
+
+    def lan_population_reports(self, gateways, devices, timestamp):
+        """Return a LAN population row before device/gateway rows."""
+        entries = list(gateways or []) + list(devices or [])
+        if len(entries) < 2:
+            return []
+        datasets = [data for data, _event in entries]
+        first_seen, last_seen, last_seen_epoch = self.population_time_range(entries)
+        device_count = len(devices or [])
+        gateway_count = len(gateways or [])
+        changed = sum(1 for data in datasets if self.to_int(data.get("change_count")))
+        vendors = self.population_values(datasets, "vendor_name", limit=8)
+        interfaces = sorted(
+            set(
+                value
+                for data in datasets
+                for value in self.list_values(data.get("interfaces"))
+                + self.list_values(data.get("interface"))
+                if value
+            )
+        )[:8]
+        findings = ["LAN subject population"]
+        if changed:
+            findings.append("{} LAN subject(s) changed".format(changed))
+        summary_parts = [
+            "{} LAN device(s)".format(device_count),
+            "{} gateway subject(s)".format(gateway_count) if gateway_count else "",
+            "{} changed".format(changed) if changed else "",
+        ]
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "population_kind": "lan_subjects",
+                "subject_count": len(entries),
+                "device_count": device_count,
+                "gateway_count": gateway_count,
+                "changed_count": changed,
+                "vendors": vendors,
+                "interfaces": interfaces,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return [
+            self.report(
+                timestamp,
+                "warning" if changed else "info",
+                "lan",
+                "lan_subject_population",
+                "LAN subject population",
+                "; ".join(part for part in summary_parts if part) + ".",
+                evidence,
+                self.score_with_recency(45 + min(len(entries) * 3, 25), last_seen_epoch),
+                last_seen,
+                subject="LAN subjects",
+                report_scope="population",
+            )
+        ]
 
     def lan_collector_report(self, data, event, timestamp):
         """Return LAN collector-health row only when not healthy."""
@@ -2493,6 +3554,7 @@ class ReportsBuilder:
         score,
         last_seen,
         subject="",
+        report_scope=None,
     ):
         """Build one normalized report row."""
         self._counter += 1
@@ -2516,7 +3578,31 @@ class ReportsBuilder:
             "score": score,
             "last_seen": last_seen_display,
             "last_seen_epoch": last_seen_epoch,
+            "report_scope": report_scope
+            or self.inferred_report_scope(source, report_type),
         }
+
+    def inferred_report_scope(self, source, report_type):
+        """Classify a report as population, collector/quality, or subject."""
+        report_type = str(report_type or "").lower()
+        population_types = {
+            "ble_private_address_cluster",
+            "privacy_exposure_summary",
+            "wifi_ssid_profile",
+        }
+        if (
+            report_type in population_types
+            or report_type.endswith("_population")
+            or report_type.endswith("_episode")
+        ):
+            return "population"
+        if "collector" in report_type:
+            return "collector"
+        if "quality" in report_type:
+            return "quality"
+        if str(source or "").lower() == "privacy":
+            return "population"
+        return "subject"
 
     def enrich_report_metadata(self, report):
         """Attach display-oriented confidence and reason tags to one report."""
@@ -2527,9 +3613,12 @@ class ReportsBuilder:
         """Return compact reason tags from normalized report evidence."""
         evidence = (report or {}).get("evidence") or {}
         report_type = str((report or {}).get("type") or "").lower()
+        report_scope = str((report or {}).get("report_scope") or "").lower()
         findings = " ".join(str(item or "") for item in evidence.get("findings") or [])
         text = "{} {}".format(report_type, findings).lower()
         tags = []
+        if report_scope == "population":
+            tags.append("pattern")
         candidates = [
             ("recurring", ("recurring",)),
             ("long", ("long",)),
@@ -2569,6 +3658,10 @@ class ReportsBuilder:
         report_type = str((report or {}).get("type") or "").lower()
         sessions = int(evidence.get("sessions") or 0)
         days = len(evidence.get("days_seen") or [])
+        if (report or {}).get("report_scope") == "population":
+            if source in ("aprsis", "noaa", "usgs", "swpc"):
+                return "High"
+            return "Medium"
         if source == "wifi":
             if report_type == "wifi_ssid_profile":
                 if days >= 2 and int(evidence.get("bssid_count") or 0) >= 2:
@@ -2603,6 +3696,8 @@ class ReportsBuilder:
             return "Medium"
         if source in ("noaa", "usgs"):
             return "High"
+        if source == "swpc":
+            return "High" if evidence.get("event_id") else "Medium"
         if source == "lan":
             if evidence.get("mac") or evidence.get("gateway_ip"):
                 return "Medium"
@@ -3231,6 +4326,15 @@ class ReportsBuilder:
     def severity_rank(self, severity):
         """Sort warnings before informational reports."""
         return {"warning": 2, "error": 3, "alert": 3, "info": 1}.get(severity, 0)
+
+    def report_scope_rank(self, report):
+        """Sort cross-subject rows ahead of per-subject detail rows."""
+        return {
+            "population": 3,
+            "collector": 2,
+            "quality": 2,
+            "subject": 1,
+        }.get(str((report or {}).get("report_scope") or "").lower(), 1)
 
     def to_number(self, value):
         """Parse numeric fields while tolerating blanks."""

@@ -9,6 +9,7 @@ import calendar
 import hashlib
 import html
 import json
+import logging
 import re
 import time
 import urllib.parse
@@ -23,6 +24,7 @@ from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE, STATE_RETRYING
 NOAA_FIELD_MAX = 240
 NOAA_TEXT_MAX = 800
 NWS_ALERTS_ENDPOINT = "https://api.weather.gov/alerts/active"
+NWS_POINTS_ENDPOINT = "https://api.weather.gov/points/{},{}"
 NHC_FEEDS = {
     "atlantic": "https://www.nhc.noaa.gov/index-at.xml",
     "eastern_pacific": "https://www.nhc.noaa.gov/index-ep.xml",
@@ -47,14 +49,6 @@ NHC_NUMBERED_SYSTEM_RE = re.compile(
     r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
     r"[0-9]{1,2})[- ][a-z]\b"
 )
-NHC_PRODUCT_NUMBER_RE = re.compile(
-    r"\b(public advisory|forecast/advisory|forecast advisory|intermediate advisory|"
-    r"special advisory|advisory|discussion|update)\s+"
-    r"(?:number\s+|no\.?\s+|#\s*)?[0-9]+[a-z-]*\b",
-    re.IGNORECASE,
-)
-
-
 def compact_noaa_text(value, max_length=NOAA_FIELD_MAX):
     """Return a compact one-line NOAA text field."""
     if value in (None, ""):
@@ -79,8 +73,27 @@ def clean_noaa_data(data):
         "expires_epoch",
         "ends_epoch",
         "updated_epoch",
+        "forecast_generated_epoch",
+        "first_period_start_epoch",
+        "last_period_end_epoch",
+        "next_precip_start_epoch",
+        "next_precip_end_epoch",
+        "latitude",
+        "longitude",
+        "forecast_hour_count",
+        "forecast_window_hours",
+        "forecast_soon_hours",
+        "precip_probability_threshold",
+        "current_temperature_f",
+        "temperature_min_f",
+        "temperature_max_f",
+        "temperature_change_f",
+        "current_precip_probability",
+        "max_precip_probability",
+        "next_precip_probability",
+        "max_wind_mph",
     }
-    bool_keys = {"internet_fed"}
+    bool_keys = {"internet_fed", "precip_likely_soon"}
     list_keys = {"zones", "geocode_ugc", "geocode_same"}
     long_text_keys = {"description", "instruction", "summary"}
     for key, value in data.items():
@@ -121,12 +134,17 @@ class NOAACollector(BaseCollector):
             "internet_source": True,
             "enabled": bool(config.get("enabled", False)),
             "nws": bool((config.get("nws") or {}).get("enabled", True)),
+            "forecast": bool(cls.forecast_enabled_for_config(config)),
             "nhc": bool((config.get("nhc") or {}).get("enabled", True)),
         }
 
     def __init__(self, config, bus):
         super().__init__(config, bus)
         self._fingerprints = {}
+        self._forecast_hourly_url = None
+        self._forecast_point_key = None
+        self._forecast_area_desc = None
+        self._last_subfeed_errors = []
 
     def detect(self):
         """NOAA only needs at least one enabled feed source."""
@@ -158,7 +176,18 @@ class NOAACollector(BaseCollector):
             try:
                 events = await self.run_blocking(self.poll_once)
                 self.state = STATE_ONLINE
-                self.warning = None
+                self.warning = "; ".join(self._last_subfeed_errors) or None
+                if self.warning:
+                    await self.emit(
+                        "collector_online",
+                        {
+                            "source": "NOAA",
+                            "feeds": [source["name"] for source in self.feed_sources()],
+                            "warning": self.warning,
+                            "internet_fed": True,
+                        },
+                        "warning",
+                    )
                 for item in events:
                     await self.emit(
                         item["type"],
@@ -186,6 +215,8 @@ class NOAACollector(BaseCollector):
         nws = self.config.get("nws") or {}
         if nws.get("enabled", True):
             sources.append({"name": "nws_alerts", "kind": "nws"})
+        if self.forecast_enabled():
+            sources.append({"name": "nws_forecast", "kind": "nws_forecast"})
         nhc = self.config.get("nhc") or {}
         if nhc.get("enabled", True):
             for basin in self.configured_nhc_basins(nhc):
@@ -194,6 +225,27 @@ class NOAACollector(BaseCollector):
                         {"name": "nhc_{}".format(basin), "kind": "nhc", "basin": basin}
                     )
         return sources
+
+    @classmethod
+    def forecast_enabled_for_config(cls, config):
+        """Return True when NWS hourly forecast polling should be active."""
+        config = config or {}
+        nws = config.get("nws") or {}
+        forecast = config.get("forecast") or nws.get("forecast") or {}
+        default_enabled = bool(nws.get("enabled", True))
+        enabled = forecast.get("enabled", default_enabled)
+        latitude = config.get("latitude", nws.get("latitude"))
+        longitude = config.get("longitude", nws.get("longitude"))
+        return bool(enabled and latitude not in (None, "") and longitude not in (None, ""))
+
+    def forecast_enabled(self):
+        """Return True when this collector should poll NWS hourly forecast."""
+        return self.forecast_enabled_for_config(self.config)
+
+    def forecast_config(self):
+        """Return optional forecast config from either top-level or NWS section."""
+        nws = self.config.get("nws") or {}
+        return self.config.get("forecast") or nws.get("forecast") or {}
 
     def configured_nhc_basins(self, nhc):
         """Return configured NHC basin names."""
@@ -211,14 +263,22 @@ class NOAACollector(BaseCollector):
     def poll_once(self):
         """Fetch all enabled NOAA sources and return new/changed events."""
         events = []
+        errors = []
         seen = set()
+        self._last_subfeed_errors = []
         for source in self.feed_sources():
-            if source["kind"] == "nws":
-                source_events = self.poll_nws_alerts()
-            elif source["kind"] == "nhc":
-                source_events = self.poll_nhc_feed(source["basin"])
-            else:
-                source_events = []
+            try:
+                if source["kind"] == "nws":
+                    source_events = self.poll_nws_alerts()
+                elif source["kind"] == "nws_forecast":
+                    source_events = self.poll_nws_forecast()
+                elif source["kind"] == "nhc":
+                    source_events = self.poll_nhc_feed(source["basin"])
+                else:
+                    source_events = []
+            except Exception as exc:
+                errors.append("{}: {}".format(source.get("name") or "NOAA", exc))
+                continue
             for item in source_events:
                 data = item.get("data") or {}
                 dedupe_key = (
@@ -230,7 +290,23 @@ class NOAACollector(BaseCollector):
                     continue
                 seen.add(dedupe_key)
                 events.append(item)
+        if errors and len(errors) == len(self.feed_sources()):
+            self._last_subfeed_errors = errors
+            raise RuntimeError("; ".join(errors))
+        self._last_subfeed_errors = errors
+        for error in errors:
+            logging.warning("NOAA sub-feed poll failed: %s", error)
         return events
+
+    def poll_nws_forecast(self):
+        """Fetch and normalize the configured NWS hourly point forecast."""
+        data = self.nws_forecast_data()
+        if not data.get("event_id"):
+            raise RuntimeError("NWS hourly forecast returned no usable summary")
+        stable_key = stable_noaa_event_key(data, "noaa_forecast_summary")
+        if self.changed("nws-forecast:{}".format(stable_key), data.get("fingerprint")):
+            return [{"type": "noaa_forecast_summary", "data": data}]
+        return []
 
     def poll_nws_alerts(self):
         """Fetch and normalize active NWS alerts."""
@@ -264,6 +340,287 @@ class NOAACollector(BaseCollector):
             params["event"] = nws.get("event")
         query = urllib.parse.urlencode(params)
         return "{}?{}".format(NWS_ALERTS_ENDPOINT, query) if query else NWS_ALERTS_ENDPOINT
+
+    def nws_forecast_data(self):
+        """Return one compact summary for the configured NWS hourly forecast."""
+        forecast = self.forecast_config()
+        forecast_url = self.nws_forecast_hourly_url()
+        if not forecast_url:
+            raise RuntimeError("NWS points metadata did not include forecastHourly")
+        payload = self.fetch_json(forecast_url)
+        props = payload.get("properties") or {}
+        periods = [
+            period
+            for period in props.get("periods") or []
+            if isinstance(period, dict) and period.get("startTime")
+        ]
+        if not periods:
+            raise RuntimeError("NWS hourly forecast returned no periods")
+        periods.sort(key=lambda item: iso_epoch(item.get("startTime")) or 0)
+        now = now_epoch()
+        window_hours = self.forecast_int(forecast, "window_hours", 12, 1, 72)
+        soon_hours = self.forecast_int(forecast, "soon_hours", 6, 1, window_hours)
+        precip_threshold = self.forecast_int(
+            forecast, "precip_probability_threshold", 50, 1, 100
+        )
+        window_end = now + window_hours * 3600
+        selected = [
+            period
+            for period in periods
+            if (iso_epoch(period.get("startTime")) or 0) <= window_end
+            and (iso_epoch(period.get("endTime")) or now) >= now
+        ]
+        selected = selected or periods[: min(len(periods), window_hours)]
+        generated = compact_noaa_text(
+            props.get("generatedAt") or props.get("updateTime") or "", 120
+        )
+        updated = compact_noaa_text(props.get("updateTime") or generated, 120)
+        area_desc = self.forecast_area_desc()
+        latitude, longitude = self.configured_point()
+        current = selected[0]
+        temperatures = [
+            to_float(period.get("temperature"))
+            for period in selected
+            if to_float(period.get("temperature")) is not None
+        ]
+        precip_values = [
+            self.period_precip_probability(period)
+            for period in selected
+            if self.period_precip_probability(period) is not None
+        ]
+        wind_values = [
+            parse_wind_speed_mph(period.get("windSpeed"))
+            for period in selected
+            if parse_wind_speed_mph(period.get("windSpeed")) is not None
+        ]
+        soon_end = now + soon_hours * 3600
+        next_precip = self.next_precip_period(selected, precip_threshold, soon_end)
+        current_temp = to_float(current.get("temperature"))
+        current_pop = self.period_precip_probability(current)
+        temp_min = min(temperatures) if temperatures else None
+        temp_max = max(temperatures) if temperatures else None
+        temp_change = None
+        last_temp = to_float(selected[-1].get("temperature")) if selected else None
+        if current_temp is not None and last_temp is not None:
+            temp_change = last_temp - current_temp
+        first_start = compact_noaa_text(current.get("startTime"), 80)
+        last_end = compact_noaa_text((selected[-1] or {}).get("endTime"), 80)
+        headline = self.forecast_headline(
+            selected,
+            next_precip,
+            precip_threshold,
+            soon_hours,
+            temp_min,
+            temp_max,
+            max(wind_values) if wind_values else None,
+        )
+        data = {
+            "event_id": "nws-forecast:{}:{}".format(latitude, longitude),
+            "event": "NWS hourly forecast",
+            "headline": headline,
+            "severity": "Minor",
+            "status": "Forecast",
+            "message_type": "Forecast",
+            "category": "Met",
+            "alert_kind": "forecast",
+            "area_desc": area_desc,
+            "effective": first_start,
+            "expires": last_end,
+            "updated": updated,
+            "summary": headline,
+            "description": self.forecast_description(selected),
+            "source": "NWS",
+            "source_url": compact_noaa_text(forecast_url, 240),
+            "internet_fed": True,
+            "latitude": latitude,
+            "longitude": longitude,
+            "forecast_hour_count": len(selected),
+            "forecast_window_hours": window_hours,
+            "forecast_soon_hours": soon_hours,
+            "precip_probability_threshold": precip_threshold,
+            "current_forecast": compact_noaa_text(current.get("shortForecast"), 120),
+            "current_temperature_f": current_temp,
+            "current_precip_probability": current_pop,
+            "temperature_min_f": temp_min,
+            "temperature_max_f": temp_max,
+            "temperature_change_f": temp_change,
+            "max_precip_probability": max(precip_values) if precip_values else None,
+            "max_wind_mph": max(wind_values) if wind_values else None,
+            "first_period_start": first_start,
+            "last_period_end": last_end,
+            "forecast_generated": generated,
+            "precip_likely_soon": bool(next_precip),
+        }
+        for field in (
+            "forecast_generated",
+            "first_period_start",
+            "last_period_end",
+            "updated",
+        ):
+            epoch = iso_epoch(data.get(field))
+            if epoch is not None:
+                data["{}_epoch".format(field)] = epoch
+        if next_precip:
+            start = compact_noaa_text(next_precip.get("startTime"), 80)
+            end = compact_noaa_text(next_precip.get("endTime"), 80)
+            data.update(
+                {
+                    "next_precip_start": start,
+                    "next_precip_end": end,
+                    "next_precip_probability": self.period_precip_probability(
+                        next_precip
+                    ),
+                    "next_precip_forecast": compact_noaa_text(
+                        next_precip.get("shortForecast"), 120
+                    ),
+                }
+            )
+            for field in ("next_precip_start", "next_precip_end"):
+                epoch = iso_epoch(data.get(field))
+                if epoch is not None:
+                    data["{}_epoch".format(field)] = epoch
+        data["fingerprint"] = self.fingerprint(
+            data,
+            (
+                "event",
+                "area_desc",
+                "forecast_generated",
+                "updated",
+                "headline",
+                "current_forecast",
+                "current_temperature_f",
+                "current_precip_probability",
+                "temperature_min_f",
+                "temperature_max_f",
+                "max_precip_probability",
+                "next_precip_start",
+                "next_precip_probability",
+                "max_wind_mph",
+            ),
+        )
+        return clean_noaa_data(data)
+
+    def nws_forecast_hourly_url(self):
+        """Return the hourly forecast URL for the configured point."""
+        forecast = self.forecast_config()
+        if forecast.get("url"):
+            return str(forecast.get("url"))
+        latitude, longitude = self.configured_point()
+        if latitude in (None, "") or longitude in (None, ""):
+            return ""
+        point_key = "{},{}".format(latitude, longitude)
+        if self._forecast_hourly_url and self._forecast_point_key == point_key:
+            return self._forecast_hourly_url
+        points_url = forecast.get("points_url") or NWS_POINTS_ENDPOINT.format(
+            latitude, longitude
+        )
+        payload = self.fetch_json(points_url)
+        props = payload.get("properties") or {}
+        self._forecast_hourly_url = props.get("forecastHourly") or props.get("forecast") or ""
+        self._forecast_point_key = point_key
+        self._forecast_area_desc = self.points_area_desc(payload) or point_key
+        return self._forecast_hourly_url
+
+    def configured_point(self):
+        """Return configured latitude/longitude as strings."""
+        nws = self.config.get("nws") or {}
+        return (
+            self.config.get("latitude", nws.get("latitude")),
+            self.config.get("longitude", nws.get("longitude")),
+        )
+
+    def forecast_area_desc(self):
+        """Return a stable area label for the configured forecast point."""
+        latitude, longitude = self.configured_point()
+        return self._forecast_area_desc or "point {},{}".format(latitude, longitude)
+
+    def points_area_desc(self, payload):
+        """Return a compact human label from NWS points metadata."""
+        props = (payload or {}).get("properties") or {}
+        relative = props.get("relativeLocation") or {}
+        rel_props = relative.get("properties") or {}
+        city = compact_noaa_text(rel_props.get("city"), 80)
+        state = compact_noaa_text(rel_props.get("state"), 20)
+        if city and state:
+            return "{}, {}".format(city, state)
+        grid = compact_noaa_text(props.get("gridId"), 20)
+        grid_x = props.get("gridX")
+        grid_y = props.get("gridY")
+        if grid and grid_x not in (None, "") and grid_y not in (None, ""):
+            return "{} grid {},{}".format(grid, grid_x, grid_y)
+        return ""
+
+    def forecast_int(self, config, key, default, minimum, maximum):
+        """Return a bounded integer forecast option."""
+        try:
+            value = int(config.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
+
+    def period_precip_probability(self, period):
+        """Return NWS probabilityOfPrecipitation value as a number."""
+        value = (period or {}).get("probabilityOfPrecipitation")
+        if isinstance(value, dict):
+            value = value.get("value")
+        return to_float(value)
+
+    def next_precip_period(self, periods, threshold, soon_end):
+        """Return the first near-term period meeting the precipitation threshold."""
+        for period in periods or []:
+            start_epoch = iso_epoch(period.get("startTime")) or 0
+            if start_epoch > soon_end:
+                continue
+            probability = self.period_precip_probability(period)
+            if probability is not None and probability >= threshold:
+                return period
+        return None
+
+    def forecast_headline(
+        self, periods, next_precip, precip_threshold, soon_hours, temp_min, temp_max, wind_max
+    ):
+        """Return a compact point forecast summary."""
+        parts = []
+        if next_precip:
+            probability = self.period_precip_probability(next_precip)
+            start = compact_forecast_time(next_precip.get("startTime"))
+            parts.append(
+                "precip {}% around {}".format(
+                    int(round(probability)) if probability is not None else "?",
+                    start or "near term",
+                )
+            )
+        else:
+            parts.append("no precip >= {}% in next {}h".format(precip_threshold, soon_hours))
+        if temp_min is not None and temp_max is not None:
+            parts.append("temp {}-{}F".format(int(round(temp_min)), int(round(temp_max))))
+        if wind_max is not None:
+            parts.append("wind up to {} mph".format(int(round(wind_max))))
+        current = compact_noaa_text((periods[0] or {}).get("shortForecast"), 80) if periods else ""
+        if current:
+            parts.append(current)
+        return "; ".join(parts)
+
+    def forecast_description(self, periods):
+        """Return a compact sequence of near-term forecast periods."""
+        parts = []
+        for period in (periods or [])[:6]:
+            start = compact_forecast_time(period.get("startTime"))
+            temp = period.get("temperature")
+            forecast = compact_noaa_text(period.get("shortForecast"), 80)
+            pop = self.period_precip_probability(period)
+            wind = compact_noaa_text(period.get("windSpeed"), 40)
+            fields = [
+                start,
+                forecast,
+                "{}F".format(temp) if temp not in (None, "") else "",
+                "{}% precip".format(int(round(pop))) if pop is not None else "",
+                wind and "wind {}".format(wind),
+            ]
+            text = " ".join(str(field) for field in fields if field)
+            if text:
+                parts.append(text)
+        return "; ".join(parts)
 
     def nws_alert_data(self, feature):
         """Normalize one NWS alert feature."""
@@ -380,9 +737,22 @@ class NOAACollector(BaseCollector):
         epoch = timestamp_epoch(updated)
         if epoch is not None:
             data["updated_epoch"] = epoch
-        data["fingerprint"] = self.fingerprint(
-            data, ("event", "headline", "severity", "updated", "summary", "source_url")
-        )
+        if alert_kind == "tropical_outlook":
+            # Outlook timestamps/links can churn even when the basin state is
+            # still "no tropical cyclones"; treat only material text changes as
+            # new feed events.
+            fingerprint_fields = ("event", "headline", "severity", "summary", "basin")
+        else:
+            fingerprint_fields = (
+                "event",
+                "headline",
+                "severity",
+                "updated",
+                "summary",
+                "source_url",
+                "basin",
+            )
+        data["fingerprint"] = self.fingerprint(data, fingerprint_fields)
         return clean_noaa_data(data)
 
     def fetch_json(self, url):
@@ -503,31 +873,55 @@ def iso_epoch(value):
     return timestamp_epoch(text)
 
 
+def to_float(value):
+    """Return a numeric value when NOAA encodes one as int/float/string."""
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_wind_speed_mph(value):
+    """Return the largest mph value from NWS windSpeed text."""
+    numbers = [
+        float(match.group(1))
+        for match in re.finditer(r"([0-9]+(?:\.[0-9]+)?)", str(value or ""))
+    ]
+    return max(numbers) if numbers else None
+
+
+def compact_forecast_time(value):
+    """Return a compact forecast timestamp for summaries."""
+    text = compact_noaa_text(value, 80)
+    if not text:
+        return ""
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})", text)
+    if match:
+        return "{} {}".format(match.group(1), match.group(2))
+    return text
+
+
 def stable_noaa_event_key(data, event_type=""):
     """Return a stable key for grouping NOAA events across routine updates."""
     data = data or {}
     if event_type == "noaa_tropical_advisory" or data.get("source") == "NHC":
-        title = (
+        basin = noaa_key_fragment(data.get("basin") or data.get("area_desc") or "global")
+        event = (
             data.get("event")
             or data.get("headline")
             or data.get("summary")
             or data.get("event_id")
             or "nhc"
         )
-        title = stable_nhc_advisory_title(title) or title
-        return "nhc:{}".format(noaa_key_fragment(title))
-    return noaa_key_fragment(
-        data.get("event_id") or data.get("headline") or data.get("event") or "noaa"
+        return "nhc:{}:{}".format(basin, noaa_key_fragment(event))
+    source = noaa_key_fragment(data.get("source") or "NOAA")
+    area = noaa_key_fragment(data.get("area_desc") or "global")
+    event = noaa_key_fragment(
+        data.get("event") or data.get("headline") or data.get("event_id") or "noaa"
     )
-
-
-def stable_nhc_advisory_title(value):
-    """Remove advisory numbers from NHC titles for stable advisory identity."""
-    text = compact_noaa_text(value, 240)
-    if not text:
-        return ""
-    text = NHC_PRODUCT_NUMBER_RE.sub(lambda match: match.group(1), text)
-    return re.sub(r"\s+", " ", text).strip(" -;:")
+    return "{}:{}:{}".format(source, area, event)
 
 
 def noaa_key_fragment(value):

@@ -1,0 +1,23 @@
+key: pws
+order: 100
+label: PWS
+description: Optional Ambient Weather personal weather station feed
+acquisition_mode: scan
+enabled: false
+
+# Personal Weather Station (PWS) uses Ambient Weather's current device API.
+# Store real keys only in local config/collectors/pws.yaml on each Skannr host.
+poll_interval_sec: 60
+request_timeout_sec: 15
+user_agent: "Skannr PWS collector"
+
+# Optional stable station label shown in Skannr, for example GW0154.
+station_id: ""
+
+# Optional filters if the Ambient account returns multiple devices.
+# mac_address: ""
+# device_name: ""
+
+# Ambient Weather credentials. Leave blank in templates/source uploads.
+application_key: ""
+api_key: ""

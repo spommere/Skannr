@@ -2,7 +2,7 @@ key: rtlsdr
 order: 50
 label: RTL-SDR
 description: rtl_power spectrum scanning
-has_subject_history: true
+acquisition_mode: scan
 enabled: true
 validation: command -v rtl_power >/dev/null 2>&1 && command -v rtl_test >/dev/null 2>&1 && rtl_test -t
 validation_timeout_sec: 10

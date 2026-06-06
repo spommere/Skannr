@@ -1,6 +1,6 @@
 # Skannr Design Document
 
-Version: 0.2.2, 2026-06-04
+Version: 0.2.3, 2026-06-05
 
 ## 1. Overview
 
@@ -20,6 +20,7 @@ The current implementation focuses on:
 - optional NOAA/NWS/NHC internet-fed hazard context
 - optional USGS internet-fed earthquake context
 - optional NOAA SWPC internet-fed space-weather context
+- optional Ambient Weather personal weather station context
 - optional passive LAN neighbor/default-gateway context
 - deterministic Findings, Insights, Device History, and Reports generated from
   retained local logs
@@ -27,7 +28,7 @@ The current implementation focuses on:
 Skannr is intentionally small. It uses Flask, a local browser UI, JSONL files,
 and materialized JSON summaries. It does not require a database, message
 broker, or external web assets. Internet access is only needed for collectors
-that explicitly depend on it, such as APRS-IS, NOAA, USGS, and SWPC.
+that explicitly depend on it, such as APRS-IS, NOAA, USGS, SWPC, and PWS.
 
 ## 2. Goals And Non-Goals
 
@@ -69,7 +70,7 @@ Skannr is a single Python process with these major components:
 - `src/skannr/alerts.py`: live alert engine for operator-attention events.
 - `src/skannr/device_history.py`: materialized Wi-Fi and Bluetooth device state.
 - `src/skannr/subject_history.py`: collector-neutral subject rollups for
-  Wi-Fi, Bluetooth, APRS-IS, Rayhunter, RTL-SDR, NOAA, USGS, SWPC, and LAN.
+  Wi-Fi, Bluetooth, APRS-IS, Rayhunter, RTL-SDR, NOAA, USGS, SWPC, PWS, and LAN.
 - `src/skannr/history_analysis.py`: deterministic Insights from the subject
   device view.
 - `src/skannr/reports.py`: slower longitudinal summaries from Subject History.
@@ -122,7 +123,7 @@ raw collector JSONL
      collector-neutral Subject History:
        Wi-Fi SSID/BSSID, Bluetooth MAC/name, APRS callsign/object,
        Rayhunter endpoint, RTL-SDR frequency, NOAA alert/advisory,
-       USGS earthquake, SWPC space-weather event, LAN device/gateway
+       USGS earthquake, SWPC space-weather event, PWS station, LAN device/gateway
 
 Subject History
   -> Device History compatibility view          Wi-Fi/Bluetooth history tables
@@ -138,10 +139,10 @@ Subject History is the main materialized layer. Reports and longer-window
 analysis should read Subject History instead of rescanning raw collector logs.
 The compatibility Device History view exists so older Wi-Fi/Bluetooth UI code
 can keep using its existing table model while APRS-IS, Rayhunter, RTL-SDR,
-NOAA, USGS, SWPC, and LAN share the same subject-oriented contract.
+NOAA, USGS, SWPC, PWS, and LAN share the same subject-oriented contract.
 
 Alerts are different from Reports. They are live operator-attention state:
-drone/Remote ID sightings, APRS severe weather, Rayhunter warnings, Wi-Fi
+drone/Remote ID sightings, APRS/PWS severe weather, Rayhunter warnings, Wi-Fi
 disruption bursts, sensitive open SSIDs, tracker-like BLE devices, NOAA/USGS
 hazards, SWPC high-impact space-weather events, and LAN gateway changes.
 Alerts are emitted and persisted as events, but the active ACK/open state is
@@ -200,12 +201,14 @@ The global file owns:
 - live AlertEngine rules and thresholds
 - history-analysis thresholds
 - Reports thresholds
-- UI row limits, stale-data threshold, and automatic derived refresh interval
+- UI row limits, poll-feed live TTL, stale-data threshold, and automatic
+  derived refresh interval
 - optional dashboard View-window default
 
 Collector YAML files own:
 
 - collector key, label, order, description, and grouping
+- collector acquisition mode: `scan`, `poll`, or `listen`
 - whether a collector contributes to Subject History
 - enabled/auto-start behavior
 - collector-owned validation commands
@@ -246,6 +249,57 @@ Collector states are:
 - `RETRYING`
 - `OFFLINE`
 - `STOPPED`
+
+### Acquisition Modes
+
+Collector metadata includes one broad acquisition mode. The mode is not a
+transport implementation; it is a UI/history contract for how repeated
+observations should behave.
+
+- `scan`: Skannr asks local hardware or the local OS for current observations.
+  Wi-Fi Scan, BLE Scan, Bluetooth Classic, RTL-SDR, PWS, and LAN are scan
+  collectors. Live rows should represent current/recent subjects, not every
+  individual scan sample.
+- `poll`: Skannr periodically fetches current or recent records from an
+  endpoint. Rayhunter, NOAA, USGS, and SWPC are poll collectors. Poll feeds
+  must de-duplicate by source event/subject identity because the same old
+  advisory, earthquake, or space-weather product can appear in every poll.
+- `listen`: Skannr opens a stream/sniffer and waits for events. APRS-IS and
+  Wi-Fi Monitor are listen collectors. Individual packets/frames remain raw
+  evidence, while Subject History rolls them up by station/device/network.
+
+The browser uses this metadata for future-facing behavior, but the durable
+contract is subject-focused. Subject History participation is code-owned
+metadata, not an operator YAML knob: normal collectors contribute subjects by
+default, while status-only sources such as System are explicit code exceptions.
+Subject-producing collectors should roll raw observations into stable subjects,
+and later Insights/Reports should read those subjects instead of reinterpreting
+raw logs independently.
+
+### Subject Identity Contract
+
+Durable collectors should define these fields consistently:
+
+- `subject_id`: stable identity for the observed object or feed item in
+  Subject History.
+- `event_id`: upstream event/message/product identity where the source provides
+  one.
+- `fingerprint`: hash or compact value for material content changes. It should
+  include event time when the event identity alone is not enough to distinguish
+  two real events.
+- `event_time`: when the source says the event happened.
+- `updated`: when the source says the event/message changed.
+- `first_seen` / `last_seen`: when Skannr observed the subject.
+
+For scan and listen collectors, the subject is normally a physical or logical
+nearby object: SSID/BSSID, MAC, callsign, frequency bin, or LAN host/gateway.
+PWS is also scan-style: Ambient Weather returns current station state, and
+Skannr rolls samples up by station ID/name/MAC.
+For poll collectors, the subject is the source event/message/product. Poll
+collectors must be careful not to treat every poll response as a new subject.
+Live feed rows should upsert by the same key used by Subject History, and
+Alerts should use the same key unless a rule intentionally narrows the alert
+identity further. ACK state should not span different subjects/events.
 
 For hardware-oriented status lines, the browser translates collector-owned
 probes and detected Linux devices into availability wording such as
@@ -523,15 +577,29 @@ Device History contribution:
 
 ### NOAA (`noaa`)
 
-Purpose: internet-fed weather, tsunami, and tropical hazard context for a
-configured point/state and optional NHC basins.
+Purpose: internet-fed weather, tsunami, tropical hazard, and point-forecast
+context for a configured point/state and optional NHC basins.
 
 Implementation:
 
 - Polls NWS active alerts through `api.weather.gov`.
+- Resolves the configured latitude/longitude through the NWS points API and
+  polls the hourly forecast URL for a compact point-forecast summary.
 - Polls configured NHC RSS feeds for tropical advisories.
 - Emits only new or materially changed alerts/advisories during one collector
-  run.
+  run. Forecast summaries emit only when the derived near-term forecast state
+  materially changes.
+- Uses Source + Area/Basin + Event as the stable subject identity. This keeps
+  the same polled advisory in one live row while separating different areas,
+  product families, advisory numbers, and configured forecast points.
+- Keeps forecast data subject-focused: one `noaa_forecast_summary` row per
+  configured point with generated/update time, current forecast, temperature
+  range, precipitation probability, next likely precipitation period, and max
+  wind. It does not persist every hourly period as a separate subject.
+- Treats generic NHC Tropical Weather Outlook messages such as "there are no
+  tropical cyclones at this time" as state-like outlook subjects that do not
+  alert and do not become new rows merely because the feed link/timestamp
+  changed.
 - Uses poll cadence from `config/collectors/noaa.yaml`, default `300` seconds.
 
 Important events:
@@ -541,12 +609,13 @@ Important events:
 - `collector_offline`
 - `noaa_weather_alert`
 - `noaa_tropical_advisory`
+- `noaa_forecast_summary`
 
 Device History contribution:
 
 - None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
-  NOAA alerts/advisories up by alert/advisory identity for live detail,
-  Reports, and Alerts.
+  NOAA alerts/advisories and point forecasts up by Source + Area/Basin + Event
+  for live detail, Reports, and Alerts.
 
 ### USGS (`usgs`)
 
@@ -558,6 +627,9 @@ Implementation:
 - Queries by configured latitude, longitude, radius, and minimum magnitude.
 - Calculates distance from the configured point when event coordinates are
   present.
+- Uses the USGS event ID as the stable subject identity.
+- Includes event time plus magnitude, place, status, felt/CDI/MMI, alert color,
+  and tsunami flag in the material fingerprint.
 - Uses poll cadence from `config/collectors/usgs.yaml`, default `300` seconds.
 
 Important events:
@@ -590,6 +662,14 @@ Implementation:
   `feed_min_kp`.
 - Does not retain raw X-ray or Kp time-series samples; only normalized
   `swpc_event` records are persisted.
+- Uses SWPC event identity as the stable subject identity. Official
+  alert/watch/warning products and compact X-ray/Kp events include source event
+  time in identity or fingerprint. NOAA R/S/G scale rows are state-like and
+  update only when the current scale materially changes.
+- Tolerates partial product failures. If at least one enabled SWPC product
+  succeeds, successful rows are emitted and failed product names are surfaced in
+  collector status. The collector only enters retrying when all enabled SWPC
+  products fail.
 - Uses poll cadence from `config/collectors/swpc.yaml`, default `300` seconds.
 
 Important events:
@@ -614,6 +694,49 @@ Alert behavior:
   higher from the planetary K index.
 - Lower R/S/G/Kp conditions can still appear in the SWPC live feed and derived
   context without becoming Alerts.
+
+### PWS (`pws`)
+
+Purpose: current local personal weather station context from Ambient Weather.
+
+Implementation:
+
+- Polls Ambient Weather's `/v1/devices` API with local
+  `application_key`/`api_key` credentials from `config/collectors/pws.yaml`.
+- Uses a scan-style cadence, default `60` seconds, because the endpoint returns
+  current station state rather than a historical event feed.
+- Emits one `pws_weather` event per station when material weather fields change.
+- Never emits API credentials in browser status, raw event payloads, Reports, or
+  Subject History. Source URLs are redacted to the public endpoint.
+- Uses station ID, station name, or MAC address as stable subject identity.
+- Normalizes outdoor and indoor temperature/humidity/dewpoint/feels-like
+  readings, wind/gust and 10-minute wind averages, one-hour rain rate, expanded
+  rain totals, pressure, solar/UV, coarse location, coordinates, elevation,
+  sample time, timezone, last-rain time, battery/status fields, and source
+  metadata.
+- Intentionally ignores the street address returned by Ambient; Skannr keeps
+  only coarse location metadata and coordinates.
+- Tracks simple rain episodes in Subject History. When the latest transition is
+  `stopped`, report evidence keeps the episode start and stop together so
+  Reports do not show ambiguous standalone rain start/stop rows.
+
+Important events:
+
+- `collector_online`
+- `collector_retrying`
+- `collector_offline`
+- `pws_weather`
+
+Device History contribution:
+
+- None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
+  PWS samples up by station for live detail, Insights, Reports, and Alerts.
+
+Alert behavior:
+
+- High one-hour rain rate and high wind gusts can open `pws_weather` Alerts.
+- Thresholds are independent from APRS weather thresholds so local station
+  alerts can be tuned separately.
 
 ### LAN (`lan`)
 
@@ -754,6 +877,10 @@ when no new BLE event arrives after a sleeping browser wakes. Device History
 records carry numeric epoch fields next to display timestamps, and the browser
 uses those epochs for live/recent filtering when available. Display timestamps
 remain the Skannr-host strings from the event or derived summary.
+Poll-feed live tables for NOAA, USGS, and SWPC upsert by source event/subject
+identity and hide rows older than `ui.poll_feed_live_ttl_sec`, default 24
+hours. This TTL only limits browser live-feed clutter. It does not delete raw
+collector JSONL, Subject History, Reports, or Alerts.
 
 Manual or automatic refresh of any derived tab refreshes the whole bundle in
 dependency order:
@@ -803,10 +930,23 @@ Current subject identities are:
 - APRS-IS callsign/object/weather station
 - Rayhunter endpoint
 - RTL-SDR frequency bin
-- NOAA alert/advisory identity
-- USGS earthquake event identity
-- SWPC space-weather event identity
+- NOAA/NWS/NHC Source + Area/Basin + Event
+- USGS earthquake event ID
+- SWPC space-weather event/product ID
+- PWS station ID/name/MAC
 - LAN device MAC/IP and default gateway identity
+
+For NOAA/NHC, event title is deliberately part of the subject. Amanda Forecast
+Advisory 11, Amanda Forecast Advisory 12, and Amanda Wind Speed Probabilities
+11 are separate subjects. For NWS alerts, area is deliberately part of the
+subject, so a Beach Hazards Statement for San Francisco differs from one for
+Santa Cruz. Generic NHC "no active cyclones" outlook messages collapse by
+basin/event and update only on material text/state changes.
+
+For poll collectors, Subject History and the live feed share the same identity
+rule. The browser may hide old poll-feed rows after `ui.poll_feed_live_ttl_sec`
+for readability, but raw logs and Subject History retention are governed by the
+normal runtime retention and materialized-history rules.
 
 The materialized file is:
 
@@ -815,15 +955,16 @@ runtime/logs/device_history/subject_history.json
 ```
 
 The summary also carries report-compatible sections such as `wifi`, `bluetooth`,
-`aprsis`, `rayhunter`, `rtlsdr`, `noaa`, `usgs`, `swpc`, and `lan`. The visible
-History tab renders Subject History rows so APRS-IS callsigns, Rayhunter
-endpoints, RTL-SDR subjects, NOAA alerts, USGS earthquakes, SWPC space-weather
-events, and LAN subjects can be inspected directly. Device History remains the
-Wi-Fi/Bluetooth compatibility view derived from this summary.
+`aprsis`, `rayhunter`, `rtlsdr`, `noaa`, `usgs`, `swpc`, `pws`, and `lan`. The
+visible History tab renders Subject History rows so APRS-IS callsigns,
+Rayhunter endpoints, RTL-SDR subjects, NOAA alerts, USGS earthquakes, SWPC
+space-weather events, PWS stations, and LAN subjects can be inspected directly.
+Device History remains the Wi-Fi/Bluetooth compatibility view derived from this
+summary.
 
 For collectors that do not have the older Wi-Fi/Bluetooth Device History fold,
 Subject History keeps compact `direct_observations` for APRS-IS, Rayhunter,
-RTL-SDR, NOAA, USGS, SWPC, and LAN. Refresh reads only JSONL bytes beyond the
+RTL-SDR, NOAA, USGS, SWPC, PWS, and LAN. Refresh reads only JSONL bytes beyond the
 saved checkpoint, appends those normalized observations, and rebuilds the
 selected-window subject rows from the materialized data. The browser API omits
 those durable observations and exposes the smaller normalized `subjects` list
@@ -965,14 +1106,35 @@ Current report families include:
 - Wi-Fi client probe activity
 - Wi-Fi deauth/disassociation activity
 - new Wi-Fi Monitor client activity
+- population/cross-subject rows for environment-level patterns such as APRS-IS
+  weather/mobile activity, NOAA hazard/tropical product sets, USGS seismic
+  activity, SWPC space-weather product sets, LAN subject population,
+  multi-BSSID Wi-Fi SSID profiles, BLE private-address clusters, and local RF
+  privacy exposure
 
 Bluetooth sessions are clipped to the selected report window so a last-24-hours
 report does not count hours before the window boundary.
 
-The Reports UI provides a Type column over broad report families: security,
-presence, signal, new-device, behavior, identity, collector, and analysis. The
-small Reports summary line above the table is derived from the currently visible
-rows, so it changes with source filtering and search text. Confidence and
+Reports carry an internal `report_scope`:
+
+- `population`: cross-subject intelligence for a collector or local
+  environment slice. These rows are sorted before per-subject rows. They link
+  only when the row carries a concrete grouped identity such as an SSID;
+  otherwise they avoid fake single-subject detail links.
+- `collector` / `quality`: collector health or coverage confidence rows.
+- `subject`: one concrete subject such as a BSSID, MAC, callsign, event ID,
+  Rayhunter endpoint, or LAN device/gateway.
+
+The UI lists population rows first, then collector/quality rows, then
+per-subject rows. This keeps the Reports tab useful as an intelligence product:
+first show the local pattern, then let the operator drill into the subject rows
+that explain it.
+
+The Reports UI provides a Type column over broad report families: pattern,
+security, presence, signal, new-device, behavior, identity, collector, and
+analysis. The small Reports summary line above the table is derived from the
+currently visible rows, so it changes with source filtering and search text.
+Confidence and
 Reasons columns expose evidence quality and compact reason tags before the
 operator reads the longer Evidence cell.
 Report evidence remains structured in JSON, but the browser renders it as
@@ -1007,10 +1169,10 @@ BSSID/radio lists belong in drilldown instead of the report row.
 
 Reports use a server-side `score` from 0 to 100. The score is an operator
 attention rank, not a probability of malicious activity. Rows are sorted by
-severity, then score, then last-seen time. A high score means the profile is more
-important to review because several signals line up: long presence, repeated
-presence, current activity, strong nearby signal, new appearance, weak security,
-or unusually broad address/BSSID behavior.
+scope, then severity, then score, then last-seen time. A high score means the
+profile is more important to review because several signals line up: long
+presence, repeated presence, current activity, strong nearby signal, new
+appearance, weak security, or unusually broad address/BSSID behavior.
 
 Bluetooth stable-device scoring:
 
@@ -1105,6 +1267,10 @@ for operator drilldown:
 - Wi-Fi SSID opens a grouped network detail view across all BSSIDs for that
   SSID.
 - Wi-Fi BSSID opens one radio/AP detail view.
+- Latitude/longitude text and APRS range filters open OpenStreetMap in a new
+  browser tab. The browser linkifier recognizes canonical `lat, lon` text and
+  APRS `r/lat/lon/radius` filters, so collectors should prefer those display
+  forms instead of embedding provider-specific map URLs.
 
 The detail view is browser-side and uses the currently loaded Device History and
 Reports payloads. It shows identity, first/last seen, radio/security context,
@@ -1251,21 +1417,37 @@ network, VPN, SSH tunnel, or reverse proxy with appropriate access control.
 
 Adding a collector currently requires:
 
-1. Add `config/collectors/<key>.yaml` with key, label, order, validation commands, and
-   collector-specific settings.
+1. Add `config/collectors/<key>.yaml` with key, label, order,
+   `acquisition_mode`, validation commands, and collector-specific settings.
+   Choose `scan`, `poll`, or `listen` based on how the collector obtains data.
 2. Add `src/skannr/collectors/<key>.py` implementing a `BaseCollector` subclass.
-3. Implement `hardware_status()` on the subclass if System Status needs static
+3. Define the subject contract before adding Reports: stable `subject_id`,
+   upstream `event_id` when present, material `fingerprint`, `event_time`,
+   `updated`, `first_seen`, and `last_seen` semantics.
+4. Decide whether the collector needs population Reports in addition to
+   per-subject Reports. Population rows should answer "what pattern happened in
+   the area/window?" while subject rows answer "which specific thing did it?"
+5. Implement `hardware_status()` on the subclass if System Status needs static
    hardware or software probes.
-4. Add the class to `COLLECTOR_CLASS_BY_KEY` in `src/skannr/collectors/__init__.py`.
-5. If the collector contributes durable subjects, extend
+6. Add the class to `COLLECTOR_CLASS_BY_KEY` in
+   `src/skannr/collectors/__init__.py`.
+7. If the collector contributes durable subjects, extend
    `SubjectHistoryBuilder.COLLECTORS` and add subject rollup logic. Wi-Fi and
    Bluetooth still use `DeviceHistoryBuilder` underneath for their rich device
    sessions.
-6. If the collector should appear in Insights or Reports, add rules in
+8. If the collector is a poll feed, make its live tab upsert by the same
+   source event/subject identity and apply the configured live-feed TTL when
+   appropriate.
+9. If the collector can emit Alerts, make the alert key line up with the
+   subject/event key unless the rule intentionally needs a narrower key.
+10. If the collector should appear in Insights or Reports, add rules in
    `history_analysis.py` or `reports.py`.
-7. If the collector needs custom live UI, add markup in
+11. If the collector needs custom live UI, add markup in
    `src/skannr/static/index.html`, table schema in `src/skannr/static/tables.js`,
    and behavior in `src/skannr/static/app.js`.
+12. Extend `scripts/validate_collector_contract.py` with examples that prove
+    acquisition mode, subject identity, poll de-duplication, and alert keying
+    for the new collector.
 
 Collector metadata and derived-view source filters are already driven by YAML,
 but collector class registration and domain-specific UI/history logic are still
@@ -1276,7 +1458,7 @@ complexity before the collector set stabilizes.
 ## 14. Known Limitations
 
 - Subject History currently has rich Wi-Fi, Bluetooth, APRS-IS, Rayhunter,
-  NOAA, USGS, SWPC, and LAN support. RTL-SDR has a minimal frequency subject
+  NOAA, USGS, SWPC, PWS, and LAN support. RTL-SDR has a minimal frequency subject
   rollup, and System is omitted because it is runtime state rather than an
   observed subject source.
 - Reports are deterministic summaries, not forensic conclusions.

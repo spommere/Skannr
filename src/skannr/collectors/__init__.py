@@ -7,6 +7,7 @@ collector keys from YAML metadata to concrete Python classes.
 from .aprsis import APRSISCollector
 from .lan import LANCollector
 from .noaa import NOAACollector
+from .pws import PWSCollector
 from .rtlsdr import RTLSDRCollector
 from .rayhunter import RayhunterCollector
 from .swpc import SWPCCollector
@@ -33,6 +34,7 @@ COLLECTOR_CLASS_BY_KEY = {
     "noaa": NOAACollector,
     "usgs": USGSCollector,
     "swpc": SWPCCollector,
+    "pws": PWSCollector,
     "lan": LANCollector,
 }
 

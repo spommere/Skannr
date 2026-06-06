@@ -1,8 +1,8 @@
 key: lan
-order: 100
+order: 110
 label: LAN
 description: Optional passive local-network neighbor observation
-has_subject_history: true
+acquisition_mode: scan
 enabled: false
 
 # LAN is local OS state, not RF evidence. The first pass is passive: neighbor

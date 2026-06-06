@@ -78,6 +78,16 @@ const TABLE_SCHEMAS = {
     (item) => swpcTimingText(item),
     (item) => swpcDetailsText(item)
   ],
+  pwsEvents: [
+    (item) => item.last_seen || "",
+    (item) => pwsSubjectLink(item),
+    (item) => item.event_time || "",
+    (item) => pwsWeatherText(item),
+    (item) => pwsWindText(item),
+    (item) => pwsRainText(item),
+    (item) => pwsPressureText(item),
+    (item) => pwsSolarText(item)
+  ],
   lanEvents: [
     (item) => item.last_seen || "",
     (item) => item.event_type || "",
@@ -169,7 +179,7 @@ function appendTableCellValue(cell, value) {
     cell.appendChild(value.node);
     return;
   }
-  cell.textContent = tableCellSearchText(value);
+  appendMapLinkedText(cell, tableCellSearchText(value));
 }
 
 function tableCellSearchText(value) {

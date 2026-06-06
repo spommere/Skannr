@@ -2,7 +2,7 @@ key: wifi_monitor
 order: 20
 label: Wi-Fi Monitor
 description: On-demand monitor-mode Wi-Fi packet capture and channel hopping
-has_subject_history: true
+acquisition_mode: listen
 enabled: true
 auto_start: false
 validation_timeout_sec: 10

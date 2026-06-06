@@ -1,10 +1,10 @@
 # Skannr
 
 Skannr is a local monitoring dashboard for Wi-Fi, Bluetooth, RTL-SDR signals,
-optional APRS-IS/NOAA/USGS/SWPC situational context, and passive LAN
+optional APRS-IS/NOAA/USGS/SWPC/PWS situational context, and passive LAN
 observations. It runs on Linux hosts such as Raspberry Pi OS or Kali, records
 local JSONL event logs, and provides live views plus deterministic Insights,
-Subject History, and Reports through a browser UI.
+Subject History, Alerts, and Reports through a browser UI.
 
 Skannr is designed for local monitoring of your own environment. It does not
 perform wireless attacks, packet injection, or cloud-based analysis.
@@ -261,6 +261,59 @@ cp -a config.example/. config/
 Changing YAML settings requires restarting Skannr so the browser receives the
 new metadata and collector configuration.
 
+### Post-Install Local YAML Checklist
+
+After `./install.sh`, review these local files on each Skannr host. The files
+under `config/` are machine-specific; do not edit `config.example/` for a live
+Pi unless you are intentionally changing the shipped template.
+
+- `config/skannr.yaml`
+  - Set `skannr.listeners` to the HTTP endpoints Skannr should bind, such as
+    `127.0.0.1:5004`, `0.0.0.0:5004`, or `[::]:5006`.
+  - Review `persistence.filesystem.retention_days` and
+    `persistence.filesystem.log_dir` if the host has limited storage or a
+    custom runtime path.
+- `config/collectors/aprsis.yaml`
+  - Set `enabled: true` only when this host should use APRS-IS.
+  - Set `callsign` and `passcode`; use `-1` only for read-only/NOCALL-style
+    testing.
+  - Set each feed `host`, `port`, and `filter`. For a local-area stream, use
+    port `14580` and a range filter such as `r/<lat>/<lon>/<km>`.
+  - For CWOP/weather, keep a separate weather feed when needed and use
+    `enforce_radius: true` if the server returns out-of-range packets.
+  - Use `preferred_server` only when you deliberately want to reconnect until a
+    pooled backend such as `CWOP-4` is selected.
+- `config/collectors/noaa.yaml`
+  - Set `enabled: true` only when internet-fed NOAA/NWS/NHC context is wanted.
+  - Set `latitude` and `longitude` for the monitored point.
+  - Optionally set `state` for broader NWS state context.
+  - NWS point forecast summaries default on when `nws.enabled` is true and
+    `latitude` / `longitude` are configured. Use `forecast.enabled: false` only
+    if you want NWS alerts/NHC advisories without local forecast context.
+  - Review `nws.enabled`, `nhc.enabled`, and `nhc.basins` for the local area.
+- `config/collectors/usgs.yaml`
+  - Set `enabled: true` only when USGS earthquake context is wanted.
+  - Set `latitude`, `longitude`, `radius_km`, and `min_magnitude` for the area
+    and noise level you care about.
+- Optional collector files
+  - `config/collectors/rayhunter.yaml`: set `endpoint` for the Rayhunter device.
+  - `config/collectors/swpc.yaml`: enable if SWPC space-weather context is
+    wanted; defaults focus on X flares and R3/S3/G3/Kp7+ conditions.
+  - `config/collectors/pws.yaml`: enable if this host should poll an Ambient
+    Weather personal weather station. Set `application_key`, `api_key`, and an
+    optional stable `station_id` such as `GW0154` in local `config/` only.
+  - `config/collectors/lan.yaml`: enable if passive LAN neighbor/default-gateway
+    context is wanted.
+  - `config/collectors/wifi*.yaml`, `ble.yaml`, `bt_classic.yaml`, and
+    `rtlsdr.yaml`: review adapter/interface/device settings for the hardware
+    attached to this host.
+
+Restart Skannr after changing any YAML:
+
+```bash
+sudo systemctl restart skannr
+```
+
 ## YAML Parameter Reference
 
 The only shipped YAML files are:
@@ -316,6 +369,8 @@ installs. `config/` is machine-specific local state.
 - `aprs_temp_change_f`: APRS weather temperature-change threshold.
 - `aprs_rain_1h_high_in`: APRS weather high one-hour rain threshold.
 - `aprs_wind_high_mph`, `aprs_gust_high_mph`: APRS wind/gust thresholds.
+- `pws_temp_change_f`, `pws_rain_1h_high_in`, `pws_wind_high_mph`,
+  `pws_gust_high_mph`: PWS weather change/rain-rate/wind thresholds.
 - `noaa_upgrade_severities`: NWS severity names that become upgrade findings.
 - `usgs_warning_magnitude`, `usgs_warning_distance_km`: USGS live warning
   threshold and local-distance threshold.
@@ -344,6 +399,8 @@ installs. `config/` is machine-specific local state.
   DJI/Remote ID style Wi-Fi alert matching.
 - `aprs_weather.rain_1h_in`, `critical_rain_1h_in`, `wind_gust_mph`,
   `critical_wind_gust_mph`: APRS weather alert thresholds.
+- `pws_weather.rain_1h_in`, `critical_rain_1h_in`, `wind_gust_mph`,
+  `critical_wind_gust_mph`: PWS weather alert thresholds.
 - `rayhunter_warning`: alerts when Rayhunter reports non-zero warnings.
 - `wifi_disruption.window_sec`, `count`: deauth/disruption burst alert window.
 - `wifi_open_sensitive.ssid_patterns`: open SSIDs that should alert.
@@ -400,6 +457,9 @@ installs. `config/` is machine-specific local state.
 - `aprs_mobile_min_distance_km`, `aprs_weather_temp_change_f`,
   `aprs_weather_high_rain_1h_in`, `aprs_weather_high_wind_mph`,
   `aprs_weather_high_gust_mph`: APRS Report thresholds.
+- `pws_weather_temp_change_f`, `pws_weather_high_rain_1h_in`,
+  `pws_weather_high_wind_mph`, `pws_weather_high_gust_mph`: PWS Report
+  thresholds.
 - `noaa_high_severities`: NOAA severities called out in Reports.
 - `usgs_nearby_radius_km`, `usgs_warning_magnitude`: USGS report thresholds.
 - `swpc_report_xray_class`, `swpc_report_radio_blackout`,
@@ -418,6 +478,9 @@ installs. `config/` is machine-specific local state.
 - `max_rendered_findings`: browser cap for Findings rows.
 - `max_history_ssids`: SSIDs shown in compact history summaries.
 - `bluetooth_live_recent_sec`: BLE live-table age cutoff.
+- `poll_feed_live_ttl_sec`: NOAA/USGS/SWPC live-feed row age cutoff in
+  seconds. The default is 24 hours. It affects only the live feed display, not
+  raw logs, Subject History, Reports, or Alerts.
 - `derived_stale_after_min`: age before derived data is considered stale.
 - `derived_auto_refresh_min`: automatic derived-refresh cadence. `0` disables
   automatic refresh.
@@ -437,9 +500,43 @@ Every file under `config/collectors/` can use these shared keys:
 - `label`: UI label.
 - `description`: short operator-facing description.
 - `source_group`, `source_group_label`: group related collectors in the UI.
-- `has_subject_history`: whether the collector contributes to Subject History.
+- `acquisition_mode`: how the collector obtains data: `scan`, `poll`, or
+  `listen`.
 - `enabled`: whether the collector or action is available.
 - `auto_start`: whether an enabled collector starts at Skannr startup.
+
+Subject History participation is code-owned metadata, not an operator YAML
+knob. Normal collectors contribute subjects by default; exceptions such as
+System/status-only sources should be explicit in code.
+
+Acquisition modes define shared behavior:
+
+- `scan`: Skannr asks the local host for current observations. This includes
+  Wi-Fi Scan, BLE Scan, Bluetooth Classic, RTL-SDR, PWS, and LAN.
+- `poll`: Skannr periodically polls an endpoint or feed that returns current
+  or recent events. This includes Rayhunter, NOAA, USGS, and SWPC.
+- `listen`: Skannr opens a stream or sniffer and waits for events. This
+  includes APRS-IS and Wi-Fi Monitor.
+
+All durable collectors are subject-focused. They should provide a stable
+subject identity, keep material update details in a fingerprint, and expose
+event/update times when the source has them. Poll collectors need this most:
+the same USGS earthquake, SWPC product, or NOAA/NHC message may appear on every
+poll and should update one live row/subject instead of creating a new row each
+time. The current poll identities are:
+
+- NOAA/NWS/NHC: Source + Area/Basin + Event title. A Beach Hazards Statement
+  for San Francisco and one for Santa Cruz are separate subjects; Amanda
+  Forecast Advisory 11 and Amanda Wind Speed Probabilities 11 are also separate
+  subjects. NWS point forecast summaries are one subject per configured point.
+  Generic NHC "no active cyclones" outlook messages collapse by basin/event
+  unless the material text changes.
+- USGS: USGS event ID.
+- SWPC: SWPC event/product ID. X-ray/Kp events include their event time in the
+  identity or fingerprint; NOAA R/S/G scale rows are state-like and update only
+  on material scale changes.
+- PWS: station ID/name/MAC. Ambient Weather samples update one station row
+  when current weather values change.
 
 Collector-specific keys:
 
@@ -473,7 +570,9 @@ Collector-specific keys:
   `log_dropped_packets`, `emit_server_messages`.
 - `noaa.yaml`: `poll_interval_sec`, `request_timeout_sec`, `user_agent`,
   `latitude`, `longitude`, `state`, `nws.enabled`, `nws.url`,
-  `nhc.enabled`, `nhc.basins`.
+  `forecast.enabled`, `forecast.window_hours`, `forecast.soon_hours`,
+  `forecast.precip_probability_threshold`, `forecast.url`, `nhc.enabled`,
+  `nhc.basins`.
 - `usgs.yaml`: `poll_interval_sec`, `request_timeout_sec`, `user_agent`,
   `latitude`, `longitude`, `radius_km`, `min_magnitude`, `orderby`,
   `warning_magnitude_nearby`, `warning_magnitude_regional`,
@@ -487,6 +586,9 @@ Collector-specific keys:
   `alert_min_radio_blackout`, `alert_min_solar_radiation_storm`,
   `alert_min_geomagnetic_storm`, `alert_min_kp`, and
   `product_keyword_patterns`.
+- `pws.yaml`: `poll_interval_sec`, `request_timeout_sec`, `user_agent`,
+  `station_id`, optional `mac_address` or `device_name`, `application_key`,
+  and `api_key`. Keep real keys only in local `config/collectors/pws.yaml`.
 - `lan.yaml`: `poll_interval_sec`, `command_timeout_sec`,
   `collect_ip_neigh`, `collect_arp`, `dhcp_lease_paths`.
 
@@ -499,6 +601,16 @@ APRS-IS `feeds` entries use:
 - `enforce_radius`: apply Skannr-side distance filtering after decoding.
 - `include_callsigns`: optional explicit callsigns to request.
 - `preferred_server`: optional backend name, for pooled hosts such as CWOP.
+
+When adding or changing a collector identity rule, run:
+
+```bash
+python3 scripts/validate_collector_contract.py
+```
+
+That check locks down the acquisition-mode groups, representative
+NOAA/USGS/SWPC subject/fingerprint behavior, NOAA ACK restart de-duplication,
+SWPC partial-product failure handling, and PWS Ambient Weather normalization.
 
 The Reports section includes Bluetooth privacy-address grouping:
 
@@ -537,7 +649,7 @@ runtime/logs/device_history/reports.json
 
 `subject_history.json` is the collector-neutral materialized layer for
 long-lived intelligence. Wi-Fi and Bluetooth subjects come through Device
-History, while APRS-IS, Rayhunter, RTL-SDR, NOAA, USGS, SWPC, and LAN keep
+History, while APRS-IS, Rayhunter, RTL-SDR, NOAA, USGS, SWPC, PWS, and LAN keep
 compact normalized observations in Subject History so refreshes read only new
 JSONL bytes past the saved checkpoint. The browser receives the smaller
 subject/report views, not the retained direct-observation state.
@@ -585,7 +697,7 @@ The derived views have different jobs:
 - Reports: ranked intelligence summary, strategic/operator-facing.
 - Subject History: collector-neutral subject rollup for reports, analysis, and
   the History tab. It includes Wi-Fi/Bluetooth plus APRS-IS, Rayhunter,
-  RTL-SDR, NOAA, USGS, SWPC, and LAN subjects.
+  RTL-SDR, NOAA, USGS, SWPC, PWS, and LAN subjects.
 - Device History: Wi-Fi/Bluetooth compatibility view derived from subjects.
 
 Insights are intentionally shorter-lived than Reports or Subject History. They
@@ -662,12 +774,19 @@ Subject History, Device History, and Findings History are materialized
 summaries with JSONL checkpoints. After the first build, refresh normally reads
 only new raw-log bytes, not all old logs again.
 
-Reports keeps a visible Type column for broad report families such as security,
-presence, signal, new-device, behavior, identity, collector, and analysis. The
-Reports summary line above the table shows the most common report families in
-the current source-filter/search view. Reports also include Confidence and
-Reasons columns so rows show evidence quality and compact reason tags without
-requiring the Evidence column to be parsed first.
+Reports keeps a visible Type column for broad report families such as pattern,
+security, presence, signal, new-device, behavior, identity, collector, and
+analysis. The Reports summary line above the table shows the most common report
+families in the current source-filter/search view. Reports also include
+Confidence and Reasons columns so rows show evidence quality and compact reason
+tags without requiring the Evidence column to be parsed first.
+Reports are ordered by scope before score: cross-subject population patterns
+first, collector/quality rows next, and per-subject rows after that. Population
+rows summarize what changed in the local environment as a whole. They link only
+when the row carries a concrete grouped identity such as a Wi-Fi SSID; otherwise
+they avoid fake single-subject drilldowns. Per-subject rows still link to the
+matching Subject History detail when a concrete MAC, BSSID, SSID, callsign,
+endpoint, event ID, or LAN subject is available.
 Bluetooth Reports are device-centric: stable BLE MACs are consolidated into one
 profile row per device, while unnamed/private BLE address rotation is summarized
 as coarse manufacturer/name/service-UUID clusters.
@@ -685,6 +804,11 @@ evidence items are rendered as stacked labeled lines for readability. Related
 context is folded together where it improves readability: session state is part
 of `Observed`, Wi-Fi security is part of `Radio`, and strong-signal findings
 carry their signal value on the `Findings` line.
+Current population rows include multi-BSSID Wi-Fi SSID profiles, BLE
+private/randomized address clusters, local RF privacy exposure, APRS-IS weather
+station and mobile-station area patterns, NOAA tropical/hazard product sets,
+USGS seismic activity, SWPC space-weather product sets, and LAN subject
+population.
 
 MAC, SSID, and BSSID values in Reports, Device History, and live scan tables are
 clickable detail links. Bluetooth MAC links open one device view. Wi-Fi SSID
@@ -692,6 +816,10 @@ links open a grouped network view across all BSSIDs for that SSID. Wi-Fi BSSID
 links open the one-radio/AP view. The detail panel uses the currently loaded
 Device History and Reports data, so run Manual Refresh if the panel looks older
 than the live scan table.
+Latitude/longitude pairs rendered in tables, detail panels, report evidence,
+alerts, or status banners are linked to OpenStreetMap in a new browser tab.
+APRS range filters such as `r/19.6875/-155.9583/100` are linked to the filter
+center with a zoom level chosen from the radius.
 
 Device History does not include System in its Source filter because System
 events are not device histories. System events can still appear in Insights and
@@ -957,8 +1085,9 @@ station.
 
 ## NOAA
 
-`NOAA` is an optional internet-fed hazard collector. It polls NWS active alerts
-for a configured point/state and optional NHC tropical cyclone RSS feeds.
+`NOAA` is an optional internet-fed hazard and forecast collector. It polls NWS
+active alerts for a configured point/state, NWS hourly forecast summaries for a
+configured point, and optional NHC tropical cyclone RSS feeds.
 
 Default config:
 
@@ -975,15 +1104,25 @@ latitude: 19.6875
 longitude: -155.9583
 nws:
   enabled: true
+forecast:
+  enabled: true
+  window_hours: 12
+  soon_hours: 6
+  precip_probability_threshold: 50
 nhc:
   enabled: true
   basins:
   - central_pacific
 ```
 
-NOAA data feeds the NOAA live tab, Subject History, Reports, and Alerts.
-Alerts default to warning/critical for high-severity weather, tsunami, tornado,
-hurricane, and flash-flood conditions.
+NOAA data feeds the NOAA live tab, Subject History, Reports, and Alerts. NWS
+forecast summaries are context rows and Insights/Reports input; they do not
+open Alerts by themselves. Alerts default to warning/critical for high-severity
+weather, tsunami, tornado, hurricane, and flash-flood conditions.
+NOAA/NWS/NHC subjects are keyed by Source + Area/Basin + Event. This prevents
+the same polled advisory from creating one row per poll while still keeping
+different areas, product families, advisory numbers, and forecast points
+separate.
 
 ## USGS
 
@@ -1011,7 +1150,9 @@ USGS data feeds the USGS live tab, Subject History, Reports, and Alerts.
 The shipped default only ingests magnitude 5+ earthquakes so common small
 regional quakes do not flood the dashboard. Lower `min_magnitude` only if you
 want local microseismic activity in the live feed and derived views. Alert
-defaults focus on nearby or larger earthquakes.
+defaults focus on nearby or larger earthquakes. USGS subjects are keyed by the
+USGS event ID, and material fingerprints include the event time plus magnitude,
+place, status, felt/CDI/MMI, alert color, and tsunami flag.
 
 ## SWPC
 
@@ -1048,6 +1189,52 @@ higher, and Kp 5 or higher. The default AlertEngine rule alerts only on X-class
 flares, R3+ radio blackouts, S3+ solar radiation storms, G3+ geomagnetic
 storms, or Kp 7+. Lower space-weather conditions remain visible as feed rows
 and derived context without becoming Alerts.
+SWPC subjects are keyed by SWPC event identity. Official alert/watch/warning
+products and compact X-ray/Kp events include event time in their identity or
+fingerprint, while the NOAA R/S/G scale feed behaves like state and only emits
+when the current scale materially changes.
+If one SWPC public product is temporarily unavailable, Skannr keeps successful
+product rows flowing and shows the failed product name in collector status. The
+collector only goes retrying when every enabled SWPC product fails.
+
+## PWS
+
+`PWS` is an optional Ambient Weather personal weather station collector. It
+polls the current Ambient device state once per minute by default and treats
+each station as a scan-style subject: one current/recent weather row, not one
+row per poll.
+
+Default config:
+
+```text
+config/collectors/pws.yaml
+```
+
+Example local config:
+
+```yaml
+enabled: true
+poll_interval_sec: 60
+station_id: GW0154
+application_key: "<local Ambient application key>"
+api_key: "<local Ambient API key>"
+```
+
+PWS data feeds the PWS live tab, Subject History, Insights, Reports, and
+Alerts. The collector records current outdoor and indoor
+temperature/humidity/dewpoint/feels-like readings, wind/gust and 10-minute wind
+averages, one-hour rain rate, event/day/week/month/year rain totals, pressure,
+solar/UV, coarse station location, coordinates, elevation, sample time,
+timezone, last-rain time, battery/status fields, and source metadata. It does
+not retain the street address returned by Ambient. Alert defaults mirror
+severe-weather style thresholds: high one-hour rain rate and high wind gusts
+become Alerts.
+Subject History also tracks simple rain episodes. If the latest transition is
+`stopped`, Reports keep the episode start and stop time together so the row does
+not show a disconnected "rain stopped" timestamp without its start context.
+
+Keep Ambient keys in local `config/collectors/pws.yaml` only. The
+`config.example` template intentionally leaves them blank.
 
 ## LAN
 

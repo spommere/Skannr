@@ -10,6 +10,7 @@ import asyncio
 import calendar
 import hashlib
 import json
+import logging
 import re
 import time
 import urllib.request
@@ -110,6 +111,7 @@ class SWPCCollector(BaseCollector):
     def __init__(self, config, bus):
         super().__init__(config, bus)
         self._fingerprints = {}
+        self._last_subfeed_errors = []
 
     def detect(self):
         """SWPC only needs at least one enabled public product source."""
@@ -141,7 +143,18 @@ class SWPCCollector(BaseCollector):
             try:
                 events = await self.run_blocking(self.poll_once)
                 self.state = STATE_ONLINE
-                self.warning = None
+                self.warning = "; ".join(self._last_subfeed_errors) or None
+                if self.warning:
+                    await self.emit(
+                        "collector_online",
+                        {
+                            "source": "SWPC",
+                            "feeds": [source["name"] for source in self.feed_sources()],
+                            "warning": self.warning,
+                            "internet_fed": True,
+                        },
+                        "warning",
+                    )
                 for data in events:
                     await self.emit(
                         "swpc_event",
@@ -180,15 +193,28 @@ class SWPCCollector(BaseCollector):
     def poll_once(self):
         """Fetch all enabled SWPC products and return new/changed events."""
         events = []
-        for source in self.feed_sources():
-            if source["kind"] == "alerts":
-                events.extend(self.poll_alert_products())
-            elif source["kind"] == "noaa_scales":
-                events.extend(self.poll_noaa_scales())
-            elif source["kind"] == "xray_flux":
-                events.extend(self.poll_xray_flux())
-            elif source["kind"] == "planetary_k":
-                events.extend(self.poll_planetary_k())
+        errors = []
+        sources = self.feed_sources()
+        self._last_subfeed_errors = []
+        for source in sources:
+            try:
+                if source["kind"] == "alerts":
+                    events.extend(self.poll_alert_products())
+                elif source["kind"] == "noaa_scales":
+                    events.extend(self.poll_noaa_scales())
+                elif source["kind"] == "xray_flux":
+                    events.extend(self.poll_xray_flux())
+                elif source["kind"] == "planetary_k":
+                    events.extend(self.poll_planetary_k())
+            except Exception as exc:
+                errors.append("{}: {}".format(source.get("name") or "SWPC", exc))
+                continue
+        if errors and len(errors) == len(sources):
+            self._last_subfeed_errors = errors
+            raise RuntimeError("; ".join(errors))
+        self._last_subfeed_errors = errors
+        for error in errors:
+            logging.warning("SWPC sub-feed poll failed: %s", error)
         return events
 
     def product_url(self, key, default):
@@ -267,7 +293,15 @@ class SWPCCollector(BaseCollector):
         data["alert_recommended"] = swpc_event_is_alert(data, self.config)
         data["fingerprint"] = self.fingerprint(
             data,
-            ("event_kind", "summary", "message", "scale_family", "scale_value", "xray_class"),
+            (
+                "event_kind",
+                "event_time_epoch",
+                "summary",
+                "message",
+                "scale_family",
+                "scale_value",
+                "xray_class",
+            ),
         )
         return clean_swpc_data(data)
 

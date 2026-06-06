@@ -2,7 +2,7 @@ key: swpc
 order: 95
 label: SWPC
 description: Optional internet-fed NOAA SWPC space-weather event feed
-has_subject_history: true
+acquisition_mode: poll
 enabled: false
 
 # NOAA Space Weather Prediction Center public feeds. This collector is

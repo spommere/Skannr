@@ -735,6 +735,20 @@ table {
   width: 24%;
 }
 
+.pws-events-table th:nth-child(1),
+.pws-events-table td:nth-child(1),
+.pws-events-table th:nth-child(3),
+.pws-events-table td:nth-child(3) {
+  min-width: 18ch;
+  white-space: nowrap;
+}
+
+.pws-events-table th:nth-child(2),
+.pws-events-table td:nth-child(2) {
+  min-width: 12ch;
+  white-space: nowrap;
+}
+
 th,
 td {
   border-bottom: 1px solid var(--line);

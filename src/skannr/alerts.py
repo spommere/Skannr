@@ -11,6 +11,7 @@ from collections import deque
 from .bus import local_now
 from .collectors.lan import clean_lan_data
 from .collectors.noaa import clean_noaa_data, stable_noaa_event_key
+from .collectors.pws import clean_pws_data
 from .collectors.swpc import (
     clean_swpc_data,
     number_or_none,
@@ -55,6 +56,15 @@ DEFAULT_ALERT_CONFIG = {
         ],
     },
     "aprs_weather": {
+        "enabled": True,
+        "level": "warning",
+        "critical_level": "critical",
+        "rain_1h_in": 1.0,
+        "critical_rain_1h_in": 2.0,
+        "wind_gust_mph": 40,
+        "critical_wind_gust_mph": 60,
+    },
+    "pws_weather": {
         "enabled": True,
         "level": "warning",
         "critical_level": "critical",
@@ -156,6 +166,8 @@ LEVEL_PRIORITY = {
     "critical": 2,
 }
 
+ACK_KEY_VERSION = 3
+
 
 class AlertEngine:
     """Deterministic live alert engine.
@@ -209,6 +221,8 @@ class AlertEngine:
             alerts.extend(self.process_usgs(event_type, data, timestamp, now, emit))
         elif collector == "swpc":
             alerts.extend(self.process_swpc(event_type, data, timestamp, now, emit))
+        elif collector == "pws":
+            alerts.extend(self.process_pws(event_type, data, timestamp, now, emit))
         elif collector == "lan":
             alerts.extend(self.process_lan(event_type, data, timestamp, now, emit))
         elif collector == "system":
@@ -266,11 +280,27 @@ class AlertEngine:
             if cutoff is not None and last_seen and last_seen < cutoff:
                 continue
             alert = dict(item)
+            original_key = key
             key = self.canonical_alert_key(alert, key)
             alert["id"] = key
             alert["acked"] = bool(alert.get("acked"))
             alert["evidence"] = clean_evidence(alert.get("evidence") or {})
             alert["count"] = int(float(alert.get("count") or 1))
+            if (
+                alert.get("acked")
+                and self.is_nhc_noaa_alert(alert)
+                and (
+                    original_key != key
+                    or int(float(alert.get("ack_key_version") or 0)) < ACK_KEY_VERSION
+                )
+            ):
+                # Older builds keyed NHC ACKs by advisory family, so an ACK for
+                # Amanda Public Advisory 10 could suppress Public Advisory 11.
+                # During migration to exact item IDs, require a fresh ACK.
+                alert["acked"] = False
+                alert.pop("acked_at", None)
+                alert.pop("acked_at_epoch", None)
+                alert.pop("ack_key_version", None)
             if alert.get("acked"):
                 self.remember_ack(alert, last_seen or now, ack_memory)
             # Give restored active alerts a fresh dedupe window so restart does
@@ -566,6 +596,58 @@ class AlertEngine:
             },
         )
 
+    def process_pws(self, event_type, data, timestamp, now, emit):
+        """Return PWS weather alerts."""
+        if event_type in ("collector_offline", "collector_retrying"):
+            return self.collector_issue_alert("pws", event_type, data, timestamp, now, emit)
+        if event_type != "pws_weather":
+            return []
+        rule = self.rule("pws_weather")
+        if not rule.get("enabled", True):
+            return []
+        data = clean_pws_data(data)
+        rain = self.to_number(data.get("rain_1h_in"))
+        gust = self.to_number(data.get("wind_gust_mph"))
+        reasons = []
+        critical = False
+        if rain is not None and rain >= float(rule.get("rain_1h_in", 1.0)):
+            reasons.append("1h rain rate {:.2f} in/hr".format(rain))
+            if rain >= float(rule.get("critical_rain_1h_in", 2.0)):
+                critical = True
+        if gust is not None and gust >= float(rule.get("wind_gust_mph", 40)):
+            reasons.append("gust {:.0f} mph".format(gust))
+            if gust >= float(rule.get("critical_wind_gust_mph", 60)):
+                critical = True
+        if not reasons:
+            return []
+        station = data.get("station_id") or data.get("station_name") or "PWS"
+        level = rule.get("critical_level", "critical") if critical else rule.get("level", "warning")
+        summary = "PWS weather alert for {}: {}".format(
+            station, "; ".join(reasons)
+        )
+        return self.emit_alert(
+            "pws_weather",
+            "pws-weather:{}".format(station),
+            level,
+            "pws",
+            "PWS severe weather",
+            station,
+            summary,
+            timestamp,
+            now,
+            emit,
+            {
+                "station_id": station,
+                "rain_1h_in": rain,
+                "wind_gust_mph": gust,
+                "weather_summary": data.get("weather_summary") or "",
+                "latitude": data.get("latitude"),
+                "longitude": data.get("longitude"),
+                "source": data.get("source") or "",
+                "source_url": data.get("source_url") or "",
+            },
+        )
+
     def process_rayhunter(self, event_type, data, timestamp, now, emit):
         """Return Rayhunter warning alerts."""
         if event_type in ("collector_offline", "collector_retrying"):
@@ -616,8 +698,9 @@ class AlertEngine:
         critical = self.noaa_is_critical(data, rule)
         level = rule.get("critical_level", "critical") if critical else rule.get("level", "warning")
         event_name = data.get("event") or data.get("headline") or "NOAA hazard"
+        feed_source = self.noaa_feed_source(event_type, data)
         summary = "{}: {}; {}".format(
-            data.get("source") or "NOAA",
+            feed_source,
             event_name,
             data.get("area_desc") or data.get("severity") or "active hazard",
         )
@@ -625,8 +708,8 @@ class AlertEngine:
             "noaa_hazard",
             self.noaa_alert_key(event_type, data, event_id),
             level,
-            "noaa",
-            "NOAA hazard",
+            feed_source,
+            "{} hazard".format(feed_source),
             event_name,
             summary,
             timestamp,
@@ -641,6 +724,7 @@ class AlertEngine:
                 "certainty": data.get("certainty") or "",
                 "alert_kind": data.get("alert_kind") or "",
                 "area_desc": data.get("area_desc") or "",
+                "basin": data.get("basin") or "",
                 "effective": data.get("effective") or "",
                 "onset": data.get("onset") or "",
                 "expires": data.get("expires") or "",
@@ -651,12 +735,19 @@ class AlertEngine:
         )
 
     def noaa_alert_key(self, event_type, data, event_id):
-        """Return a stable NOAA alert key across routine advisory updates."""
-        if event_type == "noaa_tropical_advisory" or data.get("source") == "NHC":
-            return "noaa-hazard:{}".format(
-                stable_noaa_event_key(data, "noaa_tropical_advisory")
-            )
-        return "noaa-hazard:{}".format(event_id)
+        """Return a stable NOAA alert key from feed source, area, and event."""
+        return "noaa-hazard:{}".format(stable_noaa_event_key(data, event_type))
+
+    def noaa_feed_source(self, event_type, data):
+        """Return the NOAA-family feed source for alert display."""
+        source = str((data or {}).get("source") or "").strip()
+        if source:
+            return source
+        if event_type == "noaa_tropical_advisory" or (data or {}).get("alert_kind") == "tropical":
+            return "NHC"
+        if event_type == "noaa_weather_alert":
+            return "NWS"
+        return "NOAA"
 
     def noaa_matches_alert(self, data, rule):
         """Return True when NOAA data should become an alert."""
@@ -951,6 +1042,9 @@ class AlertEngine:
         remembered_ack = self.ack_memory.get(key)
         should_emit = bool(emit)
         if previous:
+            previous["source"] = source
+            previous["title"] = title
+            previous["subject"] = subject
             previous["last_seen"] = timestamp
             previous["last_seen_epoch"] = now
             previous["summary"] = summary
@@ -960,6 +1054,7 @@ class AlertEngine:
                 previous["acked"] = False
                 previous.pop("acked_at", None)
                 previous.pop("acked_at_epoch", None)
+                previous.pop("ack_key_version", None)
                 self.ack_memory.pop(key, None)
                 should_emit = bool(emit)
             elif previous.get("acked"):
@@ -999,6 +1094,9 @@ class AlertEngine:
             if acked:
                 alert["acked_at_epoch"] = remembered_ack.get("acked_at_epoch")
                 alert["acked_at"] = remembered_ack.get("acked_at")
+                alert["ack_key_version"] = remembered_ack.get(
+                    "ack_key_version", ACK_KEY_VERSION
+                )
                 should_emit = False
             elif remembered_ack:
                 self.ack_memory.pop(key, None)
@@ -1022,18 +1120,25 @@ class AlertEngine:
             if evidence.get("source") == "NHC" or evidence.get("alert_kind") == "tropical"
             else "noaa_weather_alert"
         )
-        if event_type == "noaa_tropical_advisory":
-            data = {
-                "source": evidence.get("source") or "",
-                "event": evidence.get("event") or alert.get("subject") or "",
-                "headline": evidence.get("headline") or alert.get("subject") or "",
-                "summary": alert.get("summary") or "",
-                "event_id": evidence.get("event_id") or "",
-            }
-            return normalized_key(
-                "noaa-hazard:{}".format(stable_noaa_event_key(data, event_type))
-            )
-        return normalized_key(fallback)
+        data = {
+            "source": evidence.get("source") or "",
+            "event": evidence.get("event") or alert.get("subject") or "",
+            "headline": evidence.get("headline") or alert.get("subject") or "",
+            "summary": alert.get("summary") or "",
+            "area_desc": evidence.get("area_desc") or "",
+            "basin": evidence.get("basin")
+            or canonical_nhc_basin(evidence.get("area_desc")),
+            "alert_kind": evidence.get("alert_kind") or "",
+            "event_id": evidence.get("event_id") or "",
+        }
+        return normalized_key("noaa-hazard:{}".format(stable_noaa_event_key(data, event_type)))
+
+    def is_nhc_noaa_alert(self, alert):
+        """Return True when a persisted alert came from an NHC NOAA item."""
+        if (alert or {}).get("alert_type") != "noaa_hazard":
+            return False
+        evidence = dict((alert or {}).get("evidence") or {})
+        return evidence.get("source") == "NHC" or evidence.get("alert_kind") == "tropical"
 
     def collapse_equivalent_active_alert(self, key, alert_type):
         """Collapse old persisted IDs that now map to this canonical key."""
@@ -1079,11 +1184,15 @@ class AlertEngine:
             current["acked"] = False
             current.pop("acked_at", None)
             current.pop("acked_at_epoch", None)
+            current.pop("ack_key_version", None)
         elif incoming.get("acked"):
             current["acked"] = True
             if incoming.get("acked_at_epoch", 0) >= current.get("acked_at_epoch", 0):
                 current["acked_at"] = incoming.get("acked_at")
                 current["acked_at_epoch"] = incoming.get("acked_at_epoch")
+                current["ack_key_version"] = incoming.get(
+                    "ack_key_version", ACK_KEY_VERSION
+                )
         current["count"] = max(int(current.get("count") or 1), int(incoming.get("count") or 1))
         return current
 
@@ -1097,6 +1206,7 @@ class AlertEngine:
         alert["acked"] = True
         alert["acked_at_epoch"] = epoch
         alert["acked_at"] = local_now(epoch)
+        alert["ack_key_version"] = ACK_KEY_VERSION
         self.remember_ack(alert, epoch)
         self.dirty = True
         return public_alert(alert)
@@ -1111,6 +1221,7 @@ class AlertEngine:
             alert["acked"] = True
             alert["acked_at_epoch"] = epoch
             alert["acked_at"] = local_now(epoch)
+            alert["ack_key_version"] = ACK_KEY_VERSION
             self.remember_ack(alert, epoch)
             changed += 1
         if changed:
@@ -1146,6 +1257,7 @@ class AlertEngine:
         target[key] = {
             "alert_type": (alert or {}).get("alert_type") or "",
             "level": normalized_level((alert or {}).get("level")),
+            "ack_key_version": ACK_KEY_VERSION,
             "acked_at_epoch": acked_at_epoch,
             "acked_at": (alert or {}).get("acked_at") or local_now(acked_at_epoch),
             "last_seen_epoch": float((alert or {}).get("last_seen_epoch") or now or acked_at_epoch),
@@ -1164,6 +1276,11 @@ class AlertEngine:
                 continue
             if not self.ack_memory_enabled(item.get("alert_type")):
                 continue
+            if (
+                item.get("alert_type") == "noaa_hazard"
+                and int(float(item.get("ack_key_version") or 0)) < ACK_KEY_VERSION
+            ):
+                continue
             try:
                 remembered = float(item.get("last_seen_epoch") or item.get("acked_at_epoch") or 0)
             except (TypeError, ValueError):
@@ -1173,6 +1290,7 @@ class AlertEngine:
             target[normalized] = {
                 "alert_type": item.get("alert_type") or "",
                 "level": normalized_level(item.get("level")),
+                "ack_key_version": int(float(item.get("ack_key_version") or ACK_KEY_VERSION)),
                 "acked_at_epoch": float(item.get("acked_at_epoch") or remembered or now),
                 "acked_at": item.get("acked_at") or "",
                 "last_seen_epoch": remembered or now,
@@ -1265,7 +1383,7 @@ def public_alert(alert):
     return {
         key: value
         for key, value in (alert or {}).items()
-        if key not in ("last_emitted_epoch",)
+        if key not in ("last_emitted_epoch", "ack_key_version")
     }
 
 
@@ -1287,6 +1405,16 @@ def normalized_level(level):
 def normalized_key(value):
     """Return a compact stable key fragment."""
     return re.sub(r"[^a-z0-9_.:-]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def canonical_nhc_basin(value):
+    """Return an NHC basin config key for old persisted display labels."""
+    text = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    return {
+        "atlantic": "atlantic",
+        "eastern pacific": "eastern_pacific",
+        "central pacific": "central_pacific",
+    }.get(text, "")
 
 
 def normalized_oui(value):

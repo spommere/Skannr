@@ -13,6 +13,7 @@ from .bus import local_now
 from .collectors.aprsis import clean_aprs_data
 from .collectors.lan import clean_lan_data
 from .collectors.noaa import clean_noaa_data
+from .collectors.pws import clean_pws_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
 from .collectors.swpc import clean_swpc_data, number_or_none, swpc_event_is_alert
 from .collectors.usgs import clean_usgs_data
@@ -38,6 +39,10 @@ DEFAULT_FINDINGS_CONFIG = {
     "aprs_rain_1h_high_in": 0.25,
     "aprs_wind_high_mph": 25,
     "aprs_gust_high_mph": 35,
+    "pws_temp_change_f": 5,
+    "pws_rain_1h_high_in": 0.25,
+    "pws_wind_high_mph": 25,
+    "pws_gust_high_mph": 35,
     "swpc_warning_xray_class": "X1.0",
     "swpc_warning_radio_blackout": "R3",
     "swpc_warning_solar_radiation_storm": "S3",
@@ -75,6 +80,7 @@ class FindingsEngine:
         self.swpc_events = {}
         self.lan_devices = {}
         self.lan_gateways = {}
+        self.pws_stations = {}
 
     def bootstrap(self, events):
         """Replay persisted events to rebuild state without replaying old noise."""
@@ -224,6 +230,10 @@ class FindingsEngine:
         elif collector == "swpc":
             findings.extend(
                 self._process_swpc(event_type, event, timestamp, emit)
+            )
+        elif collector == "pws":
+            findings.extend(
+                self._process_pws(event_type, event, timestamp, now, emit)
             )
         elif collector == "lan":
             findings.extend(
@@ -1474,7 +1484,11 @@ class FindingsEngine:
         data = clean_noaa_data(event.get("data") or {})
         if event_type in ("collector_offline", "collector_retrying"):
             return self._collector_warning("noaa", event_type, data, timestamp, emit)
-        if event_type not in ("noaa_weather_alert", "noaa_tropical_advisory"):
+        if event_type not in (
+            "noaa_weather_alert",
+            "noaa_tropical_advisory",
+            "noaa_forecast_summary",
+        ):
             return []
         event_id = data.get("event_id") or data.get("headline") or "unknown"
         previous = self.noaa_alerts.get(event_id) or {}
@@ -1488,6 +1502,8 @@ class FindingsEngine:
         title = (
             "NOAA tropical advisory"
             if event_type == "noaa_tropical_advisory"
+            else "NOAA forecast"
+            if event_type == "noaa_forecast_summary"
             else "NOAA weather alert"
         )
         detail = self.noaa_detail(data)
@@ -1534,6 +1550,8 @@ class FindingsEngine:
         }
         severity = str((data or {}).get("severity") or "").lower()
         kind = str((data or {}).get("alert_kind") or "").lower()
+        if kind == "forecast":
+            return False
         if kind == "tropical_outlook":
             return False
         event = str((data or {}).get("event") or "").lower()
@@ -1554,6 +1572,22 @@ class FindingsEngine:
 
     def noaa_detail(self, data):
         """Return compact NOAA finding detail."""
+        if data.get("alert_kind") == "forecast":
+            parts = [
+                data.get("headline") or data.get("summary") or data.get("event") or "",
+                data.get("area_desc") or "",
+                data.get("next_precip_start")
+                and "next precip {}% at {}".format(
+                    data.get("next_precip_probability") or "?",
+                    data.get("next_precip_start"),
+                ),
+                data.get("max_precip_probability")
+                and "max precip {}%".format(data.get("max_precip_probability")),
+                data.get("max_wind_mph")
+                and "max wind {} mph".format(data.get("max_wind_mph")),
+                data.get("source") or "NWS",
+            ]
+            return "; ".join(str(part) for part in parts if part)
         parts = [
             data.get("event") or data.get("headline") or "",
             data.get("severity") or "",
@@ -1587,6 +1621,28 @@ class FindingsEngine:
             "source",
             "source_url",
             "basin",
+            "latitude",
+            "longitude",
+            "forecast_generated",
+            "forecast_window_hours",
+            "forecast_soon_hours",
+            "forecast_hour_count",
+            "current_forecast",
+            "current_temperature_f",
+            "current_precip_probability",
+            "temperature_min_f",
+            "temperature_max_f",
+            "temperature_change_f",
+            "max_precip_probability",
+            "precip_probability_threshold",
+            "precip_likely_soon",
+            "next_precip_start",
+            "next_precip_end",
+            "next_precip_probability",
+            "next_precip_forecast",
+            "max_wind_mph",
+            "first_period_start",
+            "last_period_end",
             "internet_fed",
         )
         return {
@@ -1815,6 +1871,211 @@ class FindingsEngine:
             "source_url",
             "product_id",
             "internet_fed",
+        )
+        return {
+            key: data.get(key)
+            for key in fields
+            if data.get(key) not in (None, "", [])
+        }
+
+    def _process_pws(self, event_type, event, timestamp, now, emit):
+        """Turn PWS weather samples into live Insights."""
+        data = clean_pws_data(event.get("data") or {})
+        if event_type in ("collector_offline", "collector_retrying"):
+            return self._collector_warning("pws", event_type, data, timestamp, emit)
+        if event_type == "collector_online":
+            detail = "PWS feed online"
+            if data.get("station_id"):
+                detail += "; station {}".format(data.get("station_id"))
+            return self._finding_list(
+                timestamp,
+                "info",
+                "pws",
+                "pws_feed_online",
+                "PWS feed online",
+                detail,
+                "pws-online:{}".format(data.get("station_id") or "ambient"),
+                emit,
+                self.pws_attributes(data),
+            )
+        if event_type != "pws_weather":
+            return []
+        station = data.get("station_id") or data.get("station_name") or "PWS"
+        previous = self.pws_stations.get(station) or {}
+        findings = self._finding_list(
+            timestamp,
+            "info",
+            "pws",
+            "pws_weather",
+            "PWS weather sample",
+            self.pws_detail(data),
+            "pws-weather:{}".format(station),
+            emit,
+            self.pws_attributes(data),
+        )
+        findings.extend(
+            self.pws_weather_pattern_findings(data, station, previous, timestamp, emit)
+        )
+        self.pws_update_station_state(station, data, now)
+        return findings
+
+    def pws_weather_pattern_findings(self, data, station, previous, timestamp, emit):
+        """Return live PWS weather transition findings."""
+        findings = []
+        temperature = self._to_number(data.get("temperature_f"))
+        previous_temperature = previous.get("temperature_f")
+        if temperature is not None and previous_temperature is not None:
+            delta = temperature - previous_temperature
+            if abs(delta) >= float(self.config["pws_temp_change_f"]):
+                attributes = self.pws_attributes(data)
+                attributes["temperature_change_f"] = round(delta, 1)
+                findings.extend(
+                    self._finding_list(
+                        timestamp,
+                        "info",
+                        "pws",
+                        "pws_weather_temperature_change",
+                        "PWS temperature changed",
+                        "{} temperature changed {:+.0f} F to {:.0f} F".format(
+                            station, delta, temperature
+                        ),
+                        "pws-temp-change:{}".format(station),
+                        emit,
+                        attributes,
+                    )
+                )
+        rain_1h = self._to_number(data.get("rain_1h_in"))
+        previous_rain = previous.get("rain_1h_in")
+        if rain_1h is not None:
+            if rain_1h >= float(self.config["pws_rain_1h_high_in"]):
+                findings.extend(
+                    self._finding_list(
+                        timestamp,
+                        "warning",
+                        "pws",
+                        "pws_weather_high_rain",
+                        "PWS high rain rate",
+                        "{} reported {:.2f} in/hr rain rate".format(station, rain_1h),
+                        "pws-high-rain:{}".format(station),
+                        emit,
+                        self.pws_attributes(data),
+                    )
+                )
+            if previous_rain is not None and previous_rain <= 0 < rain_1h:
+                findings.extend(
+                    self._finding_list(
+                        timestamp,
+                        "info",
+                        "pws",
+                        "pws_weather_rain_started",
+                        "PWS rain started",
+                        "{} rain started; 1h rain rate {:.2f} in/hr".format(
+                            station, rain_1h
+                        ),
+                        "pws-rain-started:{}".format(station),
+                        emit,
+                        self.pws_attributes(data),
+                    )
+                )
+            if previous_rain is not None and previous_rain > 0 and rain_1h <= 0:
+                findings.extend(
+                    self._finding_list(
+                        timestamp,
+                        "info",
+                        "pws",
+                        "pws_weather_rain_stopped",
+                        "PWS rain stopped",
+                        "{} rain stopped; 1h rain rate returned to {:.2f} in/hr".format(
+                            station, rain_1h
+                        ),
+                        "pws-rain-stopped:{}".format(station),
+                        emit,
+                        self.pws_attributes(data),
+                    )
+                )
+        wind = self._to_number(data.get("wind_speed_mph"))
+        gust = self._to_number(data.get("wind_gust_mph"))
+        wind_high = wind is not None and wind >= float(self.config["pws_wind_high_mph"])
+        gust_high = gust is not None and gust >= float(self.config["pws_gust_high_mph"])
+        if wind_high or gust_high:
+            parts = []
+            if wind is not None:
+                parts.append("wind {:.0f} mph".format(wind))
+            if gust is not None:
+                parts.append("gust {:.0f} mph".format(gust))
+            findings.extend(
+                self._finding_list(
+                    timestamp,
+                    "warning",
+                    "pws",
+                    "pws_weather_high_wind",
+                    "PWS high wind",
+                    "{} reported {}".format(station, ", ".join(parts)),
+                    "pws-high-wind:{}".format(station),
+                    emit,
+                    self.pws_attributes(data),
+                )
+            )
+        return findings
+
+    def pws_update_station_state(self, station, data, now):
+        """Remember latest PWS fields for live transition checks."""
+        state = self.pws_stations.setdefault(station, {})
+        state["last_seen_epoch"] = now
+        for key in (
+            "temperature_f",
+            "rain_1h_in",
+            "wind_speed_mph",
+            "wind_gust_mph",
+        ):
+            value = self._to_number(data.get(key))
+            if value is not None:
+                state[key] = value
+
+    def pws_detail(self, data):
+        """Return compact PWS Insight detail."""
+        parts = [
+            data.get("station_id") or data.get("station_name") or "PWS",
+            data.get("weather_summary") or "",
+        ]
+        latitude = self._to_number(data.get("latitude"))
+        longitude = self._to_number(data.get("longitude"))
+        if latitude is not None and longitude is not None:
+            parts.append("{:.5f}, {:.5f}".format(latitude, longitude))
+        if data.get("event_time"):
+            parts.append("sample {}".format(data.get("event_time")))
+        parts.append(data.get("source") or "Ambient Weather")
+        return "; ".join(str(part) for part in parts if part)
+
+    def pws_attributes(self, data):
+        """Return structured PWS fields for Insights evidence."""
+        fields = (
+            "station_id",
+            "station_name",
+            "mac_address",
+            "model",
+            "latitude",
+            "longitude",
+            "event_time",
+            "temperature_f",
+            "humidity_percent",
+            "dewpoint_f",
+            "feels_like_f",
+            "wind_direction_deg",
+            "wind_speed_mph",
+            "wind_gust_mph",
+            "max_daily_gust_mph",
+            "rain_1h_in",
+            "rain_event_in",
+            "rain_day_in",
+            "pressure_rel_inhg",
+            "pressure_abs_inhg",
+            "solar_w_m2",
+            "uv_index",
+            "battery",
+            "weather_summary",
+            "source",
+            "source_url",
         )
         return {
             key: data.get(key)

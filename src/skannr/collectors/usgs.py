@@ -206,6 +206,7 @@ class USGSCollector(BaseCollector):
         data["fingerprint"] = self.fingerprint(
             data,
             (
+                "event_time_epoch",
                 "magnitude",
                 "place",
                 "updated_epoch",

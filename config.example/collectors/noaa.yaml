@@ -2,7 +2,7 @@ key: noaa
 order: 80
 label: NOAA
 description: Optional internet-fed NOAA/NWS/NHC hazard feed
-has_subject_history: true
+acquisition_mode: poll
 enabled: false
 
 # NOAA is an internet-fed situational-awareness collector. It polls NWS active
@@ -20,6 +20,17 @@ nws:
   enabled: true
   # Optional override if you want a specific NWS API URL:
   # url: "https://api.weather.gov/alerts/active?point=37.7749,-122.4194"
+
+# Optional NWS point forecast summary. Existing configs do not need this
+# section; forecast polling defaults on when nws.enabled is true and latitude /
+# longitude are configured.
+forecast:
+  enabled: true
+  window_hours: 12
+  soon_hours: 6
+  precip_probability_threshold: 50
+  # Optional override if you want a specific NWS hourly forecast URL:
+  # url: "https://api.weather.gov/gridpoints/MTR/85,105/forecast/hourly"
 
 nhc:
   enabled: true

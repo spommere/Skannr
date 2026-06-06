@@ -35,6 +35,7 @@
     <button class="tab" data-tab="noaa">NOAA <span class="tab-status-dots" data-status-tab="noaa"></span></button>
     <button class="tab" data-tab="usgs">USGS <span class="tab-status-dots" data-status-tab="usgs"></span></button>
     <button class="tab" data-tab="swpc">SWPC <span class="tab-status-dots" data-status-tab="swpc"></span></button>
+    <button class="tab" data-tab="pws">PWS <span class="tab-status-dots" data-status-tab="pws"></span></button>
     <button class="tab" data-tab="lan">LAN <span class="tab-status-dots" data-status-tab="lan"></span></button>
     <button class="tab" data-tab="system">System Status</button>
     <button class="tab" data-tab="alerts">Alerts <span id="alerts-tab-count" class="tab-alert-count"></span></button>
@@ -171,6 +172,13 @@
         <table>
           <thead><tr><th>Subject</th><th>Type</th><th>First Seen</th><th>Last Seen</th><th>Event Time</th><th>Level</th><th>Summary</th><th>Source</th></tr></thead>
           <tbody id="history-swpc-subjects"></tbody>
+        </table>
+      </div>
+      <div id="history-pws-panel" class="subpanel history-source-panel" data-source="pws">
+        <h3>PWS Subjects</h3>
+        <table>
+          <thead><tr><th>Station</th><th>First Seen</th><th>Last Seen</th><th>Sample Time</th><th>Weather</th><th>Wind</th><th>Rain</th><th>Source</th></tr></thead>
+          <tbody id="history-pws-subjects"></tbody>
         </table>
       </div>
       <div id="history-lan-panel" class="subpanel history-source-panel" data-source="lan">
@@ -356,6 +364,24 @@
       <table class="swpc-events-table">
         <thead><tr><th>Time</th><th>Event Time</th><th>Type</th><th>Level</th><th>Event</th><th>Timing</th><th>Details</th></tr></thead>
         <tbody id="swpc-events"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-pws" class="panel">
+      <div class="panel-head">
+        <h2>PWS</h2>
+        <div id="pws-status" class="badge">Waiting</div>
+      </div>
+      <div id="pws-banner" class="status-strip muted">Waiting for collector status</div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="pws-search" type="search" placeholder="Station, weather, wind, rain">
+        </label>
+      </div>
+      <h3>Live PWS Weather</h3>
+      <table class="pws-events-table">
+        <thead><tr><th>Time</th><th>Station</th><th>Sample Time</th><th>Weather</th><th>Wind</th><th>Rain</th><th>Pressure</th><th>Solar / UV</th></tr></thead>
+        <tbody id="pws-events"></tbody>
       </table>
     </section>
 
