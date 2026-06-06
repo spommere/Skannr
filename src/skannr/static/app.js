@@ -938,6 +938,8 @@ function buildReportRow(report) {
       renderReportEvidenceCell(td, reportEvidenceItems(report));
     } else if (column.key === "subject") {
       appendTableCellValue(td, reportSubjectCell(report, column.value));
+    } else if (column.key === "summary") {
+      appendMapLinkedText(td, column.value);
     } else {
       td.textContent = column.value;
     }
