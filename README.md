@@ -65,6 +65,27 @@ sudo apt update
 sudo apt install rtl-sdr librtlsdr-dev aircrack-ng bluetooth bluez wireless-tools iw
 ```
 
+Optional LAN tools:
+
+```bash
+sudo apt install arp-scan avahi-daemon avahi-utils net-tools nmap curl
+```
+
+- `ip` from `iproute2`: used for neighbor table and default-route state. This
+  is normally already installed on Raspberry Pi OS/Kali.
+- `arp` from `net-tools`: optional fallback source for ARP cache data.
+- `arp-scan`: required only if `collect_active_arp_scan: true`. If active ARP
+  scan is enabled and `arp-scan` is missing, Skannr keeps the LAN collector
+  online for the other LAN sources and shows a warning in System Status.
+- `avahi-browse` from `avahi-utils`, usually with `avahi-daemon`: required
+  only if `collect_avahi_browse: true`. It imports resolved Bonjour/mDNS
+  service rows for better LAN identity enrichment.
+- `nmap` and `curl`: used only by the on-demand LAN Identify action. Passive
+  LAN observation does not run them.
+
+`install.sh --with-lan-tools` installs the optional LAN tool set on apt-based
+systems.
+
 The installer creates `.venv` and chooses the Python requirements file by Python
 version:
 
@@ -284,13 +305,15 @@ Pi unless you are intentionally changing the shipped template.
   - Use `preferred_server` only when you deliberately want to reconnect until a
     pooled backend such as `CWOP-4` is selected.
 - `config/collectors/noaa.yaml`
-  - Set `enabled: true` only when internet-fed NOAA/NWS/NHC context is wanted.
+  - Set `enabled: true` only when internet-fed NOAA/NWS/NHC/tsunami.gov
+    context is wanted.
   - Set `latitude` and `longitude` for the monitored point.
   - Optionally set `state` for broader NWS state context.
   - NWS point forecast summaries default on when `nws.enabled` is true and
     `latitude` / `longitude` are configured. Use `forecast.enabled: false` only
     if you want NWS alerts/NHC advisories without local forecast context.
-  - Review `nws.enabled`, `nhc.enabled`, and `nhc.basins` for the local area.
+  - Review `nws.enabled`, `nhc.enabled`, `nhc.basins`, `tsunami.enabled`, and
+    `tsunami.centers` for the local area and desired global context.
 - `config/collectors/usgs.yaml`
   - Set `enabled: true` only when USGS earthquake context is wanted.
   - Set `latitude`, `longitude`, `radius_km`, and `min_magnitude` for the area
@@ -303,7 +326,8 @@ Pi unless you are intentionally changing the shipped template.
     Weather personal weather station. Set `application_key`, `api_key`, and an
     optional stable `station_id` such as `GW0154` in local `config/` only.
   - `config/collectors/lan.yaml`: enable if passive LAN neighbor/default-gateway
-    context is wanted.
+    and mDNS/SSDP service context is wanted. Active ARP scan is optional and
+    disabled by default.
   - `config/collectors/wifi*.yaml`, `ble.yaml`, `bt_classic.yaml`, and
     `rtlsdr.yaml`: review adapter/interface/device settings for the hardware
     attached to this host.
@@ -362,6 +386,13 @@ installs. `config/` is machine-specific local state.
   for strong Wi-Fi client/AP and BLE findings.
 - `rssi_change_db`: minimum RSSI delta before reporting a signal change.
 - `return_after_sec`, `lost_after_sec`: disappearance/reappearance windows.
+- `ble_live_identity_required`: require a useful BLE identity, normally a
+  non-MAC name, before emitting per-device live BLE Findings. This keeps
+  randomized/manufacturer-only address churn out of Insights while preserving
+  it in live BLE data and Subject History.
+- `ble_live_service_identity`: also treat service-UUID-only BLE subjects as
+  individually finding-worthy. Default is `false` because common randomized
+  beacons can still carry generic service hints.
 - `burst_window_sec`, `burst_count`: burst detector window and count.
 - `cooldown_sec`: per-finding de-duplication interval.
 - `persistent_signal_sec`: minimum duration for a persistent signal finding.
@@ -409,11 +440,12 @@ installs. `config/` is machine-specific local state.
 - `collector_issue.ignored_reason_patterns`: reason patterns suppressed when
   generic collector issue alerts are enabled. The rule is disabled by default
   because System Status already shows collector setup problems.
-- `noaa_hazard.critical_events`, `critical_severities`: NWS/NHC hazard terms
-  and severities that escalate to the critical level.
+- `noaa_hazard.critical_events`, `critical_severities`: NWS/NHC/tsunami.gov
+  hazard terms and severities that escalate to the critical level.
 - `usgs_earthquake.warning_magnitude_nearby`,
-  `critical_magnitude_nearby`, `nearby_radius_km`,
-  `critical_alert_colors`: earthquake alert thresholds.
+  `critical_magnitude_nearby`, `warning_magnitude_global`,
+  `critical_magnitude_global`, `nearby_radius_km`, `critical_alert_colors`:
+  earthquake alert thresholds.
 - `swpc_space_weather.alert_min_xray_class`, `alert_min_radio_blackout`,
   `alert_min_solar_radiation_storm`, `alert_min_geomagnetic_storm`,
   `alert_min_kp`: SWPC alert thresholds. Defaults are `X1.0`, `R3`, `S3`,
@@ -438,6 +470,11 @@ installs. `config/` is machine-specific local state.
 - `randomized_mac_count`: randomized/private MAC churn threshold.
 - `ble_linger_sec`, `ble_lost_count`, `ble_recurring_min_sessions`,
   `ble_recurring_window_min`: BLE presence/loss/recurrence thresholds.
+- `ble_ignore_stale_single_seen_sec`: suppress old one-off anonymous BLE
+  subjects from tactical Insights.
+- `ble_population_min_count`, `ble_population_min_strong_count`: thresholds
+  for the aggregate nearby-BLE population Insight that replaces many anonymous
+  per-address rows.
 - `recent_activity_window_sec`: recent activity window for tactical Insights.
 - `insights_recent_hours`: upper age bound for Insights within the selected
   dashboard View. `0` shows the whole selected View.
@@ -525,12 +562,16 @@ the same USGS earthquake, SWPC product, or NOAA/NHC message may appear on every
 poll and should update one live row/subject instead of creating a new row each
 time. The current poll identities are:
 
-- NOAA/NWS/NHC: Source + Area/Basin + Event title. A Beach Hazards Statement
-  for San Francisco and one for Santa Cruz are separate subjects; Amanda
-  Forecast Advisory 11 and Amanda Wind Speed Probabilities 11 are also separate
-  subjects. NWS point forecast summaries are one subject per configured point.
-  Generic NHC "no active cyclones" outlook messages collapse by basin/event
-  unless the material text changes.
+- NOAA/NWS/NHC/tsunami.gov: NWS rows use Source + Area + Event, so a Beach
+  Hazards Statement for San Francisco and one for Santa Cruz are separate
+  subjects. NHC storm rows roll up by basin + storm/system name + advisory
+  number, so Amanda Public Advisory 11, Forecast Advisory 11, Forecast
+  Discussion 11, and Wind Speed Probabilities 11 update one advisory-package
+  subject, while Amanda 12 is a new subject. NWS point forecast summaries are
+  one subject per configured point. Tsunami.gov rows use warning center +
+  incident ID, so later message numbers update the same incident. Generic NHC
+  "no active cyclones" outlook messages collapse by basin/event unless the
+  material text changes.
 - USGS: USGS event ID.
 - SWPC: SWPC event/product ID. X-ray/Kp events include their event time in the
   identity or fingerprint; NOAA R/S/G scale rows are state-like and update only
@@ -572,7 +613,8 @@ Collector-specific keys:
   `latitude`, `longitude`, `state`, `nws.enabled`, `nws.url`,
   `forecast.enabled`, `forecast.window_hours`, `forecast.soon_hours`,
   `forecast.precip_probability_threshold`, `forecast.url`, `nhc.enabled`,
-  `nhc.basins`.
+  `nhc.basins`, `tsunami.enabled`, `tsunami.centers`,
+  `tsunami.fetch_bulletin_text`, `tsunami.feeds`.
 - `usgs.yaml`: `poll_interval_sec`, `request_timeout_sec`, `user_agent`,
   `latitude`, `longitude`, `radius_km`, `min_magnitude`, `orderby`,
   `warning_magnitude_nearby`, `warning_magnitude_regional`,
@@ -590,7 +632,20 @@ Collector-specific keys:
   `station_id`, optional `mac_address` or `device_name`, `application_key`,
   and `api_key`. Keep real keys only in local `config/collectors/pws.yaml`.
 - `lan.yaml`: `poll_interval_sec`, `command_timeout_sec`,
-  `collect_ip_neigh`, `collect_arp`, `dhcp_lease_paths`.
+  `collect_ip_neigh`, `collect_arp`, `collect_mdns`, `collect_ssdp`,
+  `collect_avahi_browse`, `avahi_browse_interval_sec`,
+  `avahi_browse_timeout_sec`, `avahi_browse_command`,
+  `collect_passive_dhcp`, `passive_dhcp_ports`, `collect_passive_arp`,
+  `passive_arp_interfaces`, `collect_active_arp_scan`,
+  `active_arp_scan_interval_sec`, `active_arp_scan_timeout_sec`,
+  `active_arp_scan_interfaces`, `active_arp_scan_command`,
+  `active_arp_scan_working_dir`,
+  `dhcp_lease_import_interval_sec`, `dhcp_lease_import_timeout_sec`,
+  `dhcp_lease_paths`, `dhcp_lease_command`.
+- `lan_identify.yaml`: `identify_timeout_sec`, `nmap_timeout_sec`,
+  `curl_timeout_sec`, `curl_output_max_bytes`, `nmap_ports`,
+  `http_probe_ports`, `http_hint_patterns`. This is an on-demand action; it
+  does not run as part of normal LAN polling.
 
 APRS-IS `feeds` entries use:
 
@@ -1087,7 +1142,8 @@ station.
 
 `NOAA` is an optional internet-fed hazard and forecast collector. It polls NWS
 active alerts for a configured point/state, NWS hourly forecast summaries for a
-configured point, and optional NHC tropical cyclone RSS feeds.
+configured point, optional NHC tropical cyclone RSS feeds, and official
+tsunami.gov NTWC/PTWC feeds.
 
 Default config:
 
@@ -1113,16 +1169,29 @@ nhc:
   enabled: true
   basins:
   - central_pacific
+tsunami:
+  enabled: true
+  fetch_bulletin_text: true
+  centers:
+  - ntwc
+  - ptwc
 ```
 
 NOAA data feeds the NOAA live tab, Subject History, Reports, and Alerts. NWS
 forecast summaries are context rows and Insights/Reports input; they do not
 open Alerts by themselves. Alerts default to warning/critical for high-severity
-weather, tsunami, tornado, hurricane, and flash-flood conditions.
-NOAA/NWS/NHC subjects are keyed by Source + Area/Basin + Event. This prevents
-the same polled advisory from creating one row per poll while still keeping
-different areas, product families, advisory numbers, and forecast points
-separate.
+weather, tsunami warning/watch/advisory/threat products, tornado, hurricane,
+and flash-flood conditions. Tsunami Information Statements remain visible in the
+NOAA feed, Subject History, and Reports, but do not open Alerts by themselves.
+NOAA/NWS/NHC/tsunami.gov subjects are keyed by the feed semantics. NWS alerts
+use Source + Area + Event. NHC storm advisories use one advisory-package
+subject per basin + storm/system name + advisory number, with individual
+products such as Public Advisory, Forecast Advisory, Forecast Discussion, and
+Wind Speed Probabilities retained as package details. Tsunami.gov rows use one
+subject per warning center + tsunami incident ID, so later message numbers
+update the same incident subject. This prevents the same polled item from
+creating one row per poll while still keeping different areas, advisory
+numbers, forecast points, and tsunami incidents separate.
 
 ## USGS
 
@@ -1144,15 +1213,21 @@ latitude: 19.6875
 longitude: -155.9583
 radius_km: 300
 min_magnitude: 5.0
+global_major:
+  enabled: true
+  min_magnitude: 6.5
 ```
 
 USGS data feeds the USGS live tab, Subject History, Reports, and Alerts.
-The shipped default only ingests magnitude 5+ earthquakes so common small
-regional quakes do not flood the dashboard. Lower `min_magnitude` only if you
-want local microseismic activity in the live feed and derived views. Alert
-defaults focus on nearby or larger earthquakes. USGS subjects are keyed by the
-USGS event ID, and material fingerprints include the event time plus magnitude,
-place, status, felt/CDI/MMI, alert color, and tsunami flag.
+The local-radius feed ingests magnitude 5+ earthquakes by default so common
+small regional quakes do not flood the dashboard. Lower `min_magnitude` only if
+you want local microseismic activity in the live feed and derived views. The
+optional `global_major` subfeed adds worldwide M6.5+ earthquakes into the same
+USGS tab and deduplicates by USGS event ID when an event appears in both feeds.
+Global M6.5+ earthquakes alert by default; global M7.5+ earthquakes are
+critical by default. USGS subjects are keyed by the USGS event ID, and material
+fingerprints include the event time plus magnitude, place, status, felt/CDI/MMI,
+alert color, and tsunami flag.
 
 ## SWPC
 
@@ -1238,9 +1313,10 @@ Keep Ambient keys in local `config/collectors/pws.yaml` only. The
 
 ## LAN
 
-`LAN` is an optional passive local-network collector. It reads local OS network
-state such as neighbor tables, ARP output, default routes, and optional DHCP
-lease files. It does not probe or scan the network.
+`LAN` is an optional local-network collector. By default it reads local OS
+network state such as neighbor tables, ARP output, default routes, passive
+mDNS/SSDP service advertisements, and optional DHCP lease files. It can also run
+an active ARP inventory scan when explicitly enabled.
 
 Default config:
 
@@ -1255,12 +1331,104 @@ enabled: true
 poll_interval_sec: 60
 collect_ip_neigh: true
 collect_arp: true
+collect_mdns: true
+collect_ssdp: true
+collect_avahi_browse: false
+avahi_browse_interval_sec: 300
+collect_active_arp_scan: false
+active_arp_scan_interval_sec: 300
+active_arp_scan_retention_sec: ""
+active_arp_scan_interfaces: []
+active_arp_scan_working_dir: ""
+dhcp_lease_import_interval_sec: 300
 dhcp_lease_paths: []
+dhcp_lease_command: ""
 ```
 
 LAN data feeds the LAN live tab, Subject History, Reports, and Alerts. Gateway
 change alerts are enabled by default; new LAN device alerts are disabled by
 default because normal networks can be noisy.
+
+Passive mDNS and SSDP listeners enrich LAN subjects with advertised services,
+device locations, and server/product strings. Optional Avahi import runs
+`avahi-browse -a -r -p -t` on its own cadence and parses only resolved `=`
+rows, which add hostnames, service names, ports, and selected TXT clues. If
+`avahi-browse` is missing or fails, LAN stays online for the other sources and
+shows a warning.
+
+DHCP lease import runs on its own cadence and can read local dnsmasq-style lease
+files or an optional command that prints dnsmasq-style lease rows. Use a local
+wrapper script for router-specific SSH/curl/API exports. Passive DHCP and raw
+ARP listeners are configurable but off by default because they can require
+elevated privileges or conflict with local services. Active ARP scan requires
+`arp-scan`, may need root or `cap_net_raw`, and defaults to a 300 second cadence
+when enabled.
+ARP replies are best-effort, so active-scan subjects are retained across
+intermittent missed replies. Leave `active_arp_scan_retention_sec` blank to
+retain them for `max(180 seconds, active_arp_scan_interval_sec * 3)`.
+
+For active ARP scan, `active_arp_scan_interfaces: []` leaves interface
+selection to `arp-scan --localnet`. That can be surprising on a Pi with more
+than one active network, for example `eth0` on the property LAN and `wlan0` on
+a hotspot used by Rayhunter. Prefer listing the networks you want Skannr to
+inventory:
+
+```yaml
+collect_active_arp_scan: true
+active_arp_scan_interfaces:
+- eth0
+- wlan0
+```
+
+Skannr runs one `arp-scan` pass per listed interface. A wired `eth0` scan can
+still discover Wi-Fi clients when the router bridges wired and Wi-Fi clients
+into the same IPv4 LAN. Add `wlan0` only when you also want to inventory that
+interface's own LAN, such as a separate hotspot subnet. Do not add `tun0` for
+Yggdrasil: ARP scan works on IPv4 Ethernet/L2 networks, while Yggdrasil is a
+routed IPv6 overlay. Use Yggdrasil for remote access to Skannr, not LAN device
+inventory.
+
+Skannr consumes the third `arp-scan` output column as `vendor_name` and shows it
+as the LAN feed's `Vendor` column. Some `arp-scan` builds look for
+`ieee-oui.txt` and `mac-vendor.txt` relative to their working directory; under
+systemd that directory may not be `/usr/share/arp-scan`. By default Skannr uses
+common arp-scan data directories when present. If your local install differs,
+set:
+
+```yaml
+active_arp_scan_working_dir: /usr/share/arp-scan
+```
+
+Avahi enrichment is useful when mDNS/Bonjour advertises richer identity than
+the OS neighbor table. For example, `arp-scan` may only show `Tuya Smart Inc.`
+or `Apple, Inc.`, while Avahi can add `Living-Room.local`, AirPlay/HomeKit
+services, model strings, ports, and router TXT fields. Skannr joins resolved
+Avahi records to LAN subjects by trusted TXT MAC fields first, then by current
+IP address. Other MAC-like TXT fields are retained as clues, not used as the
+primary LAN identity.
+
+LAN source requirements:
+
+| Source | Config | Requirement | Missing behavior |
+| --- | --- | --- | --- |
+| OS neighbor table/default routes | `collect_ip_neigh` | `ip` / `iproute2` | skipped if unavailable |
+| ARP cache fallback | `collect_arp` | `arp` / `net-tools` | skipped if unavailable |
+| mDNS advertisements | `collect_mdns` | Python UDP multicast socket | warning if socket bind/join fails |
+| SSDP advertisements | `collect_ssdp` | Python UDP multicast socket | warning if socket bind/join fails |
+| Avahi resolved mDNS import | `collect_avahi_browse` | `avahi-browse` / `avahi-utils`, usually `avahi-daemon` | warning if command is missing, invalid, times out, or fails |
+| DHCP lease files | `dhcp_lease_paths` | readable dnsmasq-style lease files | unreadable paths are skipped |
+| Router lease import | `dhcp_lease_command` | local command/wrapper that prints dnsmasq-style lease rows | warning if command is invalid, missing, or fails |
+| Passive DHCP listener | `collect_passive_dhcp` | Python UDP socket on ports 67/68; usually root/capability | warning if bind fails |
+| Passive raw ARP listener | `collect_passive_arp` | Linux `AF_PACKET`; usually root/capability | warning if raw socket bind fails |
+| Active ARP scan | `collect_active_arp_scan` | `arp-scan`; usually root/capability | warning if `arp-scan` is missing or fails |
+| LAN Identify | `lan_identify` action | `nmap` and/or `curl` | unavailable if both are missing; partial result if one is missing |
+
+LAN Identify is deliberately active and on demand. The LAN tab's Identify
+button runs a bounded service scan plus short HTTP/HTTPS root probes against
+one observed IPv4/IPv6 address. It records compact clues such as open ports,
+service banners, HTTP titles, script names, selected headers, and brand-like
+snippets. It does not scan the subnet and it does not run arbitrary commands
+from the browser.
 
 ## Wi-Fi Manufacturer Names
 

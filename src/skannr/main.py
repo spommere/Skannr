@@ -79,6 +79,18 @@ def read_app_version():
 
 APP_VERSION = read_app_version()
 
+POLL_FEED_REPLAY_TYPES = {
+    "noaa": {
+        "noaa_weather_alert",
+        "noaa_tropical_advisory",
+        "noaa_forecast_summary",
+        "noaa_tsunami_alert",
+    },
+    "usgs": {"usgs_earthquake"},
+    "swpc": {"swpc_event"},
+    "pws": {"pws_weather"},
+}
+
 
 def alert_engine_config(config):
     """Return AlertEngine config enriched with effective collector subfeed state."""
@@ -270,7 +282,7 @@ runtime = {
     "tasks_by_key": {},
     "task_names": {},
     "event_log": deque(maxlen=100),
-    "live_observations": {"wifi_aps": {}, "bluetooth": {}},
+    "live_observations": {"wifi_aps": {}, "bluetooth": {}, "lan": {}},
     "live_observations_lock": threading.Lock(),
     "sse_clients": [],
     "shutting_down": False,
@@ -322,6 +334,9 @@ def events():
     enqueue_sse(client, "system_status", system_status())
     enqueue_sse(client, "alerts_snapshot", runtime["alerts"].snapshot())
     enqueue_sse(client, "findings_snapshot", runtime["findings"].snapshot())
+    enqueue_sse(client, "lan_snapshot", live_lan_snapshot())
+    for event in recent_poll_feed_events():
+        enqueue_sse(client, "skannr_event", event)
     enqueue_sse(
         client,
         "skannr_event",
@@ -414,6 +429,29 @@ def ble_identify():
     if not mac:
         return {"ok": False, "error": "Missing BLE MAC address"}, 400
     asyncio.run_coroutine_threadsafe(action.identify(mac, timeout), loop)
+    return {"ok": True}
+
+
+@app.route("/lan_identify", methods=["POST"])
+def lan_identify():
+    """Queue one active LAN service/HTTP identification probe."""
+    payload = request.get_json(silent=True) or {}
+    target = payload.get("target") or payload.get("ip")
+    mac = payload.get("mac") or ""
+    subject_key = payload.get("subject_key") or ""
+    timeout = payload.get("timeout_sec")
+    loop = runtime.get("loop")
+    action = action_by_key("lan_identify")
+    if not loop or not action:
+        return {
+            "ok": False,
+            "error": "LAN Identify action is not available",
+        }, 503
+    if not target:
+        return {"ok": False, "error": "Missing LAN IP address"}, 400
+    asyncio.run_coroutine_threadsafe(
+        action.identify(target, mac, subject_key, timeout), loop
+    )
     return {"ok": True}
 
 
@@ -757,6 +795,7 @@ def on_connect():
     socketio.emit("system_status", system_status())
     socketio.emit("alerts_snapshot", runtime["alerts"].snapshot())
     socketio.emit("findings_snapshot", runtime["findings"].snapshot())
+    socketio.emit("lan_snapshot", live_lan_snapshot())
     socketio.emit(
         "skannr_event",
         {
@@ -930,7 +969,18 @@ async def consume_events(bus):
                 "event fan-out failed event=%s: %s",
                 event_log_context(event),
                 exc,
-            )
+        )
+
+
+def recent_poll_feed_events():
+    """Return recent poll-feed events that should hydrate live feed tables."""
+    events = []
+    for event in reversed(list(runtime.get("event_log") or [])):
+        collector = event.get("collector") if isinstance(event, dict) else None
+        event_type = event.get("type") if isinstance(event, dict) else None
+        if event_type in POLL_FEED_REPLAY_TYPES.get(collector, set()):
+            events.append(event)
+    return events
 
 
 def runtime_task_done(task):
@@ -1188,6 +1238,42 @@ def record_live_observation(event):
                 live_observation_ttl_sec(),
                 live_observation_max_items(),
             )
+    elif collector == "lan" and event_type in (
+        "lan_device_seen",
+        "lan_device_changed",
+        "lan_gateway_seen",
+        "lan_gateway_changed",
+    ):
+        key = (
+            normalized_identity(data.get("subject_key"))
+            or normalized_identity(data.get("mac"))
+            or normalized_identity(data.get("ip"))
+            or normalized_identity(data.get("gateway_ip"))
+        )
+        if not key:
+            return
+        observation = dict(data)
+        observation["event_type"] = event_type
+        observation["last_seen"] = timestamp
+        observation["last_seen_epoch"] = timestamp_epoch_value
+        with runtime["live_observations_lock"]:
+            runtime["live_observations"].setdefault("lan", {})[key] = observation
+            prune_live_observation_map(
+                runtime["live_observations"]["lan"],
+                live_observation_ttl_sec(),
+                live_observation_max_items(),
+            )
+
+
+def live_lan_snapshot():
+    """Return current LAN live subjects for newly connected browsers."""
+    with runtime["live_observations_lock"]:
+        items = [dict(item) for item in (runtime["live_observations"].get("lan") or {}).values()]
+    return sorted(
+        items,
+        key=lambda item: timestamp_epoch(item.get("last_seen_epoch")) or 0,
+        reverse=True,
+    )
 
 
 def normalized_identity(value):
@@ -1404,6 +1490,7 @@ def build_findings_summary():
         reverse=True,
     )
     findings = filter_insight_recent_records(findings, use_last_seen=False)
+    findings = filter_low_value_findings(findings)
     generated_at_epoch = now_epoch()
     return {
         "generated_at": local_now(generated_at_epoch),
@@ -1436,6 +1523,7 @@ def update_findings_summary(previous):
         reverse=True,
     )
     findings = filter_insight_recent_records(findings, use_last_seen=False)
+    findings = filter_low_value_findings(findings)
     generated_at_epoch = now_epoch()
     summary.update(
         {
@@ -1473,7 +1561,7 @@ def display_findings_summary(summary, window_days):
             )
         ]
     findings = filter_insight_recent_records(findings, use_last_seen=False)
-    findings = [sanitize_rayhunter_finding(item) for item in findings]
+    findings = filter_low_value_findings(findings)
     output["findings"] = findings
     output["window"] = view_window_metadata(window_days)
     output["insights_window"] = insights_recent_window_metadata()
@@ -1482,6 +1570,103 @@ def display_findings_summary(summary, window_days):
     ) or view_window_metadata(None)
     output["counts"] = count_findings(findings)
     return output
+
+
+LOW_VALUE_BLE_FINDING_TYPES = {
+    "ble_device_new",
+    "ble_device_returned",
+    "ble_device_lost",
+    "ble_device_strong",
+    "ble_rssi_change",
+}
+
+LOW_VALUE_FINDING_TYPES = {
+    # APRS packets are already available in the APRS-IS live feed and Subject
+    # History. Insights keeps movement/weather interpretation instead.
+    "aprs_object",
+    "aprs_packet",
+    "aprs_position",
+    "aprs_status",
+    "aprs_weather",
+    # LAN subject changes are retained in Subject History and Reports. Emitting
+    # one Insight per mDNS/source/interface update makes Insights read like a
+    # raw LAN event log.
+    "lan_device_changed",
+    # Managed Wi-Fi scans see weak neighboring APs appear and disappear often.
+    # The subject history/report layers keep that behavior; Insights should not
+    # show every AP flap as a separate row.
+    "wifi_ap_lost",
+    "wifi_ap_returned",
+}
+
+LATEST_BY_KEY_FINDING_TYPES = {
+    # These are current-state samples/status rows. Keep the newest row for the
+    # subject and let transition/threshold finding types carry event meaning.
+    "noaa_forecast_summary",
+    "aprsis_weather_high_rain",
+    "aprsis_weather_high_wind",
+    "pws_weather",
+    "pws_weather_high_rain",
+    "pws_weather_high_wind",
+    "rayhunter_status",
+    "swpc_event",
+    "usgs_earthquake",
+    "wifi_ap_strong",
+}
+
+
+def filter_low_value_findings(findings):
+    """Drop or coalesce low-value finding rows for the tactical Insights feed."""
+    output = []
+    latest_seen = set()
+    for item in findings or []:
+        if low_value_finding(item):
+            continue
+        if low_value_ble_finding(item):
+            continue
+        sanitized = sanitize_rayhunter_finding(item)
+        latest_key = latest_state_finding_key(sanitized)
+        if latest_key:
+            if latest_key in latest_seen:
+                continue
+            latest_seen.add(latest_key)
+        output.append(sanitized)
+    return output
+
+
+def low_value_finding(item):
+    """Return true for finding rows that are too routine for Insights."""
+    if not isinstance(item, dict):
+        return False
+    return item.get("type") in LOW_VALUE_FINDING_TYPES
+
+
+def latest_state_finding_key(item):
+    """Return a de-duplication key for current-state findings."""
+    if not isinstance(item, dict):
+        return ""
+    finding_type = item.get("type")
+    if finding_type not in LATEST_BY_KEY_FINDING_TYPES:
+        return ""
+    return "{}:{}:{}".format(
+        item.get("source") or "",
+        finding_type or "",
+        item.get("key") or item.get("title") or "",
+    )
+
+
+def low_value_ble_finding(item):
+    """Return true for anonymous/manufacturer-only BLE live finding rows."""
+    if not isinstance(item, dict) or item.get("source") != "ble":
+        return False
+    if item.get("type") not in LOW_VALUE_BLE_FINDING_TYPES:
+        return False
+    attributes = item.get("attributes") or {}
+    mac = str(attributes.get("mac") or "").strip().lower().replace("-", ":")
+    name = str(attributes.get("name") or "").strip()
+    if name and name.lower().replace("-", ":") != mac:
+        return False
+    return True
 
 
 def sanitize_rayhunter_finding(item):

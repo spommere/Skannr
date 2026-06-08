@@ -1,12 +1,13 @@
 key: noaa
 order: 80
 label: NOAA
-description: Optional internet-fed NOAA/NWS/NHC hazard feed
+description: Optional internet-fed NOAA/NWS/NHC/tsunami.gov hazard feed
 acquisition_mode: poll
 enabled: false
 
 # NOAA is an internet-fed situational-awareness collector. It polls NWS active
-# alerts for a configured point/state and optional NHC tropical cyclone feeds.
+# alerts for a configured point/state, optional NHC tropical cyclone feeds, and
+# tsunami.gov NTWC/PTWC feeds.
 poll_interval_sec: 300
 request_timeout_sec: 15
 user_agent: "Skannr NOAA collector"
@@ -39,3 +40,17 @@ nhc:
     - atlantic
     - eastern_pacific
     - central_pacific
+
+tsunami:
+  enabled: true
+  fetch_bulletin_text: true
+  # Official tsunami.gov centers: ntwc (National Tsunami Warning Center) and
+  # ptwc (Pacific Tsunami Warning Center).
+  centers:
+    - ntwc
+    - ptwc
+  # Optional per-center URL overrides, normally not needed:
+  # feeds:
+  #   ntwc:
+  #     atom_url: "https://www.tsunami.gov/events/xml/PAAQAtom.xml"
+  #     cap_url: "https://www.tsunami.gov/events/xml/PAAQCAP.xml"

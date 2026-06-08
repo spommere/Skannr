@@ -17,9 +17,20 @@ radius_km: 300
 min_magnitude: 5.0
 orderby: time
 
+# Optional worldwide major-earthquake subfeed. When USGS is enabled, Skannr
+# includes this low-volume global feed by default and merges events into the
+# same live USGS tab by USGS event ID.
+global_major:
+  enabled: true
+  min_magnitude: 6.5
+  orderby: time
+  # Optional lookback; omit for the USGS service default.
+  # lookback_days: 7
+
 # Event severity defaults. Reports and Alerts can add their own thresholds.
 warning_magnitude_nearby: 4.0
 warning_magnitude_regional: 5.0
+warning_magnitude_global: 6.5
 warning_nearby_radius_km: 100
 
 # Optional override if you want a fully custom USGS URL:

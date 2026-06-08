@@ -12,7 +12,11 @@ from collections import Counter, defaultdict
 
 from .bus import local_now
 from .collectors.lan import clean_lan_data
-from .collectors.noaa import clean_noaa_data, stable_noaa_event_key
+from .collectors.noaa import (
+    clean_noaa_data,
+    stable_noaa_event_key,
+    tsunami_is_alertworthy,
+)
 from .collectors.aprsis import aprsis_distance_km, aprsis_float, clean_aprs_data
 from .collectors.pws import clean_pws_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
@@ -47,6 +51,7 @@ class SubjectHistoryBuilder:
         "swpc",
         "pws",
         "lan",
+        "lan_identify",
     )
     COLLECTORS = DEVICE_COLLECTORS + DIRECT_COLLECTORS
 
@@ -110,7 +115,9 @@ class SubjectHistoryBuilder:
             direct_observations.get("pws") or [], None
         )
         lan_events, lan_records = self.build_lan_history(
-            direct_observations.get("lan") or [], None
+            (direct_observations.get("lan") or [])
+            + (direct_observations.get("lan_identify") or []),
+            None,
         )
         generated_at_epoch = now_epoch()
         raw_records = self.raw_records_by_collector(
@@ -124,6 +131,7 @@ class SubjectHistoryBuilder:
                 "swpc": swpc_records,
                 "pws": pws_records,
                 "lan": lan_records,
+                "lan_identify": direct_records.get("lan_identify") or 0,
             },
         )
         incremental_records = self.incremental_records_by_collector(
@@ -274,7 +282,9 @@ class SubjectHistoryBuilder:
             direct_observations.get("pws") or [], window_days
         )
         output["lan"], _ = self.build_lan_history(
-            direct_observations.get("lan") or [], window_days
+            (direct_observations.get("lan") or [])
+            + (direct_observations.get("lan_identify") or []),
+            window_days,
         )
         output["subjects"] = self.build_subject_records(output)
         output["subject_counts"] = self.count_subjects(output["subjects"])
@@ -406,6 +416,7 @@ class SubjectHistoryBuilder:
                 "noaa_weather_alert",
                 "noaa_tropical_advisory",
                 "noaa_forecast_summary",
+                "noaa_tsunami_alert",
                 "collector_offline",
                 "collector_retrying",
             )
@@ -436,6 +447,8 @@ class SubjectHistoryBuilder:
                 "collector_offline",
                 "collector_retrying",
             )
+        if collector == "lan_identify":
+            return event_type in ("identify_result",)
         return False
 
     def clean_direct_data(self, collector, data):
@@ -454,7 +467,7 @@ class SubjectHistoryBuilder:
             return clean_swpc_data(data)
         if collector == "pws":
             return clean_pws_data(data)
-        if collector == "lan":
+        if collector in ("lan", "lan_identify"):
             return clean_lan_data(data)
         return {}
 
@@ -1101,7 +1114,13 @@ class SubjectHistoryBuilder:
                 "timestamp": record.get("last_seen"),
                 "timestamp_epoch": record.get("last_seen_epoch"),
                 "severity": "warning"
-                if str(record.get("severity") or "").lower() in ("severe", "extreme")
+                if (
+                    str(record.get("severity") or "").lower() in ("severe", "extreme")
+                    or (
+                        record.get("alert_kind") == "tsunami"
+                        and tsunami_is_alertworthy(record)
+                    )
+                )
                 else "info",
                 "data": clean_noaa_data(record),
             }
@@ -1186,7 +1205,9 @@ class SubjectHistoryBuilder:
                 "timestamp": record.get("last_seen"),
                 "timestamp_epoch": record.get("last_seen_epoch"),
                 "severity": "warning"
-                if record.get("tsunami") or str(record.get("alert_color") or "").lower() in ("yellow", "orange", "red")
+                if record.get("tsunami")
+                or record.get("global_major")
+                or str(record.get("alert_color") or "").lower() in ("yellow", "orange", "red")
                 else "info",
                 "data": clean_usgs_data(record),
             }
@@ -1519,6 +1540,7 @@ class SubjectHistoryBuilder:
                 "lan_device_changed",
                 "lan_gateway_seen",
                 "lan_gateway_changed",
+                "identify_result",
                 "collector_offline",
                 "collector_retrying",
             ):
@@ -1540,7 +1562,12 @@ class SubjectHistoryBuilder:
                 latest_health_epoch = epoch
                 continue
             if event_type.startswith("lan_gateway"):
-                key = "{}:{}".format(data.get("family") or "", data.get("interface") or "")
+                key = (
+                    data.get("subject_key")
+                    or ("mac:{}".format(data.get("mac")) if data.get("mac") else "")
+                    or ("ip:{}".format(data.get("gateway_ip")) if data.get("gateway_ip") else "")
+                    or "{}:{}".format(data.get("family") or "", data.get("interface") or "")
+                )
                 record = gateways.setdefault(
                     key,
                     {
@@ -1572,9 +1599,25 @@ class SubjectHistoryBuilder:
                     "states": [],
                     "sources": [],
                     "gateways": [],
+                    "services": [],
+                    "locations": [],
+                    "servers": [],
+                    "messages": [],
+                    "open_ports": [],
+                    "service_banners": [],
+                    "http_urls": [],
+                    "http_titles": [],
+                    "http_headers": [],
+                    "http_scripts": [],
+                    "http_hints": [],
+                    "identify_errors": [],
+                    "identify_count": 0,
                 },
             )
-            self.update_lan_device_summary(record, data, event_type, epoch)
+            if event_type == "identify_result":
+                self.update_lan_identify_summary(record, data, epoch)
+            else:
+                self.update_lan_device_summary(record, data, event_type, epoch)
         output = []
         for record in sorted(
             devices.values(),
@@ -1645,7 +1688,48 @@ class SubjectHistoryBuilder:
                     record[key] = data.get(key)
             if data.get("gateway"):
                 record["gateway"] = True
-        for key in ("ips", "hostnames", "interfaces", "states", "sources", "gateways"):
+        for key in (
+            "ips",
+            "hostnames",
+            "interfaces",
+            "states",
+            "sources",
+            "mac_aliases",
+            "gateways",
+            "services",
+            "locations",
+            "servers",
+            "messages",
+        ):
+            for value in data.get(key) or []:
+                self.sample_direct_value(record, key, value, 16)
+
+    def update_lan_identify_summary(self, record, data, epoch):
+        """Fold one on-demand LAN Identify result into a LAN device summary."""
+        record["identify_count"] = int(record.get("identify_count") or 0) + 1
+        if epoch < record.get("first_seen_epoch", epoch):
+            record["first_seen_epoch"] = epoch
+            record["first_seen"] = local_now(epoch)
+        if epoch >= record.get("last_seen_epoch", 0):
+            record["last_seen_epoch"] = epoch
+            record["last_seen"] = local_now(epoch)
+        record["last_identified_epoch"] = epoch
+        record["last_identified"] = local_now(epoch)
+        for key in ("mac", "ip"):
+            if data.get(key) and not record.get(key):
+                record[key] = data.get(key)
+        self.sample_direct_value(record, "ips", data.get("ip") or data.get("target"), 16)
+        self.sample_direct_value(record, "sources", "lan-identify", 16)
+        for key in (
+            "open_ports",
+            "service_banners",
+            "http_urls",
+            "http_titles",
+            "http_headers",
+            "http_scripts",
+            "http_hints",
+            "identify_errors",
+        ):
             for value in data.get(key) or []:
                 self.sample_direct_value(record, key, value, 16)
 
@@ -1670,6 +1754,9 @@ class SubjectHistoryBuilder:
             ):
                 if data.get(key) not in (None, "", []):
                     record[key] = data.get(key)
+            for key in ("gateway_ips", "interfaces", "families", "sources"):
+                for value in data.get(key) or []:
+                    self.sample_direct_value(record, key, value, 16)
 
     def sample_direct_value(self, record, key, value, limit=8):
         """Append one distinct direct-collector sample value."""
@@ -2075,7 +2162,30 @@ class SubjectHistoryBuilder:
                         "instruction": data.get("instruction") or "",
                         "source": data.get("source") or "",
                         "source_url": data.get("source_url") or "",
+                        "cap_url": data.get("cap_url") or "",
+                        "json_url": data.get("json_url") or "",
+                        "tsunami_identifier": data.get("tsunami_identifier") or "",
+                        "incident_id": data.get("incident_id") or "",
+                        "tsunami_category": data.get("tsunami_category") or "",
+                        "message_number": data.get("message_number") or "",
+                        "event_time": data.get("event_time") or "",
+                        "event_time_epoch": data.get("event_time_epoch"),
+                        "magnitude": data.get("magnitude"),
+                        "magnitude_type": data.get("magnitude_type") or "",
+                        "depth_km": data.get("depth_km"),
+                        "product_code": data.get("product_code") or "",
+                        "resource_urls": data.get("resource_urls") or [],
+                        "map_urls": data.get("map_urls") or [],
                         "basin": data.get("basin") or "",
+                        "nhc_system": data.get("nhc_system") or "",
+                        "nhc_storm_id": data.get("nhc_storm_id") or "",
+                        "nhc_advisory_number": data.get("nhc_advisory_number") or "",
+                        "nhc_package_key": data.get("nhc_package_key") or "",
+                        "nhc_product_count": data.get("nhc_product_count"),
+                        "nhc_product_types": data.get("nhc_product_types") or [],
+                        "nhc_product_titles": data.get("nhc_product_titles") or [],
+                        "nhc_product_urls": data.get("nhc_product_urls") or [],
+                        "nhc_products": data.get("nhc_products") or [],
                         "latitude": data.get("latitude"),
                         "longitude": data.get("longitude"),
                         "forecast_generated": data.get("forecast_generated") or "",
@@ -2362,7 +2472,12 @@ class SubjectHistoryBuilder:
                 subject_type = "lan_collector"
             elif event_type == "lan_gateway_summary":
                 subject_id = data.get("subject_key") or data.get("gateway_ip") or "gateway"
-                subject = "Gateway {}".format(data.get("gateway_ip") or subject_id)
+                subject = "Gateway {}".format(
+                    data.get("mac")
+                    or data.get("gateway_ip")
+                    or ", ".join(data.get("gateway_ips") or [])
+                    or subject_id
+                )
                 subject_type = "lan_gateway"
             else:
                 subject_id = data.get("subject_key") or data.get("mac") or data.get("ip") or "unknown"
@@ -2395,16 +2510,33 @@ class SubjectHistoryBuilder:
                         "state": data.get("state") or "",
                         "states": data.get("states") or [],
                         "sources": data.get("sources") or [],
+                        "services": data.get("services") or [],
+                        "locations": data.get("locations") or [],
+                        "servers": data.get("servers") or [],
+                        "messages": data.get("messages") or [],
+                        "open_ports": data.get("open_ports") or [],
+                        "service_banners": data.get("service_banners") or [],
+                        "http_urls": data.get("http_urls") or [],
+                        "http_titles": data.get("http_titles") or [],
+                        "http_headers": data.get("http_headers") or [],
+                        "http_scripts": data.get("http_scripts") or [],
+                        "http_hints": data.get("http_hints") or [],
+                        "identify_errors": data.get("identify_errors") or [],
                         "vendor_oui": data.get("vendor_oui") or "",
                         "vendor_prefix": data.get("vendor_prefix") or "",
                         "vendor_name": data.get("vendor_name") or "",
                         "gateway": bool(data.get("gateway")),
                         "gateways": data.get("gateways") or [],
                         "gateway_ip": data.get("gateway_ip") or "",
+                        "gateway_ips": data.get("gateway_ips") or [],
                         "family": data.get("family") or "",
+                        "families": data.get("families") or [],
                         "observation_count": data.get("observation_count") or 0,
+                        "identify_count": data.get("identify_count") or 0,
                         "change_count": data.get("change_count") or 0,
                         "change_type": data.get("change_type") or "",
+                        "last_identified": data.get("last_identified") or "",
+                        "last_identified_epoch": data.get("last_identified_epoch"),
                         "reason": data.get("reason") or "",
                     },
                 )

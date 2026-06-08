@@ -11,6 +11,7 @@ const rows = {
   swpc: [],
   pws: [],
   lan: [],
+  lanIdentify: [],
   aps: new Map(),
   monitorEvents: [],
   insights: [],
@@ -379,6 +380,7 @@ socket.on("collector_status", renderCollectorHealth);
 socket.on("system_status", renderSystemStatus);
 socket.on("alerts_snapshot", renderAlertsSnapshot);
 socket.on("findings_snapshot", renderFindingsSnapshot);
+socket.on("lan_snapshot", renderLanSnapshot);
 socket.on("skannr_event", handleEvent);
 buildSubtabs();
 loadCollectorMetadata();
@@ -454,6 +456,7 @@ function createLocalEventSocket() {
       "system_status",
       "alerts_snapshot",
       "findings_snapshot",
+      "lan_snapshot",
       "skannr_event"
     ].forEach((name) => {
       source.addEventListener(name, (message) => {
@@ -510,6 +513,18 @@ function connectionAddressFamily(host) {
   return "";
 }
 
+function browserTitleHost() {
+  return displayConnectionHost();
+}
+
+function updateBrowserTitle() {
+  const host = browserTitleHost();
+  const unacked = (rows.alerts || []).filter((item) => !item.acked).length;
+  const parts = ["Skannr"];
+  if (host) parts.push(host);
+  document.title = `${parts.join(" ")}${unacked ? ` (${unacked})` : ""}`;
+}
+
 function handleEvent(event) {
   if (event.collector === "alerts") renderAlertEvent(event);
   if (event.collector === "findings") renderFindingEvent(event);
@@ -525,6 +540,7 @@ function handleEvent(event) {
   if (event.collector === "swpc") renderSwpcEvent(event);
   if (event.collector === "pws") renderPwsEvent(event);
   if (event.collector === "lan") renderLanEvent(event);
+  if (event.collector === "lan_identify") renderLanIdentifyEvent(event);
   if (event.collector === "system" && event.type === "system_status") renderSystemStatus(event.data);
 }
 
@@ -584,10 +600,13 @@ function renderGlobalAlerts() {
   const badge = document.getElementById("alerts-tab-count");
   const alerts = sortAlerts(rows.alerts || []);
   const unackedAlerts = alerts.filter((item) => !item.acked);
+  updateTabCounts();
+  updateBrowserTitle();
   if (badge) {
     const critical = unackedAlerts.filter((item) => item.level === "critical").length;
-    badge.textContent = unackedAlerts.length ? `${unackedAlerts.length}` : "";
+    badge.textContent = unackedAlerts.length ? `+${unackedAlerts.length}` : "";
     badge.className = `tab-alert-count ${critical ? "critical" : ""}`;
+    badge.title = unackedAlerts.length ? `${unackedAlerts.length} unacknowledged alert(s)` : "";
   }
   if (!container) return;
   container.innerHTML = "";
@@ -737,9 +756,18 @@ function alertDetailItems(alert) {
     ["endpoint", "Endpoint", ""],
     ["source_url", "Source URL", ""],
     ["detail_url", "Detail URL", ""],
+    ["cap_url", "CAP URL", ""],
+    ["json_url", "JSON URL", ""],
     ["callsign", "Callsign", ""],
     ["event", "Event", ""],
     ["event_id", "Event", ""],
+    ["incident_id", "Incident", ""],
+    ["tsunami_identifier", "Tsunami ID", ""],
+    ["tsunami_category", "Tsunami Category", ""],
+    ["message_number", "Message", ""],
+    ["nhc_system", "NHC System", ""],
+    ["nhc_advisory_number", "Advisory", ""],
+    ["nhc_storm_id", "Storm ID", ""],
     ["event_time", "Event Time", ""],
     ["updated", "Updated", ""],
     ["effective", "Effective", ""],
@@ -747,6 +775,10 @@ function alertDetailItems(alert) {
     ["expires", "Expires", ""],
     ["severity", "Severity", ""],
     ["magnitude", "Magnitude", ""],
+    ["magnitude_type", "Magnitude Type", ""],
+    ["depth_km", "Depth", " km"],
+    ["latitude", "Latitude", ""],
+    ["longitude", "Longitude", ""],
     ["distance_km", "Distance", " km"],
     ["gateway_ip", "Gateway", ""],
     ["interface", "Interface", ""],
@@ -764,6 +796,9 @@ function alertDetailItems(alert) {
   if (Array.isArray(evidence.service_uuids) && evidence.service_uuids.length) {
     items.push({key: "service_uuids", label: "Services", value: compactList(evidence.service_uuids, 3), unit: ""});
   }
+  if (Array.isArray(evidence.nhc_product_types) && evidence.nhc_product_types.length) {
+    items.push({key: "nhc_product_types", label: "Products", value: compactList(evidence.nhc_product_types, 5), unit: ""});
+  }
   if (evidence.vendor_name) {
     items.push({key: "vendor_name", label: "Vendor", value: String(evidence.vendor_name), unit: ""});
   }
@@ -771,7 +806,7 @@ function alertDetailItems(alert) {
 }
 
 function alertDetailUrl(key, value) {
-  if (!["endpoint", "source_url", "detail_url"].includes(key)) return "";
+  if (!["endpoint", "source_url", "detail_url", "cap_url", "json_url"].includes(key)) return "";
   const text = String(value || "").trim();
   if (!/^https?:\/\//i.test(text)) return "";
   try {
@@ -822,6 +857,7 @@ function renderFindingEvent(event) {
 }
 
 function renderInsights() {
+  updateTabCounts();
   const tbody = document.getElementById("insights-list");
   if (!tbody) return;
   renderInsightsHeader();
@@ -894,6 +930,7 @@ function renderReports(reportBundle) {
   renderReportSection("subject", subjectReports, maxRendered, rendered);
   updateReportsStatus(latestReports, visibleReports);
   updateReportsSummary(visibleReports);
+  updateTabCounts();
 }
 
 function renderReportSection(kind, reports, maxRendered, alreadyRendered) {
@@ -1666,6 +1703,7 @@ function renderLiveTables() {
   renderSwpcTable();
   renderPwsTable();
   renderLanTable();
+  updateTabCounts();
 }
 
 function scheduleLiveRender(key, renderer) {
@@ -1830,6 +1868,7 @@ function liveScanRowsSeen() {
     rows.swpc.length ||
     rows.pws.length ||
     rows.lan.length ||
+    rows.lanIdentify.length ||
     collectorSubjectEventsSeen()
   );
 }
@@ -1986,6 +2025,9 @@ function noaaEventTypeForSubject(subject) {
   const type = String((subject || {}).subject_type || data.event_type || "");
   if (type === "noaa_forecast" || data.alert_kind === "forecast") {
     return "noaa_forecast_summary";
+  }
+  if (type === "noaa_tsunami_alert" || data.alert_kind === "tsunami") {
+    return "noaa_tsunami_alert";
   }
   if (type === "noaa_tropical_advisory" || String(data.alert_kind || "").startsWith("tropical")) {
     return "noaa_tropical_advisory";
@@ -2474,6 +2516,97 @@ function collectorEntryForSource(source) {
   return COLLECTOR_SUBTABS.find((entry) => entry.value === key);
 }
 
+function updateTabCounts() {
+  setTabCount("insights", rows.insights.length);
+  setTabCount("reports", rows.reports.length);
+  setTabCount("history", subjectHistoryRowCount());
+  setTabCount("wifi", rows.aps.size);
+  setTabCount("wifi_monitor", rows.monitorEvents.length);
+  setTabCount("bluetooth", bluetoothTabRowCount());
+  setTabCount("rtlsdr", rows.signals.size);
+  setTabCount("aprsis", rows.aprsis.length);
+  setTabCount("noaa", rows.noaa.length);
+  setTabCount("usgs", rows.usgs.length);
+  setTabCount("swpc", rows.swpc.length);
+  setTabCount("pws", rows.pws.length);
+  setTabCount("lan", rows.lan.length + rows.lanIdentify.length);
+  setTabCount("alerts", rows.alerts.length);
+  updateSystemTabCount();
+  updateSourceFilterCounts();
+}
+
+function setTabCount(tab, count, title) {
+  const node = document.querySelector(`[data-tab-count="${tab}"]`);
+  if (!node) return;
+  node.textContent = String(count || 0);
+  if (title) node.title = title;
+  else node.removeAttribute("title");
+}
+
+function updateSystemTabCount() {
+  const statuses = latestCollectorStatuses || [];
+  const total = statuses.length;
+  const online = statuses.filter((item) => String((item || {}).state || "").toUpperCase() === "ONLINE").length;
+  const disabled = statuses.filter((item) => String((item || {}).state || "").toUpperCase() === "DISABLED").length;
+  const offline = statuses.filter((item) => ["OFFLINE", "STOPPED"].includes(String((item || {}).state || "").toUpperCase())).length;
+  const details = [`${online} online`, `${total} total`];
+  if (offline) details.push(`${offline} offline/stopped`);
+  if (disabled) details.push(`${disabled} disabled`);
+  const label = total ? `${online}/${total}` : "0";
+  setTabCount("system", label, details.join(", "));
+}
+
+function bluetoothTabRowCount() {
+  const recentBle = [...rows.ble.values()].filter(bleDeviceIsRecent).length;
+  return recentBle + rows.btClassic.size + rows.bleIdentify.length;
+}
+
+function subjectHistoryRowCount(source) {
+  const history = latestDeviceHistory || {};
+  const wifi = history.wifi || {};
+  const bluetooth = history.bluetooth || history.ble || {};
+  const sourceKey = String(source || "all").toLowerCase();
+  const countForDirectSource = (collector) => historySubjectsFor(history, collector).length;
+  if (sourceKey === "wifi") return (wifi.access_points || []).length;
+  if (sourceKey === "wifi_monitor") return (wifi.clients || []).length;
+  if (sourceKey === "bluetooth") return (bluetooth.devices || []).length;
+  if (sourceKey && sourceKey !== "all") return countForDirectSource(sourceKey);
+  return (wifi.access_points || []).length +
+    (wifi.clients || []).length +
+    (bluetooth.devices || []).length +
+    ["aprsis", "rayhunter", "rtlsdr", "noaa", "usgs", "swpc", "pws", "lan"]
+      .reduce((total, collector) => total + countForDirectSource(collector), 0);
+}
+
+function updateSourceFilterCounts() {
+  document.querySelectorAll(".source-filter[data-subtab-group] .source-filter-button").forEach((button) => {
+    const group = button.closest(".source-filter")?.dataset.subtabGroup || "";
+    const source = button.dataset.subtab || "all";
+    const count = sourceFilterCount(group, source);
+    let badge = button.querySelector(".source-filter-count");
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "source-filter-count";
+      button.appendChild(badge);
+    }
+    badge.textContent = String(count || 0);
+  });
+}
+
+function sourceFilterCount(group, source) {
+  const mode = source || "all";
+  if (group === "insights") {
+    return rows.insights.filter((item) => mode === "all" || sourceMatchesSubtab(item.source, mode)).length;
+  }
+  if (group === "reports") {
+    return rows.reports.filter((item) => mode === "all" || sourceMatchesSubtab(item.source, mode)).length;
+  }
+  if (group === "history") {
+    return subjectHistoryRowCount(mode);
+  }
+  return 0;
+}
+
 function insightMatchesActivityFilter(insight) {
   const mode = insightsActivityFilter ? insightsActivityFilter.value : "all";
   if (mode === "all") return true;
@@ -2552,7 +2685,11 @@ function buildSubtabs() {
       const button = document.createElement("button");
       button.className = `source-filter-button ${entry.value === selected ? "active" : ""}`;
       button.dataset.subtab = entry.value;
-      button.textContent = entry.label;
+      button.appendChild(document.createTextNode(entry.label));
+      const count = document.createElement("span");
+      count.className = "source-filter-count";
+      count.textContent = "0";
+      button.appendChild(count);
       button.addEventListener("click", () => {
         container.querySelectorAll(".source-filter-button").forEach((item) => item.classList.remove("active"));
         button.classList.add("active");
@@ -2565,6 +2702,7 @@ function buildSubtabs() {
     });
     updateSubtabPanel(group);
   });
+  updateTabCounts();
 }
 
 function subtabEntriesForGroup(group) {
@@ -2702,6 +2840,7 @@ function renderRtlsdrEvent(event) {
     prependList("rtlsdr-events", `${event.timestamp} lost ${event.data.frequency_mhz} MHz`);
   }
   renderSchemaTable("rtlsdr-signals", [...rows.signals.values()], "rtlsdrSignals");
+  updateTabCounts();
 }
 
 function renderBleEvent(event) {
@@ -2729,6 +2868,7 @@ function renderBleEvent(event) {
 }
 
 function renderBleTable() {
+  updateTabCounts();
   const tbody = document.getElementById("ble-devices");
   if (!tbody) return;
   tbody.innerHTML = "";
@@ -2875,6 +3015,7 @@ function renderBtClassicEvent(event) {
 
 function renderBtClassicTable() {
   renderSchemaTable("bt-classic-devices", [...rows.btClassic.values()], "btClassicDevices");
+  updateTabCounts();
 }
 
 function setBtClassicScanState(text, state) {
@@ -2937,6 +3078,7 @@ function renderBleIdentifyEvent(event) {
 
 function renderBleIdentifyTable() {
   renderSchemaTable("ble-identify-results", rows.bleIdentify, "bleIdentifyResults", {preserveOrder: true});
+  updateTabCounts();
 }
 
 function mergeBleIdentifyResult(data, timestamp, timestampEpoch) {
@@ -3077,6 +3219,7 @@ function renderWifiMonitorEvent(event) {
 
 function renderWifiMonitorTable() {
   renderSchemaTable("wifi-monitor-events", rows.monitorEvents, "wifiMonitorEvents");
+  updateTabCounts();
 }
 
 function renderAprsisEvent(event) {
@@ -3124,6 +3267,7 @@ function renderAprsisEvent(event) {
 function renderAprsisTable() {
   const events = rows.aprsis.filter(aprsisEventMatchesSearch);
   renderSchemaTable("aprsis-events", events, "aprsisEvents", {preserveOrder: true});
+  updateTabCounts();
 }
 
 function aprsisEventMatchesSearch(item) {
@@ -3285,7 +3429,12 @@ function renderNoaaEvent(event) {
     setCollectorBanner("noaa", event.type, data.reason || "");
     return;
   }
-  if (!["noaa_weather_alert", "noaa_tropical_advisory", "noaa_forecast_summary"].includes(event.type)) return;
+  if (![
+    "noaa_weather_alert",
+    "noaa_tropical_advisory",
+    "noaa_forecast_summary",
+    "noaa_tsunami_alert"
+  ].includes(event.type)) return;
   const row = {
     ...data,
     event_type: event.type,
@@ -3319,6 +3468,7 @@ function renderNoaaTable() {
     .filter(noaaEventMatchesSearch)
     .sort(compareNoaaEvents);
   renderSchemaTable("noaa-events", events, "noaaEvents", {preserveOrder: true});
+  updateTabCounts();
 }
 
 function compareNoaaEvents(left, right) {
@@ -3344,6 +3494,18 @@ function noaaEventMatchesSearch(item) {
     item.certainty,
     item.status,
     item.area_desc,
+    item.nhc_system,
+    item.nhc_storm_id,
+    item.nhc_advisory_number,
+    compactList(item.nhc_product_types || [], 8),
+    compactList(item.nhc_product_titles || [], 8),
+    item.incident_id,
+    item.tsunami_identifier,
+    item.tsunami_category,
+    item.message_number,
+    item.magnitude,
+    item.depth_km,
+    item.product_code,
     noaaForecastText(item),
     noaaTimingText(item),
     item.source
@@ -3377,8 +3539,26 @@ function noaaSubjectLink(item) {
 function noaaSubjectKey(item) {
   const eventType = String((item || {}).event_type || "").trim();
   const source = String((item || {}).source || "").trim();
+  const alertKind = String((item || {}).alert_kind || "").trim();
+  if (eventType === "noaa_tsunami_alert" || alertKind === "tsunami" || ["NTWC", "PTWC"].includes(source.toUpperCase())) {
+    const eventId = String((item || {}).event_id || "").trim();
+    if (eventId.toLowerCase().startsWith("tsunami:")) return noaaKeyFragment(eventId);
+    const feedSource = noaaKeyFragment(source || "tsunami");
+    const incident = noaaKeyFragment(
+      (item || {}).incident_id ||
+      (item || {}).tsunami_identifier ||
+      (item || {}).source_event_id ||
+      eventId ||
+      (item || {}).source_url ||
+      (item || {}).headline ||
+      "tsunami"
+    );
+    return `tsunami:${feedSource}:${incident}`;
+  }
   if (eventType === "noaa_tropical_advisory" || source === "NHC") {
     const basin = noaaKeyFragment((item || {}).basin || (item || {}).area_desc || "global");
+    const packageKey = noaaKeyFragment((item || {}).nhc_package_key || "");
+    if (packageKey) return `nhc:${basin}:${packageKey}`;
     const event = noaaKeyFragment(
       (item || {}).event ||
       (item || {}).headline ||
@@ -3406,9 +3586,44 @@ function noaaKeyFragment(value) {
     .replace(/^-+|-+$/g, "");
 }
 
+function noaaProductsText(item) {
+  const count = Number((item || {}).nhc_product_count || 0);
+  const types = compactList((item || {}).nhc_product_types || [], 8);
+  if (count && types) return `${count} product(s): ${types}`;
+  return types;
+}
+
+function noaaProductLinksNode(item) {
+  const products = Array.isArray((item || {}).nhc_products)
+    ? (item || {}).nhc_products
+    : [];
+  const urls = Array.isArray((item || {}).nhc_product_urls)
+    ? (item || {}).nhc_product_urls
+    : [];
+  const entries = products.length
+    ? products.map((product) => ({
+        label: product.product_type || product.title || product.source_url || "Product",
+        url: product.source_url || ""
+      }))
+    : urls.map((url, index) => ({label: `Product ${index + 1}`, url}));
+  const filtered = entries.filter((entry) => /^https?:\/\//i.test(String(entry.url || "")));
+  if (!filtered.length) return "";
+  const span = document.createElement("span");
+  const labels = [];
+  filtered.forEach((entry, index) => {
+    if (index) span.appendChild(document.createTextNode("; "));
+    const link = externalLink(entry.label, entry.url);
+    if (link && link.node instanceof Node) span.appendChild(link.node);
+    else span.appendChild(document.createTextNode(String(entry.label || entry.url || "")));
+    labels.push(`${entry.label} ${entry.url}`.trim());
+  });
+  return {node: span, text: labels.join("; ")};
+}
+
 function noaaTimingText(item) {
   const isForecast = (item || {}).alert_kind === "forecast";
   return [
+    (item || {}).alert_kind === "tsunami" ? noaaTsunamiText(item) : "",
     !isForecast && item.effective ? `effective ${displayTimestamp(item, "effective")}` : "",
     item.onset ? `onset ${displayTimestamp(item, "onset")}` : "",
     item.first_period_start ? `from ${displayTimestamp(item, "first_period_start")}` : "",
@@ -3436,6 +3651,19 @@ function noaaForecastText(item) {
   }
   const wind = numericEvidence(item.max_wind_mph);
   if (wind !== null) parts.push(`wind ${wind.toFixed(0)} mph`);
+  return parts.join("; ");
+}
+
+function noaaTsunamiText(item) {
+  const parts = [];
+  if (item.message_number) parts.push(`message ${item.message_number}`);
+  const magnitude = numericEvidence(item.magnitude);
+  if (magnitude !== null) {
+    parts.push(`M${magnitude.toFixed(1)}${item.magnitude_type ? ` ${item.magnitude_type}` : ""}`);
+  }
+  const depth = numericEvidence(item.depth_km);
+  if (depth !== null) parts.push(`depth ${depth.toFixed(1)} km`);
+  if (item.tsunami_category) parts.push(item.tsunami_category);
   return parts.join("; ");
 }
 
@@ -3489,6 +3717,7 @@ function renderUsgsTable() {
     .filter(usgsEventMatchesSearch)
     .sort(compareUsgsEvents);
   renderSchemaTable("usgs-events", events, "usgsEvents", {preserveOrder: true});
+  updateTabCounts();
 }
 
 function compareUsgsEvents(left, right) {
@@ -3504,6 +3733,9 @@ function usgsEventMatchesSearch(item) {
     item.event_id,
     item.magnitude,
     item.place,
+    item.feed,
+    item.scope,
+    item.feed_label,
     item.distance_km,
     item.depth_km,
     item.alert_color,
@@ -3516,7 +3748,7 @@ function usgsEventMatchesSearch(item) {
 function usgsStatusDetail(data) {
   return [
     data.source || "USGS",
-    data.url || "",
+    data.feed_summary || data.url || "",
     data.internet_fed ? "internet-fed" : ""
   ].filter(Boolean).join(" | ");
 }
@@ -3530,6 +3762,15 @@ function usgsSubjectLink(item) {
 function usgsMagnitudeText(item) {
   const value = Number((item || {}).magnitude);
   return Number.isFinite(value) ? `M${value.toFixed(1)}` : "";
+}
+
+function usgsScopeText(item) {
+  if ((item || {}).global_major) return "global major";
+  const label = String((item || {}).feed_label || "").trim();
+  if (label) return label;
+  const scope = String((item || {}).scope || "").trim();
+  if (scope) return scope;
+  return String((item || {}).feed || "").trim();
 }
 
 function usgsDistanceText(item) {
@@ -3587,6 +3828,7 @@ function renderSwpcTable() {
     .filter(swpcEventMatchesSearch)
     .sort(compareSwpcEvents);
   renderSchemaTable("swpc-events", events, "swpcEvents", {preserveOrder: true});
+  updateTabCounts();
 }
 
 function compareSwpcEvents(left, right) {
@@ -3746,6 +3988,7 @@ function pwsLiveEventKey(item) {
 function renderPwsTable() {
   const events = rows.pws.filter(pwsEventMatchesSearch);
   renderSchemaTable("pws-events", events, "pwsEvents", {preserveOrder: true});
+  updateTabCounts();
 }
 
 function pwsEventMatchesSearch(item) {
@@ -3915,20 +4158,45 @@ function renderLanEvent(event) {
     return;
   }
   if (!["lan_device_seen", "lan_device_changed", "lan_gateway_seen", "lan_gateway_changed"].includes(event.type)) return;
-  rows.lan.unshift({
+  upsertLanRow({
     ...data,
     event_type: event.type,
     last_seen: event.timestamp,
     last_seen_epoch: event.timestamp_epoch
   });
-  rows.lan = rows.lan.slice(0, uiNumber("max_live_rows"));
   scheduleLiveRender("lan", renderLanTable);
   maybeRefreshEmptyDerivedViews("LAN observation");
+}
+
+function renderLanSnapshot(items) {
+  rows.lan = Array.isArray(items) ? items.slice(0, uiNumber("max_live_rows")) : [];
+  scheduleLiveRender("lan", renderLanTable);
+}
+
+function lanLiveRowKey(item) {
+  const value =
+    (item || {}).subject_key ||
+    (item || {}).mac ||
+    (item || {}).ip ||
+    (item || {}).gateway_ip ||
+    "";
+  return String(value).trim().toLowerCase();
+}
+
+function upsertLanRow(row) {
+  const key = lanLiveRowKey(row);
+  if (key) {
+    rows.lan = rows.lan.filter((item) => lanLiveRowKey(item) !== key);
+  }
+  rows.lan.unshift(row);
+  rows.lan = rows.lan.slice(0, uiNumber("max_live_rows"));
 }
 
 function renderLanTable() {
   const events = rows.lan.filter(lanEventMatchesSearch);
   renderSchemaTable("lan-events", events, "lanEvents", {preserveOrder: true});
+  renderLanIdentifyTable();
+  updateTabCounts();
 }
 
 function lanEventMatchesSearch(item) {
@@ -3948,8 +4216,15 @@ function lanEventMatchesSearch(item) {
     item.state,
     (item.states || []).join(" "),
     (item.sources || []).join(" "),
+    (item.mac_aliases || []).join(" "),
+    (item.services || []).join(" "),
+    (item.locations || []).join(" "),
+    (item.servers || []).join(" "),
+    (item.messages || []).join(" "),
     item.gateway_ip,
+    (item.gateway_ips || []).join(" "),
     item.family,
+    (item.families || []).join(" "),
     item.change_type
   ], lanSearch);
 }
@@ -3963,26 +4238,127 @@ function lanSubjectLink(item) {
   return key ? detailLink(label, "lan-subject", key) : label;
 }
 
+function lanIdentifyTarget(item) {
+  const ips = (item && Array.isArray(item.ips)) ? item.ips : [];
+  return String((ips[0] || (item || {}).ip || (item || {}).gateway_ip || "")).trim();
+}
+
+function lanIdentifyTargetText(item) {
+  const direct = String((item || {}).target || (item || {}).ip || "").trim();
+  if (direct) return direct;
+  const subjectKey = String((item || {}).subject_key || "").trim();
+  const ipMatch = subjectKey.match(/^ip:(.+)$/);
+  return ipMatch ? ipMatch[1] : subjectKey;
+}
+
+function lanIdentifyButton(item) {
+  const target = lanIdentifyTarget(item);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Identify";
+  button.disabled = !target;
+  button.title = target ? `Run LAN Identify for ${target}` : "LAN Identify needs an IP address";
+  button.addEventListener("click", () => identifyLanTarget(item));
+  return button;
+}
+
+function identifyLanTarget(item) {
+  const target = lanIdentifyTarget(item);
+  if (!target) {
+    setTransientCollectorBanner("lan_identify", "identify_failed", "Missing LAN IP address");
+    return;
+  }
+  setTransientCollectorBanner("lan_identify", "IDENTIFYING", `Identifying ${target}`, 5000);
+  fetch("/lan_identify", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      target,
+      mac: (item || {}).mac || "",
+      subject_key: (item || {}).subject_key || ""
+    })
+  }).then((response) => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }).catch((error) => {
+    setTransientCollectorBanner("lan_identify", "identify_failed", `Identify request failed: ${error}`);
+  });
+}
+
+function renderLanIdentifyEvent(event) {
+  const data = event.data || {};
+  if (event.type === "identify_started") {
+    setTransientCollectorBanner("lan_identify", "IDENTIFYING", `${data.target || data.ip} via ${data.tools || "tools"}`, 5000);
+    return;
+  }
+  if (event.type === "collector_offline") {
+    setTransientCollectorBanner("lan_identify", event.type, data.reason || "LAN Identify unavailable");
+    return;
+  }
+  if (event.type !== "identify_result" && event.type !== "identify_failed") return;
+  const label = event.type === "identify_result" ? "identified" : (data.reason || "failed");
+  setTransientCollectorBanner("lan_identify", event.type, `${data.target || data.ip || "target"}: ${label}`);
+  rows.lanIdentify.unshift({
+    ...data,
+    event_type: event.type,
+    timestamp: event.timestamp,
+    timestamp_epoch: event.timestamp_epoch
+  });
+  rows.lanIdentify = rows.lanIdentify.slice(0, uiNumber("max_live_rows"));
+  renderLanIdentifyTable();
+  updateTabCounts();
+  if (event.type === "identify_result") {
+    maybeRefreshEmptyDerivedViews("LAN identify");
+  }
+}
+
+function renderLanIdentifyTable() {
+  const events = rows.lanIdentify.filter(lanIdentifyMatchesSearch);
+  renderSchemaTable("lan-identify-results", events, "lanIdentifyResults", {preserveOrder: true});
+}
+
+function lanIdentifyMatchesSearch(item) {
+  return rowMatchesSearch([
+    item.timestamp,
+    item.target,
+    item.ip,
+    item.mac,
+    (item.open_ports || []).join(" "),
+    (item.service_banners || []).join(" "),
+    (item.http_urls || []).join(" "),
+    (item.http_titles || []).join(" "),
+    (item.http_headers || []).join(" "),
+    (item.http_scripts || []).join(" "),
+    (item.http_hints || []).join(" "),
+    (item.identify_errors || []).join(" ")
+  ], lanSearch);
+}
+
 function lanIdentityText(item) {
   return [
     item.hostname || compactList(item.hostnames || [], 2),
-    item.vendor_name || item.vendor_prefix || ""
+    compactList(item.services || [], 2)
   ].filter(Boolean).join("; ");
+}
+
+function lanVendorText(item) {
+  return (item || {}).vendor_name || (item || {}).vendor_prefix || "";
 }
 
 function lanInterfaceStateText(item) {
   return [
-    item.interface || compactList(item.interfaces || [], 2),
+    item.interface || compactList(item.interfaces || [], 3),
+    item.family || compactList(item.families || [], 2),
     item.state || compactList(item.states || [], 2)
   ].filter(Boolean).join("; ");
 }
 
 function lanGatewayText(item) {
-  if (item.gateway_ip) {
+  if (item.gateway_ip || (item.gateway_ips || []).length) {
     return [
-      item.family || "",
-      item.gateway_ip,
-      item.interface || "",
+      item.family || compactList(item.families || [], 2),
+      item.gateway_ip || compactList(item.gateway_ips || [], 3),
+      item.interface || compactList(item.interfaces || [], 3),
       item.mac || ""
     ].filter(Boolean).join("; ");
   }
@@ -4008,6 +4384,7 @@ function renderWifiTables() {
   renderSchemaTable("wifi-aps", aps, "wifiAccessPoints", {
     preserveOrder: true
   });
+  updateTabCounts();
 }
 
 function compareWifiAccessPoints(left, right) {
@@ -4166,6 +4543,7 @@ function renderDeviceHistory(history) {
     lanSubjectInterfaceState(item),
     lanSubjectActivity(item)
   ], historySearch);
+  updateTabCounts();
 }
 
 function updateDeviceHistoryStatus(history) {
@@ -4321,6 +4699,8 @@ function noaaSubjectSeverity(item) {
 function noaaSubjectTiming(item) {
   const data = subjectData(item);
   return [
+    data.alert_kind === "tsunami" ? noaaTsunamiText(data) : "",
+    data.event_time ? `event ${data.event_time}` : "",
     data.effective ? `effective ${data.effective}` : "",
     data.onset ? `onset ${data.onset}` : "",
     data.expires ? `expires ${data.expires}` : "",
@@ -4379,7 +4759,7 @@ function pwsSubjectSource(item) {
 function lanSubjectIpMac(item) {
   const data = subjectData(item);
   return [
-    compactList(data.ips || (data.ip ? [data.ip] : []), 3),
+    compactList(data.ips || data.gateway_ips || (data.ip ? [data.ip] : data.gateway_ip ? [data.gateway_ip] : []), 3),
     data.mac || ""
   ].filter(Boolean).join(" / ");
 }
@@ -4395,7 +4775,8 @@ function lanSubjectIdentity(item) {
 function lanSubjectInterfaceState(item) {
   const data = subjectData(item);
   return [
-    data.interface || compactList(data.interfaces || [], 2),
+    data.interface || compactList(data.interfaces || [], 3),
+    data.family || compactList(data.families || [], 2),
     data.state || compactList(data.states || [], 2)
   ].filter(Boolean).join("; ");
 }
@@ -4602,8 +4983,29 @@ function buildNoaaSubjectDetail(key) {
         ["Kind", data.alert_kind],
         ["Severity", subject ? noaaSubjectSeverity(subject) : noaaSeverityText(data)],
         ["Status", data.status],
-        ["Message Type", data.message_type]
+        ["Message Type", data.message_type],
+        ["NHC System", data.nhc_system],
+        ["Advisory", data.nhc_advisory_number],
+        ["Storm ID", data.nhc_storm_id]
       ]),
+      (noaaProductsText(data) || noaaProductLinksNode(data)) ? detailSection("NHC Products", [
+        ["Products", noaaProductsText(data)],
+        ["Product URLs", noaaProductLinksNode(data)]
+      ]) : null,
+      data.alert_kind === "tsunami" ? detailSection("Tsunami", [
+        ["Message", data.message_number],
+        ["Category", data.tsunami_category],
+        ["Magnitude", noaaTsunamiText(data)],
+        ["Depth", numericEvidence(data.depth_km) !== null ? `${numericEvidence(data.depth_km).toFixed(1)} km` : ""],
+        ["Event Time", data.event_time],
+        ["Incident", data.incident_id],
+        ["Identifier", data.tsunami_identifier],
+        ["Product Code", data.product_code],
+        ["CAP URL", data.cap_url],
+        ["JSON URL", data.json_url],
+        ["Resources", compactList(data.resource_urls || [], 8)],
+        ["Maps", compactList(data.map_urls || [], 4)]
+      ]) : null,
       detailSection("Area / Timing", [
         ["Area", data.area_desc],
         ["Coordinates", formatLatLon(data.latitude, data.longitude)],
@@ -4668,6 +5070,8 @@ function buildUsgsSubjectDetail(key) {
         ["Updates", data.update_count]
       ]),
       detailSection("Source", [
+        ["Feed", data.feed_label || data.feed],
+        ["Scope", usgsScopeText(data)],
         ["URL", data.detail_url],
         ["Internet-fed", data.internet_fed ? "yes" : ""]
       ]),
@@ -4772,17 +5176,21 @@ function buildLanSubjectDetail(key) {
       detailSection("Identity", [
         ["Type", subjectTypeLabel(subject)],
         ["MAC", data.mac],
-        ["IPs", compactList(data.ips || (data.ip ? [data.ip] : []), 8)],
+        ["IPs", compactList(data.ips || data.gateway_ips || (data.ip ? [data.ip] : data.gateway_ip ? [data.gateway_ip] : []), 8)],
         ["Hostnames", compactList(data.hostnames || (data.hostname ? [data.hostname] : []), 8)],
+        ["MAC Aliases", compactList(data.mac_aliases || [], 8)],
         ["Vendor", data.vendor_name || data.vendor_prefix],
         ["Gateway", data.gateway ? "yes" : ""]
       ]),
       detailSection("Network", [
         ["Interfaces", compactList(data.interfaces || (data.interface ? [data.interface] : []), 8)],
+        ["Families", compactList(data.families || (data.family ? [data.family] : []), 8)],
         ["States", compactList(data.states || (data.state ? [data.state] : []), 8)],
         ["Sources", compactList(data.sources || [], 8)],
-        ["Gateway IP", data.gateway_ip],
-        ["Family", data.family]
+        ["Services", compactList(data.services || [], 8)],
+        ["Locations", compactList(data.locations || [], 4)],
+        ["Servers", compactList(data.servers || [], 4)],
+        ["Gateway IPs", compactList(data.gateway_ips || (data.gateway_ip ? [data.gateway_ip] : []), 8)]
       ]),
       detailSection("Observed", [
         ["First Seen", subject.first_seen || data.first_seen],
@@ -5088,6 +5496,8 @@ function reportMatchesDetail(report, type, key) {
         ...evidence,
         event_type: evidence.alert_kind === "forecast"
           ? "noaa_forecast_summary"
+          : evidence.alert_kind === "tsunami"
+          ? "noaa_tsunami_alert"
           : evidence.alert_kind === "tropical" || evidence.alert_kind === "tropical_outlook"
           ? "noaa_tropical_advisory"
           : "noaa_weather_alert"
@@ -5112,6 +5522,7 @@ function reportMatchesDetail(report, type, key) {
     return String(evidence.subject_key || "").toLowerCase() === normalizedKey ||
       String(evidence.mac || "").toLowerCase() === normalizedKey ||
       String(evidence.gateway_ip || "").toLowerCase() === normalizedKey ||
+      (evidence.gateway_ips || []).some((item) => String(item || "").toLowerCase() === normalizedKey) ||
       String((report || {}).subject || "").toLowerCase().includes(normalizedKey);
   }
   return false;
@@ -5205,6 +5616,8 @@ function findNoaaHistorySubject(key) {
       String(subject.subject_id || "").toLowerCase() === normalized ||
       String(data.event_id || "").toLowerCase() === normalized ||
       String(data.source_event_id || "").toLowerCase() === normalized ||
+      String(data.incident_id || "").toLowerCase() === normalized ||
+      String(data.tsunami_identifier || "").toLowerCase() === normalized ||
       String(data.source_url || "").toLowerCase() === normalized ||
       String(data.headline || "").toLowerCase() === normalized;
   });
@@ -5251,7 +5664,8 @@ function findLanHistorySubject(key) {
       String(subject.subject_id || "").toLowerCase() === normalized ||
       String(data.subject_key || "").toLowerCase() === normalized ||
       String(data.mac || "").toLowerCase() === normalized ||
-      String(data.gateway_ip || "").toLowerCase() === normalized;
+      String(data.gateway_ip || "").toLowerCase() === normalized ||
+      (data.gateway_ips || []).some((item) => String(item || "").toLowerCase() === normalized);
   });
 }
 
@@ -5931,6 +6345,18 @@ function noaaReportEvidenceItems(evidence) {
     timeRangeText(evidence.first_seen, evidence.last_seen)
   ].filter(Boolean).join("; ");
   if (event) parts.push({label: "Event", value: event});
+  const packageInfo = [
+    evidence.nhc_system || "",
+    evidence.nhc_advisory_number ? `advisory ${evidence.nhc_advisory_number}` : "",
+    evidence.nhc_storm_id ? `storm ID ${evidence.nhc_storm_id}` : "",
+    evidence.nhc_product_count ? `${evidence.nhc_product_count} product(s)` : "",
+    evidence.nhc_product_types && evidence.nhc_product_types.length
+      ? compactList(evidence.nhc_product_types, 6)
+      : ""
+  ].filter(Boolean).join("; ");
+  if (packageInfo) parts.push({label: "Package", value: packageInfo});
+  const tsunami = noaaTsunamiEvidenceText(evidence);
+  if (tsunami) parts.push({label: "Tsunami", value: tsunami});
   const forecast = noaaForecastEvidenceText(evidence);
   if (forecast) parts.push({label: "Forecast", value: forecast});
   const isForecast = evidence.alert_kind === "forecast";
@@ -5958,6 +6384,21 @@ function noaaReportEvidenceItems(evidence) {
     });
   }
   return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function noaaTsunamiEvidenceText(data) {
+  if ((data || {}).alert_kind !== "tsunami") return "";
+  const magnitude = numericEvidence((data || {}).magnitude);
+  const depth = numericEvidence((data || {}).depth_km);
+  return [
+    data.message_number ? `message ${data.message_number}` : "",
+    data.tsunami_category || "",
+    magnitude !== null ? `M${magnitude.toFixed(1)}${data.magnitude_type ? ` ${data.magnitude_type}` : ""}` : "",
+    depth !== null ? `depth ${depth.toFixed(1)} km` : "",
+    formatLatLon(data.latitude, data.longitude),
+    data.event_time ? `event ${data.event_time}` : "",
+    data.incident_id ? `incident ${data.incident_id}` : ""
+  ].filter(Boolean).join("; ");
 }
 
 function noaaForecastEvidenceText(data) {
@@ -6022,6 +6463,7 @@ function noaaPopulationReportEvidenceItems(evidence) {
   if (findings) parts.push({label: "Findings", value: findings});
   const event = [
     evidence.event_count ? `${evidence.event_count} subject(s)` : "",
+    evidence.product_count ? `${evidence.product_count} product(s)` : "",
     evidence.events && evidence.events.length ? compactList(evidence.events, 5) : "",
     evidence.update_count ? `${evidence.update_count} update(s)` : ""
   ].filter(Boolean).join("; ");
@@ -6048,6 +6490,9 @@ function usgsReportEvidenceItems(evidence) {
     evidence.event_time ? `time ${evidence.event_time}` : "",
     updateEvidenceText(evidence.updated, evidence.update_count),
     timeRangeText(evidence.first_seen, evidence.last_seen),
+    evidence.feed_label || evidence.feed || "",
+    evidence.scope ? `scope ${evidence.scope}` : "",
+    evidence.global_major ? "global major" : "",
     evidence.status || ""
   ].filter(Boolean).join("; ");
   if (event) parts.push({label: "Event", value: event});
@@ -6240,13 +6685,21 @@ function lanReportEvidenceItems(evidence) {
   ].filter(Boolean).join("; ");
   if (identity) parts.push({label: "Identity", value: identity});
   const network = [
-    evidence.gateway_ip ? `gateway ${evidence.gateway_ip}` : "",
-    evidence.family || "",
+    evidence.gateway_ip || (evidence.gateway_ips && evidence.gateway_ips.length)
+      ? `gateway ${evidence.gateway_ip || compactList(evidence.gateway_ips, 4)}`
+      : "",
+    evidence.family || (evidence.families && evidence.families.length ? compactList(evidence.families, 3) : ""),
     evidence.interface || (evidence.interfaces && evidence.interfaces.length ? `iface ${compactList(evidence.interfaces, 3)}` : ""),
     evidence.states && evidence.states.length ? `state ${compactList(evidence.states, 3)}` : "",
-    evidence.sources && evidence.sources.length ? `source ${compactList(evidence.sources, 3)}` : ""
+    evidence.sources && evidence.sources.length ? `source ${compactList(evidence.sources, 3)}` : "",
+    evidence.services && evidence.services.length ? `service ${compactList(evidence.services, 3)}` : ""
   ].filter(Boolean).join("; ");
   if (network) parts.push({label: "Network", value: network});
+  const service = [
+    evidence.locations && evidence.locations.length ? `location ${compactList(evidence.locations, 2)}` : "",
+    evidence.servers && evidence.servers.length ? `server ${compactList(evidence.servers, 2)}` : ""
+  ].filter(Boolean).join("; ");
+  if (service) parts.push({label: "Services", value: service});
   const activity = [
     evidence.observation_count ? `${evidence.observation_count} observation(s)` : "",
     evidence.change_count ? `${evidence.change_count} change(s)` : "",
@@ -6272,6 +6725,7 @@ function lanPopulationReportEvidenceItems(evidence) {
   if (activity) parts.push({label: "Activity", value: activity});
   const scope = [
     evidence.vendors && evidence.vendors.length ? `vendors ${compactList(evidence.vendors, 5)}` : "",
+    evidence.services && evidence.services.length ? `services ${compactList(evidence.services, 5)}` : "",
     evidence.interfaces && evidence.interfaces.length ? `interfaces ${compactList(evidence.interfaces, 5)}` : ""
   ].filter(Boolean).join("; ");
   if (scope) parts.push({label: "Scope", value: scope});
@@ -6576,6 +7030,7 @@ function wifiApMatchesSearch(item) {
 function renderCollectorHealth(statuses) {
   latestCollectorStatuses = statuses || [];
   renderCollectorTabStatusDots();
+  updateTabCounts();
   const tbody = document.getElementById("collector-health");
   tbody.innerHTML = "";
   latestCollectorStatuses.forEach((item) => {
@@ -6770,7 +7225,9 @@ function bannerClassForState(state) {
 function renderSystemStatus(status) {
   if (!status) return;
   latestSystemStatus = status;
+  updateBrowserTitle();
   if (latestCollectorStatuses.length) renderCollectorHealth(latestCollectorStatuses);
+  else updateTabCounts();
 }
 
 function hardwareSummary(item) {

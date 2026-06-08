@@ -174,6 +174,8 @@ DEFAULT_CONFIG = {
             "critical_level": "critical",
             "warning_magnitude_nearby": 4.0,
             "critical_magnitude_nearby": 5.0,
+            "warning_magnitude_global": 6.5,
+            "critical_magnitude_global": 7.5,
             "nearby_radius_km": 100,
             "critical_alert_colors": ["orange", "red"],
         },

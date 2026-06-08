@@ -33,6 +33,11 @@ findings:
   rssi_change_db: 12
   return_after_sec: 300
   lost_after_sec: 300
+  # BLE randomization can create thousands of manufacturer-only MAC rows.
+  # Keep per-device live Findings only when the device has a useful name by
+  # default; Subject History still retains the raw BLE subjects.
+  ble_live_identity_required: true
+  ble_live_service_identity: false
   burst_window_sec: 30
   burst_count: 5
   cooldown_sec: 120
@@ -165,6 +170,8 @@ alerts:
     critical_level: critical
     warning_magnitude_nearby: 4.0
     critical_magnitude_nearby: 5.0
+    warning_magnitude_global: 6.5
+    critical_magnitude_global: 7.5
     nearby_radius_km: 100
     critical_alert_colors:
     - orange
@@ -206,6 +213,9 @@ history_analysis:
   ble_lost_count: 3
   ble_recurring_min_sessions: 3
   ble_recurring_window_min: 30
+  ble_ignore_stale_single_seen_sec: 3600
+  ble_population_min_count: 10
+  ble_population_min_strong_count: 3
   recent_activity_window_sec: 1800
   insights_recent_hours: 6
   wifi_short_lived_sec: 900

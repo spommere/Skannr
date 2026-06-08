@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from .bus import local_now
 from .collectors.aprsis import clean_aprs_data
 from .collectors.lan import clean_lan_data
-from .collectors.noaa import clean_noaa_data
+from .collectors.noaa import clean_noaa_data, tsunami_is_alertworthy
 from .collectors.pws import clean_pws_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
 from .collectors.swpc import (
@@ -1018,7 +1018,7 @@ class ReportsBuilder:
         return first or last
 
     def noaa_reports(self, events, timestamp):
-        """Return NOAA/NWS/NHC report rows."""
+        """Return NOAA/NWS/NHC/tsunami.gov report rows."""
         reports = []
         alert_entries = []
         for event in events or []:
@@ -1068,13 +1068,18 @@ class ReportsBuilder:
         datasets = [data for data, _event in entries or []]
         first_seen, last_seen, last_seen_epoch = self.population_time_range(entries)
         event_count = len(datasets)
+        product_count = sum(
+            self.to_int(data.get("nhc_product_count")) or 1
+            for data in datasets
+        )
         basins = self.population_values(datasets, "basin")
         products = self.population_values(datasets, "event", limit=8)
         sources = self.population_values(datasets, "source")
         update_count = sum(self.to_int(data.get("update_count")) for data in datasets)
         findings = ["Tropical cyclone product set"]
         summary_parts = [
-            "{} tropical product(s)".format(event_count),
+            "{} tropical advisory package(s)".format(event_count),
+            "{} product(s)".format(product_count) if product_count != event_count else "",
             "basins {}".format(", ".join(basins)) if basins else "",
             "sources {}".format(", ".join(sources)) if sources else "",
         ]
@@ -1083,6 +1088,7 @@ class ReportsBuilder:
                 "findings": findings,
                 "population_kind": "noaa_tropical",
                 "event_count": event_count,
+                "product_count": product_count,
                 "events": products,
                 "basins": basins,
                 "sources": sources,
@@ -1217,6 +1223,14 @@ class ReportsBuilder:
                 "message_type": data.get("message_type") or "",
                 "alert_kind": data.get("alert_kind") or "",
                 "area_desc": data.get("area_desc") or "",
+                "basin": data.get("basin") or "",
+                "nhc_system": data.get("nhc_system") or "",
+                "nhc_storm_id": data.get("nhc_storm_id") or "",
+                "nhc_advisory_number": data.get("nhc_advisory_number") or "",
+                "nhc_package_key": data.get("nhc_package_key") or "",
+                "nhc_product_count": data.get("nhc_product_count"),
+                "nhc_product_types": data.get("nhc_product_types") or [],
+                "nhc_product_urls": data.get("nhc_product_urls") or [],
                 "effective": data.get("effective") or "",
                 "onset": data.get("onset") or "",
                 "expires": data.get("expires") or "",
@@ -1224,6 +1238,19 @@ class ReportsBuilder:
                 "updated": data.get("updated") or "",
                 "source": data.get("source") or "",
                 "source_url": data.get("source_url") or "",
+                "cap_url": data.get("cap_url") or "",
+                "json_url": data.get("json_url") or "",
+                "tsunami_identifier": data.get("tsunami_identifier") or "",
+                "incident_id": data.get("incident_id") or "",
+                "tsunami_category": data.get("tsunami_category") or "",
+                "message_number": data.get("message_number") or "",
+                "event_time": data.get("event_time") or "",
+                "magnitude": data.get("magnitude"),
+                "magnitude_type": data.get("magnitude_type") or "",
+                "depth_km": data.get("depth_km"),
+                "product_code": data.get("product_code") or "",
+                "resource_urls": data.get("resource_urls") or [],
+                "map_urls": data.get("map_urls") or [],
                 "latitude": data.get("latitude"),
                 "longitude": data.get("longitude"),
                 "forecast_generated": data.get("forecast_generated") or "",
@@ -1276,7 +1303,9 @@ class ReportsBuilder:
         severity = data.get("severity") or ""
         event = data.get("event") or data.get("headline") or ""
         if kind == "tsunami":
-            findings.append("Tsunami hazard")
+            findings.append(
+                "Tsunami hazard" if tsunami_is_alertworthy(data) else "Tsunami information"
+            )
         elif kind == "tropical":
             findings.append("Tropical cyclone advisory")
         elif kind == "tropical_outlook":
@@ -1339,7 +1368,7 @@ class ReportsBuilder:
         if data.get("alert_kind") == "forecast":
             return "NOAA point forecast"
         if data.get("alert_kind") == "tsunami":
-            return "NOAA tsunami alert"
+            return "NOAA tsunami alert" if tsunami_is_alertworthy(data) else "NOAA tsunami information"
         return "NOAA weather alert"
 
     def noaa_summary_text(self, data):
@@ -1347,6 +1376,15 @@ class ReportsBuilder:
         parts = [
             data.get("severity") or "",
             data.get("area_desc") or "",
+            data.get("magnitude")
+            and data.get("alert_kind") == "tsunami"
+            and "M{:.1f}".format(float(data.get("magnitude"))),
+            data.get("depth_km")
+            and data.get("alert_kind") == "tsunami"
+            and "depth {:.1f} km".format(float(data.get("depth_km"))),
+            data.get("message_number")
+            and data.get("alert_kind") == "tsunami"
+            and "message {}".format(data.get("message_number")),
             data.get("headline")
             if data.get("alert_kind") == "forecast"
             else "",
@@ -1518,6 +1556,10 @@ class ReportsBuilder:
                 "event_time": data.get("event_time") or "",
                 "updated": data.get("updated") or "",
                 "status": data.get("status") or "",
+                "feed": data.get("feed") or "",
+                "scope": data.get("scope") or "",
+                "feed_label": data.get("feed_label") or "",
+                "global_major": data.get("global_major"),
                 "felt": data.get("felt"),
                 "cdi": data.get("cdi"),
                 "mmi": data.get("mmi"),
@@ -1547,7 +1589,10 @@ class ReportsBuilder:
 
     def usgs_findings(self, data):
         """Return deterministic USGS report findings."""
-        findings = ["Earthquake in configured query area"]
+        if data.get("global_major") or "global" in str(data.get("scope") or ""):
+            findings = ["Global major earthquake"]
+        else:
+            findings = ["Earthquake in configured query area"]
         magnitude = self.to_number(data.get("magnitude")) or 0
         distance = self.to_number(data.get("distance_km"))
         if distance is not None and distance <= float(
@@ -1568,6 +1613,7 @@ class ReportsBuilder:
             str(item or "").startswith(
                 ("Nearby earthquake", "Notable magnitude", "Tsunami flag", "USGS alert color")
             )
+            or str(item or "") == "Global major earthquake"
             for item in findings or []
         )
 
@@ -1594,6 +1640,8 @@ class ReportsBuilder:
         distance = self.to_number(data.get("distance_km"))
         if distance is not None:
             parts.append("{:.1f} km from configured point".format(distance))
+        if data.get("global_major") or "global" in str(data.get("scope") or ""):
+            parts.append("global major feed")
         if data.get("depth_km") is not None:
             parts.append("depth {} km".format(data.get("depth_km")))
         if data.get("event_time"):
@@ -2318,6 +2366,14 @@ class ReportsBuilder:
         gateway_count = len(gateways or [])
         changed = sum(1 for data in datasets if self.to_int(data.get("change_count")))
         vendors = self.population_values(datasets, "vendor_name", limit=8)
+        services = sorted(
+            set(
+                value
+                for data in datasets
+                for value in self.list_values(data.get("services"))
+                if value
+            )
+        )[:8]
         interfaces = sorted(
             set(
                 value
@@ -2344,6 +2400,7 @@ class ReportsBuilder:
                 "gateway_count": gateway_count,
                 "changed_count": changed,
                 "vendors": vendors,
+                "services": services,
                 "interfaces": interfaces,
                 "first_seen": first_seen,
                 "last_seen": last_seen,
@@ -2415,8 +2472,11 @@ class ReportsBuilder:
                 "findings": findings,
                 "subject_key": data.get("subject_key") or "",
                 "gateway_ip": data.get("gateway_ip") or "",
+                "gateway_ips": data.get("gateway_ips") or [],
                 "family": data.get("family") or "",
+                "families": data.get("families") or [],
                 "interface": data.get("interface") or "",
+                "interfaces": data.get("interfaces") or [],
                 "mac": data.get("mac") or "",
                 "vendor": data.get("vendor_name") or data.get("vendor_prefix") or "",
                 "change_count": data.get("change_count") or 0,
@@ -2454,6 +2514,8 @@ class ReportsBuilder:
             findings.append("Gateway device")
         if self.to_int(data.get("change_count")):
             findings.append("LAN identity changed")
+        if self.to_int(data.get("identify_count")):
+            findings.append("LAN Identify enrichment")
         evidence = self.clean_evidence(
             {
                 "findings": findings,
@@ -2464,15 +2526,27 @@ class ReportsBuilder:
                 "interfaces": data.get("interfaces") or [],
                 "states": data.get("states") or [],
                 "sources": data.get("sources") or [],
+                "mac_aliases": data.get("mac_aliases") or [],
+                "services": data.get("services") or [],
+                "locations": data.get("locations") or [],
+                "servers": data.get("servers") or [],
+                "open_ports": data.get("open_ports") or [],
+                "http_titles": data.get("http_titles") or [],
+                "http_scripts": data.get("http_scripts") or [],
+                "http_hints": data.get("http_hints") or [],
+                "service_banners": data.get("service_banners") or [],
                 "vendor": data.get("vendor_name") or data.get("vendor_prefix") or "",
                 "gateway": data.get("gateway"),
                 "gateways": data.get("gateways") or [],
                 "observation_count": data.get("observation_count") or 0,
+                "identify_count": data.get("identify_count") or 0,
                 "change_count": data.get("change_count") or 0,
                 "first_seen": data.get("first_seen") or "",
                 "first_seen_epoch": data.get("first_seen_epoch"),
                 "last_seen": last_seen,
                 "last_seen_epoch": last_seen_epoch,
+                "last_identified": data.get("last_identified") or "",
+                "last_identified_epoch": data.get("last_identified_epoch"),
             }
         )
         score = 45 + min(self.to_int(data.get("observation_count")), 15)
@@ -2496,8 +2570,12 @@ class ReportsBuilder:
     def lan_gateway_summary_text(self, data, findings):
         """Return compact LAN gateway summary."""
         parts = [
-            data.get("family") or "",
-            data.get("interface") and "via {}".format(data.get("interface")),
+            ", ".join(data.get("families") or []) or data.get("family") or "",
+            (
+                "via {}".format(", ".join(data.get("interfaces") or []))
+                if data.get("interfaces")
+                else data.get("interface") and "via {}".format(data.get("interface"))
+            ),
             data.get("vendor_name") or data.get("vendor_prefix") or "",
             "changed" if "Default gateway changed" in findings else "",
         ]
@@ -2508,15 +2586,25 @@ class ReportsBuilder:
         parts = [
             ", ".join(data.get("ips") or []),
             data.get("vendor_name") or data.get("vendor_prefix") or "",
+            "services {}".format(", ".join(data.get("services")[:3])) if data.get("services") else "",
+            "http {}".format(", ".join(data.get("http_titles")[:2])) if data.get("http_titles") else "",
+            "ports {}".format(", ".join(data.get("open_ports")[:3])) if data.get("open_ports") else "",
             "gateway" if data.get("gateway") else "",
             "{} observation(s)".format(data.get("observation_count") or 0),
+            "{} identify".format(data.get("identify_count")) if data.get("identify_count") else "",
             "changed" if "LAN identity changed" in findings else "",
         ]
         return "{}.".format("; ".join(str(part) for part in parts if part))
 
     def lan_gateway_subject(self, data):
         """Return LAN gateway report subject."""
-        return "LAN gateway {}".format(data.get("gateway_ip") or data.get("subject_key") or "")
+        return "LAN gateway {}".format(
+            data.get("mac")
+            or data.get("gateway_ip")
+            or ", ".join(data.get("gateway_ips") or [])
+            or data.get("subject_key")
+            or ""
+        )
 
     def lan_device_subject(self, data):
         """Return LAN device report subject."""

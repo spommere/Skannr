@@ -27,6 +27,8 @@ DEFAULT_ANALYSIS_CONFIG = {
     "ble_recurring_min_sessions": 3,
     "ble_recurring_window_min": 30,
     "ble_ignore_stale_single_seen_sec": 3600,
+    "ble_population_min_count": 10,
+    "ble_population_min_strong_count": 3,
     "recent_activity_window_sec": 1800,
     "wifi_short_lived_sec": 900,
     "sensitive_ssids": [],
@@ -472,21 +474,38 @@ class HistoryAnalyzer:
         return observations
 
     def analyze_ble_devices(self, devices, timestamp):
-        """Look for BLE devices that are strong, lingering, or repeatedly lost."""
+        """Look for recent BLE patterns without flooding on randomized MACs."""
         observations = []
+        recent_devices = [
+            device
+            for device in devices
+            if self.device_seen_within(
+                device, float(self.config.get("recent_activity_window_sec", 1800))
+            )
+        ]
+        population = self.ble_population_observation(recent_devices, timestamp)
+        if population:
+            observations.append(population)
         for device in devices:
             # Bluetooth history merges BLE, BLE Identify, and Classic transport
             # observations when they share an address.
             if self.low_value_stale_ble_device(device):
                 continue
+            recent = self.device_seen_within(
+                device, float(self.config.get("recent_activity_window_sec", 1800))
+            )
+            worthy = self.ble_individual_insight_worthy(device)
             mac = device.get("mac") or "unknown"
             name = ", ".join(self.list_values(device.get("names"))) or mac
             evidence = self.ble_evidence(device, mac)
             transports = self.list_values(device.get("transports"))
             source = "bt_classic" if transports == ["classic"] else "ble"
             signal_max = self.to_number(device.get("signal_max"))
-            if signal_max is not None and signal_max >= float(
-                self.config["strong_ble_rssi"]
+            if (
+                recent
+                and worthy
+                and signal_max is not None
+                and signal_max >= float(self.config["strong_ble_rssi"])
             ):
                 observations.append(
                     self.observation(
@@ -503,7 +522,11 @@ class HistoryAnalyzer:
                     )
                 )
             duration = self.record_duration_seconds(device)
-            if duration >= float(self.config["ble_linger_sec"]):
+            if (
+                recent
+                and worthy
+                and duration >= float(self.config["ble_linger_sec"])
+            ):
                 observations.append(
                     self.observation(
                         timestamp,
@@ -525,8 +548,11 @@ class HistoryAnalyzer:
                         40,
                     )
                 )
-            if int(device.get("lost_count") or 0) >= int(
-                self.config["ble_lost_count"]
+            if (
+                recent
+                and worthy
+                and int(device.get("lost_count") or 0)
+                >= int(self.config["ble_lost_count"])
             ):
                 observations.append(
                     self.observation(
@@ -545,7 +571,7 @@ class HistoryAnalyzer:
                     )
                 )
             pattern = self.ble_presence_pattern(device)
-            if pattern:
+            if pattern and worthy:
                 # This is the deterministic "comes around at about the same
                 # time" rule. It is based on closed sessions, not live sightings.
                 observations.append(
@@ -563,6 +589,132 @@ class HistoryAnalyzer:
                     )
                 )
         return observations
+
+    def ble_population_observation(self, devices, timestamp):
+        """Return one recent BLE population Insight for anonymous/randomized churn."""
+        if not devices:
+            return None
+        strong_threshold = float(self.config["strong_ble_rssi"])
+        strong_devices = [
+            device
+            for device in devices
+            if self.to_number(device.get("signal_max")) is not None
+            and self.to_number(device.get("signal_max")) >= strong_threshold
+        ]
+        anonymous_devices = [
+            device for device in devices if not self.ble_individual_insight_worthy(device)
+        ]
+        anonymous_strong = [
+            device for device in strong_devices if not self.ble_individual_insight_worthy(device)
+        ]
+        min_count = int(self.config.get("ble_population_min_count", 10))
+        min_strong = int(self.config.get("ble_population_min_strong_count", 3))
+        if len(devices) < min_count and len(anonymous_strong) < min_strong:
+            return None
+        strongest = sorted(
+            strong_devices,
+            key=lambda item: self.to_number(item.get("signal_max")) or -999,
+            reverse=True,
+        )
+        latest = self.latest_record(devices)
+        latest_epoch = record_time_epoch(latest or {}, "last_seen")
+        manufacturers = self.top_ble_manufacturers(devices, limit=5)
+        strongest_signal = (
+            self.to_number(strongest[0].get("signal_max")) if strongest else None
+        )
+        window_min = int(
+            float(self.config.get("recent_activity_window_sec", 1800)) / 60
+        )
+        parts = [
+            "{} BLE device(s) seen in the last {} min".format(
+                len(devices), window_min
+            ),
+            "{} anonymous/randomized".format(len(anonymous_devices)),
+            "{} strong".format(len(strong_devices)),
+        ]
+        if strongest_signal is not None:
+            parts.append("strongest {} dBm".format(strongest_signal))
+        evidence = {
+            "device_count": len(devices),
+            "anonymous_count": len(anonymous_devices),
+            "strong_count": len(strong_devices),
+            "anonymous_strong_count": len(anonymous_strong),
+            "manufacturers": manufacturers,
+            "sample_macs": [
+                device.get("mac")
+                for device in strongest[:12]
+                if device.get("mac")
+            ],
+            "signal_max": strongest_signal,
+            "last_seen": (latest or {}).get("last_seen"),
+            "last_seen_epoch": latest_epoch,
+        }
+        severity = (
+            "warning"
+            if len(anonymous_strong) >= min_strong
+            or len(strong_devices) >= max(min_strong, 5)
+            else "info"
+        )
+        return self.observation(
+            timestamp,
+            severity,
+            "ble",
+            "ble_population_activity",
+            "Nearby BLE population",
+            "; ".join(parts) + ".",
+            evidence,
+            55 + min(len(strong_devices), 25) + min(len(anonymous_devices), 15),
+        )
+
+    def top_ble_manufacturers(self, devices, limit=5):
+        """Return compact manufacturer counts for BLE population Insights."""
+        counts = {}
+        for device in devices or []:
+            label = (
+                device.get("manufacturer")
+                or device.get("manufacturer_name")
+                or device.get("vendor_name")
+                or device.get("vendor_prefix")
+                or "unknown"
+            )
+            label = str(label or "").strip() or "unknown"
+            counts[label] = counts.get(label, 0) + 1
+        return [
+            "{} ({})".format(label, count)
+            for label, count in sorted(
+                counts.items(), key=lambda item: (-item[1], item[0])
+            )[:limit]
+        ]
+
+    def ble_individual_insight_worthy(self, device):
+        """Return true when a BLE subject has identity worth an individual row."""
+        if not isinstance(device, dict):
+            return False
+        transports = set(
+            value.lower() for value in self.list_values(device.get("transports"))
+        )
+        if "classic" in transports or "bt_classic" in transports:
+            return True
+        if self.meaningful_bluetooth_names(device):
+            return True
+        for field in (
+            "model_number",
+            "serial_number",
+            "firmware_revision",
+            "hardware_revision",
+            "software_revision",
+            "pnp_id",
+        ):
+            if device.get(field):
+                return True
+        return bool(self.list_values(device.get("service_uuids")))
+
+    def device_seen_within(self, record, max_age_sec):
+        """Return true when a subject was active inside a recent horizon."""
+        last_seen = record_time_epoch(record or {}, "last_seen")
+        if last_seen is None or self._generated_at_epoch is None:
+            return False
+        return self._generated_at_epoch - last_seen <= float(max_age_sec)
 
     def low_value_stale_ble_device(self, device):
         """Suppress old one-off anonymous BLE rows from short-horizon Insights."""
@@ -670,10 +822,19 @@ class HistoryAnalyzer:
     ):
         """Build one normalized observation row."""
         self._counter += 1
+        metadata = self.activity_metadata(obs_type, evidence, timestamp)
+        display_timestamp = metadata.get("last_seen") or timestamp
+        display_epoch = (
+            metadata.get("last_seen_epoch")
+            or self._generated_at_epoch
+            or self.to_epoch(timestamp)
+        )
         return {
-            "id": "{}-{}".format(timestamp, self._counter),
-            "timestamp": timestamp,
-            "timestamp_epoch": self._generated_at_epoch
+            "id": "{}-{}".format(display_timestamp, self._counter),
+            "timestamp": display_timestamp,
+            "timestamp_epoch": display_epoch,
+            "generated_at": timestamp,
+            "generated_at_epoch": self._generated_at_epoch
             or self.to_epoch(timestamp),
             "severity": severity,
             "source": source,
@@ -682,7 +843,7 @@ class HistoryAnalyzer:
             "detail": detail,
             "evidence": evidence,
             "score": score,
-            **self.activity_metadata(obs_type, evidence, timestamp),
+            **metadata,
         }
 
     def latest_record(self, records):

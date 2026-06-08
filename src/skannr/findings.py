@@ -12,7 +12,7 @@ from collections import deque
 from .bus import local_now
 from .collectors.aprsis import clean_aprs_data
 from .collectors.lan import clean_lan_data
-from .collectors.noaa import clean_noaa_data
+from .collectors.noaa import clean_noaa_data, tsunami_is_alertworthy
 from .collectors.pws import clean_pws_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
 from .collectors.swpc import clean_swpc_data, number_or_none, swpc_event_is_alert
@@ -30,6 +30,8 @@ DEFAULT_FINDINGS_CONFIG = {
     "rssi_change_db": 12,
     "return_after_sec": 300,
     "lost_after_sec": 300,
+    "ble_live_identity_required": True,
+    "ble_live_service_identity": False,
     "burst_window_sec": 30,
     "burst_count": 5,
     "cooldown_sec": 120,
@@ -78,6 +80,7 @@ class FindingsEngine:
         self.noaa_alerts = {}
         self.usgs_events = {}
         self.swpc_events = {}
+        self.rayhunter_endpoints = {}
         self.lan_devices = {}
         self.lan_gateways = {}
         self.pws_stations = {}
@@ -145,6 +148,12 @@ class FindingsEngine:
                 or ap.get("vendor_oui")
                 or "",
                 "vendor_name": ap.get("vendor_name") or "",
+                "strong_reported": self._is_strong(
+                    ap.get("signal_max")
+                    if ap.get("signal_max") is not None
+                    else ap.get("signal_latest"),
+                    self.config["strong_wifi_ap_rssi"],
+                ),
             }
         for client in wifi.get("clients") or []:
             mac = client.get("mac")
@@ -238,6 +247,10 @@ class FindingsEngine:
         elif collector == "lan":
             findings.extend(
                 self._process_lan(event_type, event, timestamp, emit)
+            )
+        elif collector == "lan_identify":
+            findings.extend(
+                self._process_lan_identify(event_type, event, timestamp, emit)
             )
         elif collector == "system":
             findings.extend(
@@ -446,18 +459,15 @@ class FindingsEngine:
         rssi = self._to_number(data.get("rssi"))
         previous = self.wifi_aps.get(bssid)
         # BSSID is the stable AP identity. SSID is descriptive and may be blank.
-        was_active = bool(previous and previous.get("active", True))
         was_strong = self._is_strong(
             previous.get("rssi") if previous else None,
             self.config["strong_wifi_ap_rssi"],
         )
+        strong_now = self._is_strong(rssi, self.config["strong_wifi_ap_rssi"])
+        strong_reported = bool(previous and previous.get("strong_reported"))
         title = "New Wi-Fi access point"
         finding_type = "wifi_ap_new"
         detail = "BSSID {}".format(bssid)
-        if previous and (not was_active or self._is_return(previous, now)):
-            title = "Wi-Fi access point returned"
-            finding_type = "wifi_ap_returned"
-            detail = "BSSID {} was seen again".format(bssid)
         if ssid:
             detail += " advertises SSID '{}'".format(ssid)
         if data.get("channel") is not None:
@@ -476,9 +486,10 @@ class FindingsEngine:
             or data.get("vendor_oui")
             or "",
             "vendor_name": data.get("vendor_name") or "",
+            "strong_reported": strong_reported or strong_now,
         }
 
-        if previous is None or not was_active or self._is_return(previous, now):
+        if previous is None:
             findings.extend(
                 self._finding_list(
                     timestamp,
@@ -493,10 +504,7 @@ class FindingsEngine:
                 )
             )
 
-        if (
-            self._is_strong(rssi, self.config["strong_wifi_ap_rssi"])
-            and not was_strong
-        ):
+        if strong_now and not was_strong and not strong_reported:
             findings.extend(
                 self._finding_list(
                     timestamp,
@@ -593,9 +601,13 @@ class FindingsEngine:
             "name": name,
             "rssi": rssi,
             "manufacturer": data.get("manufacturer") or "",
+            "service_uuids": data.get("service_uuids") or [],
         }
 
-        if previous is None or not was_active or self._is_return(previous, now):
+        if (
+            self.ble_live_finding_worthy(data)
+            and (previous is None or not was_active or self._is_return(previous, now))
+        ):
             findings.extend(
                 self._finding_list(
                     timestamp,
@@ -611,7 +623,8 @@ class FindingsEngine:
             )
 
         if (
-            self._is_strong(rssi, self.config["strong_ble_rssi"])
+            self.ble_live_finding_worthy(data, signal=True)
+            and self._is_strong(rssi, self.config["strong_ble_rssi"])
             and not was_strong
         ):
             findings.extend(
@@ -642,12 +655,17 @@ class FindingsEngine:
         current["rssi"] = new_rssi
         if data.get("manufacturer"):
             current["manufacturer"] = data.get("manufacturer")
+        if data.get("name"):
+            current["name"] = data.get("name")
+        if data.get("service_uuids"):
+            current["service_uuids"] = data.get("service_uuids")
         self.ble_devices[mac] = current
 
         if (
             old_rssi is None
             or new_rssi is None
             or abs(new_rssi - old_rssi) < float(self.config["rssi_change_db"])
+            or not self.ble_live_finding_worthy(current, signal=True)
         ):
             return []
 
@@ -671,6 +689,8 @@ class FindingsEngine:
         known = self.ble_devices.get(mac, {})
         known["active"] = False
         self.ble_devices[mac] = known
+        if not self.ble_live_finding_worthy(known):
+            return []
         label = known.get("name") or mac
         return self._finding_list(
             timestamp,
@@ -690,7 +710,20 @@ class FindingsEngine:
             "mac": mac,
             "name": name,
             "manufacturer": data.get("manufacturer") or "",
+            "service_uuids": data.get("service_uuids") or [],
         }
+
+    def ble_live_finding_worthy(self, data, signal=False):
+        """Return true when a BLE subject deserves an individual live Insight."""
+        if not self.config.get("ble_live_identity_required", True):
+            return True
+        name = str((data or {}).get("name") or "").strip()
+        mac = str((data or {}).get("mac") or "").strip().lower().replace("-", ":")
+        if name and name.lower().replace("-", ":") != mac:
+            return True
+        if self.config.get("ble_live_service_identity", False):
+            return bool((data or {}).get("service_uuids"))
+        return False
 
     def _process_ble_identify(self, event_type, event, timestamp, emit):
         """Turn active BLE identity attempts into searchable Insights."""
@@ -1106,7 +1139,16 @@ class FindingsEngine:
         warning_count = self._to_number(data.get("warning_count")) or 0
         endpoint = data.get("endpoint") or "default"
         attributes = self.rayhunter_attributes(data)
+        current = {
+            "warning_count": warning_count,
+            "latest_event": data.get("latest_event") or "",
+            "summary": clean_rayhunter_field(data.get("summary")),
+        }
+        previous = self.rayhunter_endpoints.get(endpoint) or {}
+        self.rayhunter_endpoints[endpoint] = current
         if warning_count <= 0:
+            if previous == current:
+                return []
             detail = clean_rayhunter_field(data.get("summary")) or (
                 "Rayhunter endpoint {} is reachable; 0 warnings".format(endpoint)
             )
@@ -1190,19 +1232,7 @@ class FindingsEngine:
             return []
         callsign = data.get("callsign") or "unknown"
         packet_type = data.get("packet_type") or event_type.replace("aprs_", "")
-        title = self.aprsis_finding_title(packet_type)
-        detail = self.aprsis_finding_detail(data, packet_type)
-        findings = self._finding_list(
-            timestamp,
-            "info",
-            "aprsis",
-            event_type,
-            title,
-            detail,
-            "aprsis:{}:{}".format(packet_type, callsign),
-            emit,
-            self.aprsis_attributes(data),
-        )
+        findings = []
         findings.extend(
             self.aprsis_pattern_findings(
                 data, packet_type, callsign, timestamp, now, emit
@@ -1480,7 +1510,7 @@ class FindingsEngine:
         }
 
     def _process_noaa(self, event_type, event, timestamp, emit):
-        """Turn NOAA/NWS/NHC feed changes into live Insights."""
+        """Turn NOAA/NWS/NHC/tsunami.gov feed changes into live Insights."""
         data = clean_noaa_data(event.get("data") or {})
         if event_type in ("collector_offline", "collector_retrying"):
             return self._collector_warning("noaa", event_type, data, timestamp, emit)
@@ -1488,20 +1518,28 @@ class FindingsEngine:
             "noaa_weather_alert",
             "noaa_tropical_advisory",
             "noaa_forecast_summary",
+            "noaa_tsunami_alert",
         ):
             return []
         event_id = data.get("event_id") or data.get("headline") or "unknown"
         previous = self.noaa_alerts.get(event_id) or {}
-        self.noaa_alerts[event_id] = {
+        current = {
             "severity": data.get("severity") or "",
             "status": data.get("status") or "",
             "headline": data.get("headline") or "",
+            "updated": data.get("updated") or "",
+            "event_time": data.get("event_time") or "",
         }
+        self.noaa_alerts[event_id] = current
+        if previous == current:
+            return []
         findings = []
         severity = "warning" if self.noaa_is_warning(data) else "info"
         title = (
             "NOAA tropical advisory"
             if event_type == "noaa_tropical_advisory"
+            else "NOAA tsunami alert"
+            if event_type == "noaa_tsunami_alert"
             else "NOAA forecast"
             if event_type == "noaa_forecast_summary"
             else "NOAA weather alert"
@@ -1554,10 +1592,12 @@ class FindingsEngine:
             return False
         if kind == "tropical_outlook":
             return False
+        if kind == "tsunami":
+            return tsunami_is_alertworthy(data)
         event = str((data or {}).get("event") or "").lower()
         return (
             severity in severities
-            or kind in ("tsunami", "tropical")
+            or kind == "tropical"
             or any(word in event for word in ("warning", "watch", "tornado"))
         )
 
@@ -1660,10 +1700,13 @@ class FindingsEngine:
             return []
         event_id = data.get("event_id") or "unknown"
         previous = self.usgs_events.get(event_id) or {}
-        self.usgs_events[event_id] = {
+        current = {
             "magnitude": self._to_number(data.get("magnitude")),
             "updated_epoch": data.get("updated_epoch"),
         }
+        self.usgs_events[event_id] = current
+        if previous == current:
+            return []
         findings = []
         severity = "warning" if self.usgs_is_warning(data) else "info"
         findings.extend(
@@ -1769,25 +1812,32 @@ class FindingsEngine:
             return []
         event_id = data.get("event_id") or data.get("summary") or "swpc"
         previous = self.swpc_events.get(event_id) or {}
-        self.swpc_events[event_id] = {
+        current = {
             "summary": data.get("summary") or "",
             "scale_label": data.get("scale_label") or "",
             "scale_value": data.get("scale_value"),
             "xray_class": data.get("xray_class") or "",
             "kp_index": data.get("kp_index"),
         }
+        self.swpc_events[event_id] = current
         severity = "warning" if self.swpc_is_warning(data) else "info"
-        findings = self._finding_list(
-            timestamp,
-            severity,
-            "swpc",
-            "swpc_event",
-            self.swpc_title(data),
-            self.swpc_detail(data),
-            "swpc-event:{}".format(event_id),
-            emit,
-            self.swpc_attributes(data),
-        )
+        findings = []
+        if not previous:
+            findings.extend(
+                self._finding_list(
+                    timestamp,
+                    severity,
+                    "swpc",
+                    "swpc_event",
+                    self.swpc_title(data),
+                    self.swpc_detail(data),
+                    "swpc-event:{}".format(event_id),
+                    emit,
+                    self.swpc_attributes(data),
+                )
+            )
+        elif not self.swpc_importance_changed(previous, data):
+            return []
         if previous and self.swpc_importance_changed(previous, data):
             findings.extend(
                 self._finding_list(
@@ -1902,17 +1952,7 @@ class FindingsEngine:
             return []
         station = data.get("station_id") or data.get("station_name") or "PWS"
         previous = self.pws_stations.get(station) or {}
-        findings = self._finding_list(
-            timestamp,
-            "info",
-            "pws",
-            "pws_weather",
-            "PWS weather sample",
-            self.pws_detail(data),
-            "pws-weather:{}".format(station),
-            emit,
-            self.pws_attributes(data),
-        )
+        findings = []
         findings.extend(
             self.pws_weather_pattern_findings(data, station, previous, timestamp, emit)
         )
@@ -2092,19 +2132,23 @@ class FindingsEngine:
             return self._process_lan_gateway(event_type, data, timestamp, emit)
         if event_type not in ("lan_device_seen", "lan_device_changed"):
             return []
-        key = data.get("subject_key") or data.get("mac") or data.get("ip") or "unknown"
-        previous = self.lan_devices.get(key)
+        key = (
+            data.get("subject_key")
+            or data.get("mac")
+            or data.get("ip")
+            or "unknown"
+        )
         self.lan_devices[key] = data
-        title = "New LAN device" if event_type == "lan_device_seen" else "LAN device changed"
-        finding_type = "lan_device_new" if event_type == "lan_device_seen" else "lan_device_changed"
+        if event_type == "lan_device_changed":
+            return []
         return self._finding_list(
             timestamp,
             "info",
             "lan",
-            finding_type,
-            title,
+            "lan_device_new",
+            "New LAN device",
             self.lan_device_detail(data),
-            "lan-device:{}:{}".format(finding_type, key),
+            "lan-device:lan_device_new:{}".format(key),
             emit,
             self.lan_attributes(data),
         )
@@ -2179,6 +2223,79 @@ class FindingsEngine:
             if data.get(key) not in (None, "", [])
         }
 
+    def _process_lan_identify(self, event_type, event, timestamp, emit):
+        """Turn on-demand LAN Identify results into compact Insights."""
+        data = clean_lan_data(event.get("data") or {})
+        if event_type == "collector_offline":
+            return self._collector_warning(
+                "lan_identify", event_type, data, timestamp, emit
+            )
+        if event_type == "identify_failed":
+            return self._finding_list(
+                timestamp,
+                "warning",
+                "lan_identify",
+                "lan_identify_failed",
+                "LAN identify failed",
+                self.lan_identify_detail(data),
+                "lan-identify-failed:{}".format(
+                    data.get("subject_key") or data.get("ip") or data.get("target") or "unknown"
+                ),
+                emit,
+                self.lan_identify_attributes(data),
+            )
+        if event_type != "identify_result":
+            return []
+        return self._finding_list(
+            timestamp,
+            "info",
+            "lan_identify",
+            "lan_identify_result",
+            "LAN identify result",
+            self.lan_identify_detail(data),
+            "lan-identify:{}".format(
+                data.get("subject_key") or data.get("ip") or data.get("target") or "unknown"
+            ),
+            emit,
+            self.lan_identify_attributes(data),
+        )
+
+    def lan_identify_detail(self, data):
+        """Return compact LAN Identify finding detail."""
+        parts = [
+            data.get("ip") or data.get("target") or "",
+            ", ".join(data.get("open_ports") or []) or "",
+            ", ".join(data.get("http_titles") or []) or "",
+            ", ".join(data.get("http_hints") or []) or "",
+            ", ".join(data.get("identify_errors") or []) or "",
+            data.get("reason") or "",
+        ]
+        return "; ".join(str(part) for part in parts if part)
+
+    def lan_identify_attributes(self, data):
+        """Return structured LAN Identify evidence fields for Insights."""
+        fields = (
+            "subject_key",
+            "target",
+            "ip",
+            "mac",
+            "open_ports",
+            "service_banners",
+            "http_urls",
+            "http_titles",
+            "http_headers",
+            "http_scripts",
+            "http_hints",
+            "identify_errors",
+            "reason",
+            "duration_sec",
+        )
+        return {
+            key: data.get(key)
+            for key in fields
+            if data.get(key) not in (None, "", [])
+        }
+
     def _expire_presence(self, timestamp, now):
         findings = []
         lost_after = float(self.config["lost_after_sec"])
@@ -2210,24 +2327,6 @@ class FindingsEngine:
                 and now - data.get("last_seen_epoch", now) > lost_after
             ):
                 data["active"] = False
-                source = data.get("source") or "wifi"
-                findings.extend(
-                    self._finding_list(
-                        timestamp,
-                        "info",
-                        source,
-                        "wifi_ap_lost",
-                        "Wi-Fi access point disappeared",
-                        "{} has not beaconed recently".format(
-                            data.get("ssid") or bssid
-                        ),
-                        "wifi-ap-lost:{}".format(bssid),
-                        True,
-                        self.wifi_ap_attributes(
-                            bssid, data.get("ssid") or "", data
-                        ),
-                    )
-                )
         return findings
 
     def _finding_list(

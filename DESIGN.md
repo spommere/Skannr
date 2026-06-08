@@ -1,6 +1,6 @@
 # Skannr Design Document
 
-Version: 0.2.3, 2026-06-05
+Version: 0.2.4, 2026-06-07
 
 ## 1. Overview
 
@@ -17,7 +17,7 @@ The current implementation focuses on:
 - on-demand Bluetooth Classic inquiry
 - RTL-SDR spectrum scanning with `rtl_power`
 - optional APRS-IS internet-fed local-area situational context
-- optional NOAA/NWS/NHC internet-fed hazard context
+- optional NOAA/NWS/NHC/tsunami.gov internet-fed hazard context
 - optional USGS internet-fed earthquake context
 - optional NOAA SWPC internet-fed space-weather context
 - optional Ambient Weather personal weather station context
@@ -141,6 +141,13 @@ The compatibility Device History view exists so older Wi-Fi/Bluetooth UI code
 can keep using its existing table model while APRS-IS, Rayhunter, RTL-SDR,
 NOAA, USGS, SWPC, PWS, and LAN share the same subject-oriented contract.
 
+Live BLE Findings are intentionally identity-gated. Anonymous or
+manufacturer-only randomized BLE addresses remain visible in the BLE feed and
+Subject History, but they do not create per-MAC `new`, `returned`,
+`disappeared`, RSSI-change, or strong-device Insights by default. History
+analysis summarizes that churn as a population row instead, so Insights remain
+operator-readable while the raw subject detail is still retained.
+
 Alerts are different from Reports. They are live operator-attention state:
 drone/Remote ID sightings, APRS/PWS severe weather, Rayhunter warnings, Wi-Fi
 disruption bursts, sensitive open SSIDs, tracker-like BLE devices, NOAA/USGS
@@ -215,8 +222,8 @@ Collector YAML files own:
 - collector-specific interface/adapter candidate lists, scan intervals, and
   thresholds
 - internet-feed endpoints, local coordinates/radii, product toggles,
-  feed thresholds, retry timing, and passive LAN source settings where
-  applicable
+  feed thresholds, retry timing, passive LAN source settings, and optional
+  active LAN inventory settings where applicable
 
 `config.load_config()` loads defaults from `src/skannr/config.py`, overlays
 `config/skannr.yaml`, loads collector YAML files, normalizes retention, resolves
@@ -578,7 +585,8 @@ Device History contribution:
 ### NOAA (`noaa`)
 
 Purpose: internet-fed weather, tsunami, tropical hazard, and point-forecast
-context for a configured point/state and optional NHC basins.
+context for a configured point/state, optional NHC basins, and official
+tsunami.gov warning centers.
 
 Implementation:
 
@@ -586,12 +594,23 @@ Implementation:
 - Resolves the configured latitude/longitude through the NWS points API and
   polls the hourly forecast URL for a compact point-forecast summary.
 - Polls configured NHC RSS feeds for tropical advisories.
+- Polls tsunami.gov NTWC/PTWC Atom feeds and linked CAP products for tsunami
+  bulletins. CAP fields provide source, message number, incident ID, magnitude,
+  depth, event time, coordinates, severity, instructions, and resource/map URLs
+  when the center publishes structured CAP content.
+- Optionally fetches the small linked plain-text bulletin when Atom/CAP is
+  sparse, primarily for PTWC products, to recover magnitude, location, origin
+  time, depth, and coordinates without retaining bulk event JSON.
 - Emits only new or materially changed alerts/advisories during one collector
   run. Forecast summaries emit only when the derived near-term forecast state
   materially changes.
-- Uses Source + Area/Basin + Event as the stable subject identity. This keeps
-  the same polled advisory in one live row while separating different areas,
-  product families, advisory numbers, and configured forecast points.
+- Uses feed-specific stable subject identities. NWS alerts use Source + Area +
+  Event. NHC storm products roll up into one advisory package per basin +
+  storm/system name + advisory number. Forecast summaries use one subject per
+  configured point. Tsunami.gov products use one subject per warning center +
+  tsunami incident ID, so later message numbers update the same incident row.
+  This keeps repeated polls in one live row while separating distinct areas,
+  advisory numbers, forecast points, and tsunami incidents.
 - Keeps forecast data subject-focused: one `noaa_forecast_summary` row per
   configured point with generated/update time, current forecast, temperature
   range, precipitation probability, next likely precipitation period, and max
@@ -600,6 +619,10 @@ Implementation:
   tropical cyclones at this time" as state-like outlook subjects that do not
   alert and do not become new rows merely because the feed link/timestamp
   changed.
+- Treats tsunami Information Statements as informational context. Tsunami
+  Warning, Watch, Advisory, or Threat products open Alerts; information-only
+  statements remain in the feed/history/report layers without paging the
+  operator.
 - Uses poll cadence from `config/collectors/noaa.yaml`, default `300` seconds.
 
 Important events:
@@ -610,12 +633,13 @@ Important events:
 - `noaa_weather_alert`
 - `noaa_tropical_advisory`
 - `noaa_forecast_summary`
+- `noaa_tsunami_alert`
 
 Device History contribution:
 
 - None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
-  NOAA alerts/advisories and point forecasts up by Source + Area/Basin + Event
-  for live detail, Reports, and Alerts.
+  NOAA alerts/advisories and point forecasts up by the same feed-specific
+  identities used by the live tab, Reports, and Alerts.
 
 ### USGS (`usgs`)
 
@@ -625,9 +649,12 @@ Implementation:
 
 - Polls the USGS GeoJSON earthquake API.
 - Queries by configured latitude, longitude, radius, and minimum magnitude.
+- Optionally polls a worldwide `global_major` subfeed for M6.5+ earthquakes
+  and merges those rows into the same USGS live feed by USGS event ID.
 - Calculates distance from the configured point when event coordinates are
   present.
-- Uses the USGS event ID as the stable subject identity.
+- Uses the USGS event ID as the stable subject identity across local and
+  global-major subfeeds.
 - Includes event time plus magnitude, place, status, felt/CDI/MMI, alert color,
   and tsunami flag in the material fingerprint.
 - Uses poll cadence from `config/collectors/usgs.yaml`, default `300` seconds.
@@ -740,15 +767,47 @@ Alert behavior:
 
 ### LAN (`lan`)
 
-Purpose: passive local-network context from the host OS.
+Purpose: local-network context from the host OS and low-impact LAN listeners.
 
 Implementation:
 
 - Reads `ip neigh` JSON output when available, with text fallback.
 - Reads `arp -an` as a secondary source.
 - Reads default IPv4/IPv6 route state.
-- Optionally reads dnsmasq-style DHCP lease files.
-- Does not probe or scan the LAN.
+- Listens for passive mDNS and SSDP advertisements by default when LAN is
+  enabled, then folds services, locations, and server strings into LAN subject
+  identity.
+- Optionally imports resolved Bonjour/mDNS records with
+  `avahi-browse -a -r -p -t`. This source is disabled by default and requires
+  `avahi-utils` / a working Avahi daemon. Missing Avahi only creates a warning;
+  the normal LAN collector stays online.
+- Avahi records are enrichment, not authoritative inventory. Resolved `=` rows
+  are joined to LAN subjects by trusted TXT MAC fields (`mac`, `waMA`) first,
+  then by current IP address. Other MAC-like TXT fields are retained as clues
+  because fields such as AirPlay `deviceid` or HomeKit `id` may not be the
+  Ethernet/Wi-Fi MAC.
+- Optionally reads dnsmasq-style DHCP lease files or command output on a slower
+  import cadence. Router-specific exports should be wrapped in a local command
+  that prints dnsmasq-style rows.
+- Optional passive DHCP and raw ARP listeners are available but off by default
+  because they can require elevated privileges or collide with local services.
+- Optional active ARP inventory uses `arp-scan` on its own cadence and is off by
+  default.
+- Active ARP subjects are retained across intermittent missed replies. The
+  default retention is three active-scan intervals, with a 180 second minimum,
+  and can be overridden with `active_arp_scan_retention_sec`.
+- `active_arp_scan_interfaces: []` delegates interface choice to `arp-scan`.
+  On multi-homed Pis this may choose the wrong network, so production configs
+  should list intended interfaces explicitly, for example `eth0` for the
+  property LAN and `wlan0` only when the Wi-Fi interface's subnet should also be
+  inventoried.
+- Active ARP scan is IPv4 Ethernet/L2 discovery. It is not a Yggdrasil/tun0
+  inventory mechanism; Yggdrasil is a routed IPv6 overlay and should be treated
+  as remote-access infrastructure.
+- The third `arp-scan` output column is retained as `vendor_name` and shown as
+  an explicit LAN feed column. Skannr runs `arp-scan` from a known vendor-data
+  directory when possible so `ieee-oui.txt` / `mac-vendor.txt` lookup does not
+  depend on systemd's working directory.
 - Uses poll cadence from `config/collectors/lan.yaml`, default `60` seconds.
 
 Important events:
@@ -765,6 +824,38 @@ Device History contribution:
 - None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
   LAN observations up by MAC/IP identity and default gateway identity for live
   detail, Reports, and Alerts.
+
+### LAN Identify (`lan_identify`)
+
+Purpose: operator-requested active enrichment for one LAN IP address.
+
+Implementation notes:
+
+- This is an action collector, modeled after BLE Identify. It does not run a
+  background loop and does not scan the subnet.
+- The browser calls `/lan_identify` from Identify buttons on live LAN rows that
+  have an IPv4 or IPv6 address.
+- The action runs bounded `nmap` service detection and short `curl` HTTP/HTTPS
+  root probes using fixed code-owned commands plus YAML timeout/port knobs.
+- Results are compacted to open ports, service banners, HTTP titles, selected
+  headers, script names, brand-like snippets, and errors. Raw HTML and large
+  nmap fingerprints are not kept in the browser model.
+- Successful results emit a `lan_identify` Finding and are folded into the
+  matching LAN Subject History record by subject key, MAC, or IP.
+
+Important events:
+
+- `identify_started`
+- `identify_result`
+- `identify_failed`
+- `collector_offline`
+
+Device History contribution:
+
+- None in the older Wi-Fi/Bluetooth compatibility view. Subject History stores
+  LAN Identify enrichment on the LAN subject so Reports can show clues such as
+  `Wi-Fi Setup`, `myq.js`, Chamberlain/MyQ hints, or open HTTP ports alongside
+  passive vendor and service observations.
 
 ## 7. Persistence
 
@@ -906,7 +997,8 @@ emits normalized finding records for explicit conditions such as:
 - BLE identify success/failure
 - RTL-SDR signal detection
 - NOAA weather/tropical hazards and material alert upgrades
-- USGS earthquake observations and magnitude updates
+- USGS earthquake observations, global-major earthquake observations, and
+  magnitude updates
 - SWPC space-weather events
 - LAN device/gateway observations and changes
 - collector offline/retrying/stopped
@@ -930,18 +1022,21 @@ Current subject identities are:
 - APRS-IS callsign/object/weather station
 - Rayhunter endpoint
 - RTL-SDR frequency bin
-- NOAA/NWS/NHC Source + Area/Basin + Event
+- NOAA/NWS Source + Area + Event; NHC basin + storm advisory package;
+  tsunami.gov center + incident ID
 - USGS earthquake event ID
 - SWPC space-weather event/product ID
 - PWS station ID/name/MAC
 - LAN device MAC/IP and default gateway identity
 
-For NOAA/NHC, event title is deliberately part of the subject. Amanda Forecast
-Advisory 11, Amanda Forecast Advisory 12, and Amanda Wind Speed Probabilities
-11 are separate subjects. For NWS alerts, area is deliberately part of the
-subject, so a Beach Hazards Statement for San Francisco differs from one for
-Santa Cruz. Generic NHC "no active cyclones" outlook messages collapse by
-basin/event and update only on material text/state changes.
+For NOAA/NHC, feed semantics define the subject. NHC storm products roll up by
+basin + storm/system name + advisory number: Amanda Public Advisory 11, Forecast
+Advisory 11, Forecast Discussion 11, and Wind Speed Probabilities 11 are one
+advisory-package subject, while Amanda 12 is a new subject. For NWS alerts,
+area is deliberately part of the subject, so a Beach Hazards Statement for San
+Francisco differs from one for Santa Cruz. Generic NHC "no active cyclones"
+outlook messages collapse by basin/event and update only on material text/state
+changes.
 
 For poll collectors, Subject History and the live feed share the same identity
 rule. The browser may hide old poll-feed rows after `ui.poll_feed_live_ttl_sec`
@@ -1043,6 +1138,11 @@ changes and see the lower-level events that may later roll up into Reports.
 They are intentionally event-oriented: one row describes one finding or
 observation, sorted by event/activity time descending. Device-centric
 consolidation and long-term pattern interpretation belong in Reports.
+For BLE, the generated history-analysis layer is intentionally stricter than
+Subject History: anonymous/randomized BLE subjects are summarized as a
+population row, and individual strong/linger/loss rows are emitted only for
+recent named or otherwise identifiable subjects. This keeps phone-style BLE
+address churn from overwhelming the tactical Insights tab.
 
 History observations are generated by `HistoryAnalyzer` and written to:
 

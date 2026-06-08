@@ -10,7 +10,11 @@ from collections import deque
 
 from .bus import local_now
 from .collectors.lan import clean_lan_data
-from .collectors.noaa import clean_noaa_data, stable_noaa_event_key
+from .collectors.noaa import (
+    clean_noaa_data,
+    stable_noaa_event_key,
+    tsunami_is_alertworthy,
+)
 from .collectors.pws import clean_pws_data
 from .collectors.swpc import (
     clean_swpc_data,
@@ -133,6 +137,8 @@ DEFAULT_ALERT_CONFIG = {
         "critical_level": "critical",
         "warning_magnitude_nearby": 4.0,
         "critical_magnitude_nearby": 5.0,
+        "warning_magnitude_global": 6.5,
+        "critical_magnitude_global": 7.5,
         "nearby_radius_km": 100,
         "critical_alert_colors": ["orange", "red"],
     },
@@ -700,7 +706,11 @@ class AlertEngine:
         """Return NOAA hazard alerts."""
         if event_type in ("collector_offline", "collector_retrying"):
             return self.collector_issue_alert("noaa", event_type, data, timestamp, now, emit)
-        if event_type not in ("noaa_weather_alert", "noaa_tropical_advisory"):
+        if event_type not in (
+            "noaa_weather_alert",
+            "noaa_tropical_advisory",
+            "noaa_tsunami_alert",
+        ):
             return []
         rule = self.rule("noaa_hazard")
         if not rule.get("enabled", True):
@@ -741,6 +751,21 @@ class AlertEngine:
                 "alert_kind": data.get("alert_kind") or "",
                 "area_desc": data.get("area_desc") or "",
                 "basin": data.get("basin") or "",
+                "nhc_system": data.get("nhc_system") or "",
+                "nhc_storm_id": data.get("nhc_storm_id") or "",
+                "nhc_advisory_number": data.get("nhc_advisory_number") or "",
+                "nhc_package_key": data.get("nhc_package_key") or "",
+                "nhc_product_types": data.get("nhc_product_types") or [],
+                "tsunami_identifier": data.get("tsunami_identifier") or "",
+                "incident_id": data.get("incident_id") or "",
+                "tsunami_category": data.get("tsunami_category") or "",
+                "message_number": data.get("message_number") or "",
+                "magnitude": data.get("magnitude"),
+                "magnitude_type": data.get("magnitude_type") or "",
+                "depth_km": data.get("depth_km"),
+                "event_time": data.get("event_time") or "",
+                "latitude": data.get("latitude"),
+                "longitude": data.get("longitude"),
                 "effective": data.get("effective") or "",
                 "onset": data.get("onset") or "",
                 "expires": data.get("expires") or "",
@@ -759,6 +784,8 @@ class AlertEngine:
         source = str((data or {}).get("source") or "").strip()
         if source:
             return source
+        if event_type == "noaa_tsunami_alert" or (data or {}).get("alert_kind") == "tsunami":
+            return "NOAA Tsunami"
         if event_type == "noaa_tropical_advisory" or (data or {}).get("alert_kind") == "tropical":
             return "NHC"
         if event_type == "noaa_weather_alert":
@@ -775,7 +802,9 @@ class AlertEngine:
         )
         if kind == "tropical_outlook":
             return False
-        if kind in ("tsunami", "tropical"):
+        if kind == "tsunami":
+            return tsunami_is_alertworthy(data)
+        if kind == "tropical":
             return True
         if severity in {"severe", "extreme"}:
             return True
@@ -811,7 +840,10 @@ class AlertEngine:
         if magnitude is None:
             return []
         nearby_radius = float(rule.get("nearby_radius_km", 100))
-        nearby = distance is None or distance <= nearby_radius
+        nearby = distance is not None and distance <= nearby_radius
+        global_warning_mag = float(rule.get("warning_magnitude_global", 6.5))
+        global_critical_mag = float(rule.get("critical_magnitude_global", 7.5))
+        global_major = magnitude >= global_warning_mag
         alert_color = str(data.get("alert_color") or "").lower()
         critical = bool(data.get("tsunami")) or alert_color in {
             str(item or "").lower()
@@ -819,14 +851,18 @@ class AlertEngine:
         }
         if nearby and magnitude >= float(rule.get("critical_magnitude_nearby", 5.0)):
             critical = True
+        if global_major and magnitude >= global_critical_mag:
+            critical = True
         warning = critical or (
             nearby and magnitude >= float(rule.get("warning_magnitude_nearby", 4.0))
-        )
+        ) or global_major
         if not warning:
             return []
         level = rule.get("critical_level", "critical") if critical else rule.get("level", "warning")
         place = data.get("place") or data.get("event_id") or "earthquake"
         summary = "USGS earthquake M{:.1f}: {}".format(magnitude, place)
+        if global_major and not nearby:
+            summary += "; global major earthquake"
         if distance is not None:
             summary += "; {:.1f} km from configured point".format(distance)
         if data.get("tsunami"):
@@ -848,6 +884,9 @@ class AlertEngine:
                 "place": place,
                 "event_time": data.get("event_time") or "",
                 "updated": data.get("updated") or "",
+                "feed": data.get("feed") or "",
+                "scope": data.get("scope") or "",
+                "global_major": bool(data.get("global_major")) or global_major,
                 "distance_km": distance,
                 "depth_km": data.get("depth_km"),
                 "alert_color": data.get("alert_color") or "",
@@ -1131,19 +1170,23 @@ class AlertEngine:
         if alert.get("alert_type") != "noaa_hazard":
             return normalized_key(fallback)
         evidence = dict(alert.get("evidence") or {})
-        event_type = (
-            "noaa_tropical_advisory"
-            if evidence.get("source") == "NHC" or evidence.get("alert_kind") == "tropical"
-            else "noaa_weather_alert"
-        )
+        if evidence.get("alert_kind") == "tsunami":
+            event_type = "noaa_tsunami_alert"
+        elif evidence.get("source") == "NHC" or evidence.get("alert_kind") == "tropical":
+            event_type = "noaa_tropical_advisory"
+        else:
+            event_type = "noaa_weather_alert"
         data = {
             "source": evidence.get("source") or "",
             "event": evidence.get("event") or alert.get("subject") or "",
             "headline": evidence.get("headline") or alert.get("subject") or "",
             "summary": alert.get("summary") or "",
             "area_desc": evidence.get("area_desc") or "",
+            "incident_id": evidence.get("incident_id") or "",
+            "tsunami_identifier": evidence.get("tsunami_identifier") or "",
             "basin": evidence.get("basin")
             or canonical_nhc_basin(evidence.get("area_desc")),
+            "nhc_package_key": evidence.get("nhc_package_key") or "",
             "alert_kind": evidence.get("alert_kind") or "",
             "event_id": evidence.get("event_id") or "",
         }
@@ -1161,16 +1204,19 @@ class AlertEngine:
         if (alert or {}).get("alert_type") != "noaa_hazard":
             return False
         evidence = dict((alert or {}).get("evidence") or {})
-        event_type = (
-            "noaa_tropical_advisory"
-            if self.is_nhc_noaa_alert(alert)
-            else "noaa_weather_alert"
-        )
+        if evidence.get("alert_kind") == "tsunami":
+            event_type = "noaa_tsunami_alert"
+        elif self.is_nhc_noaa_alert(alert):
+            event_type = "noaa_tropical_advisory"
+        else:
+            event_type = "noaa_weather_alert"
         data = {
             "source": evidence.get("source") or (alert or {}).get("source") or "",
             "event": evidence.get("event") or (alert or {}).get("subject") or "",
             "headline": evidence.get("headline") or (alert or {}).get("subject") or "",
             "area_desc": evidence.get("area_desc") or "",
+            "incident_id": evidence.get("incident_id") or "",
+            "tsunami_identifier": evidence.get("tsunami_identifier") or "",
             "basin": evidence.get("basin") or "",
             "alert_kind": evidence.get("alert_kind") or "",
         }
@@ -1193,8 +1239,17 @@ class AlertEngine:
             or alert_kind in ("tropical", "tropical_outlook")
             or bool(basin)
         )
+        is_tsunami = (
+            source in ("ntwc", "ptwc", "noaa tsunami")
+            or event_type == "noaa_tsunami_alert"
+            or alert_kind == "tsunami"
+        )
         is_nws = source == "nws" or event_type == "noaa_weather_alert"
-        return ("nhc" in disabled and is_nhc) or ("nws" in disabled and is_nws)
+        return (
+            ("nhc" in disabled and is_nhc)
+            or ("nws" in disabled and is_nws)
+            or ("tsunami" in disabled and is_tsunami)
+        )
 
     def collapse_equivalent_active_alert(self, key, alert_type):
         """Collapse old persisted IDs that now map to this canonical key."""

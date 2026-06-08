@@ -42,7 +42,7 @@ def clean_usgs_data(data):
         "mmi",
         "tsunami",
     }
-    bool_keys = {"internet_fed"}
+    bool_keys = {"internet_fed", "global_major"}
     for key, value in data.items():
         if value in (None, "", []):
             continue
@@ -68,12 +68,14 @@ class USGSCollector(BaseCollector):
     @classmethod
     def hardware_status(cls, config):
         """Return configured USGS query metadata."""
+        global_major = config.get("global_major") or {}
         return {
             "internet_source": True,
             "enabled": bool(config.get("enabled", False)),
             "latitude": config.get("latitude"),
             "longitude": config.get("longitude"),
             "radius_km": config.get("radius_km"),
+            "global_major": bool(global_major.get("enabled", True)),
         }
 
     def __init__(self, config, bus):
@@ -81,13 +83,10 @@ class USGSCollector(BaseCollector):
         self._fingerprints = {}
 
     def detect(self):
-        """USGS needs either a full query URL or a point/radius query."""
-        if not self.config.get("url") and (
-            self.config.get("latitude") in (None, "")
-            or self.config.get("longitude") in (None, "")
-        ):
+        """USGS needs at least one configured local or global query."""
+        if not self.query_specs():
             self.state = STATE_OFFLINE
-            self.warning = "No USGS latitude/longitude or URL configured."
+            self.warning = "No USGS local query or global major query configured."
             return False
         self.active_hardware = "USGS earthquake feed"
         self.state = STATE_ONLINE
@@ -100,9 +99,16 @@ class USGSCollector(BaseCollector):
         if not self.detect():
             await self.emit("collector_offline", {"reason": self.warning}, "warning")
             return
+        specs = self.query_specs()
         await self.emit(
             "collector_online",
-            {"source": "USGS", "url": self.query_url(), "internet_fed": True},
+            {
+                "source": "USGS",
+                "url": self.query_url(),
+                "feeds": [spec["name"] for spec in specs],
+                "feed_summary": "; ".join(spec["label"] for spec in specs),
+                "internet_fed": True,
+            },
         )
         interval = float(self.config.get("poll_interval_sec", 300))
         while self._running:
@@ -133,23 +139,90 @@ class USGSCollector(BaseCollector):
 
     def poll_once(self):
         """Fetch and return new/changed earthquake events."""
-        payload = self.fetch_json(self.query_url())
+        merged = {}
+        for spec in self.query_specs():
+            payload = self.fetch_json(spec["url"])
+            for feature in payload.get("features") or []:
+                if not isinstance(feature, dict):
+                    continue
+                data = self.earthquake_data(feature, spec)
+                event_id = data.get("event_id")
+                if not event_id:
+                    continue
+                merged[event_id] = self.merge_earthquake(
+                    merged.get(event_id), data
+                )
         events = []
-        for feature in payload.get("features") or []:
-            if not isinstance(feature, dict):
-                continue
-            data = self.earthquake_data(feature)
-            if not data.get("event_id"):
-                continue
-            key = "usgs:{}".format(data["event_id"])
+        for event_id, data in merged.items():
+            data["fingerprint"] = self.fingerprint(
+                data,
+                (
+                    "event_time_epoch",
+                    "magnitude",
+                    "place",
+                    "updated_epoch",
+                    "status",
+                    "felt",
+                    "cdi",
+                    "mmi",
+                    "alert_color",
+                    "tsunami",
+                ),
+            )
+            key = "usgs:{}".format(event_id)
             if self.changed(key, data.get("fingerprint")):
-                events.append(data)
+                events.append(clean_usgs_data(data))
         return events
 
     def query_url(self):
-        """Return the configured USGS query URL."""
+        """Return the primary configured USGS query URL for status display."""
+        specs = self.query_specs()
+        return specs[0]["url"] if specs else ""
+
+    def query_specs(self):
+        """Return configured USGS subfeed query definitions."""
+        specs = []
         if self.config.get("url"):
-            return str(self.config["url"])
+            specs.append(
+                {
+                    "name": "local",
+                    "scope": "local",
+                    "label": "local custom query",
+                    "url": str(self.config["url"]),
+                    "global_major": False,
+                }
+            )
+        elif (
+            self.config.get("latitude") not in (None, "")
+            and self.config.get("longitude") not in (None, "")
+        ):
+            specs.append(
+                {
+                    "name": "local",
+                    "scope": "local",
+                    "label": "local radius {} km".format(
+                        self.config.get("radius_km", 300)
+                    ),
+                    "url": self.local_query_url(),
+                    "global_major": False,
+                }
+            )
+        global_major = self.config.get("global_major") or {}
+        if bool(global_major.get("enabled", True)):
+            minimum = global_major.get("min_magnitude", 6.5)
+            specs.append(
+                {
+                    "name": "global_major",
+                    "scope": "global",
+                    "label": "global M{}+".format(minimum),
+                    "url": self.global_major_query_url(global_major),
+                    "global_major": True,
+                }
+            )
+        return specs
+
+    def local_query_url(self):
+        """Return the local-radius USGS query URL."""
         params = {
             "format": "geojson",
             "orderby": self.config.get("orderby", "time"),
@@ -171,8 +244,32 @@ class USGSCollector(BaseCollector):
         )
         return "{}?{}".format(USGS_QUERY_ENDPOINT, query)
 
-    def earthquake_data(self, feature):
+    def global_major_query_url(self, global_major):
+        """Return the worldwide major-earthquake query URL."""
+        if global_major.get("url"):
+            return str(global_major["url"])
+        params = {
+            "format": "geojson",
+            "orderby": global_major.get("orderby", self.config.get("orderby", "time")),
+            "minmagnitude": global_major.get("min_magnitude", 6.5),
+        }
+        lookback_days = global_major.get("lookback_days")
+        if lookback_days:
+            try:
+                days = float(lookback_days)
+                params["starttime"] = (
+                    datetime.utcnow() - timedelta(days=days)
+                ).strftime("%Y-%m-%d")
+            except (TypeError, ValueError):
+                pass
+        query = urllib.parse.urlencode(
+            {key: value for key, value in params.items() if value not in (None, "")}
+        )
+        return "{}?{}".format(USGS_QUERY_ENDPOINT, query)
+
+    def earthquake_data(self, feature, spec=None):
         """Normalize one USGS GeoJSON feature."""
+        spec = spec or {}
         props = feature.get("properties") or {}
         geometry = feature.get("geometry") or {}
         coords = geometry.get("coordinates") or []
@@ -200,25 +297,35 @@ class USGSCollector(BaseCollector):
             "alert_color": compact_usgs_text(props.get("alert"), 40),
             "tsunami": int(props.get("tsunami") or 0),
             "detail_url": compact_usgs_text(props.get("url") or props.get("detail"), 240),
+            "feed": spec.get("name") or "local",
+            "scope": spec.get("scope") or "local",
+            "feed_label": spec.get("label") or "",
+            "global_major": bool(spec.get("global_major")),
             "source": "USGS",
             "internet_fed": True,
         }
-        data["fingerprint"] = self.fingerprint(
-            data,
-            (
-                "event_time_epoch",
-                "magnitude",
-                "place",
-                "updated_epoch",
-                "status",
-                "felt",
-                "cdi",
-                "mmi",
-                "alert_color",
-                "tsunami",
-            ),
-        )
         return clean_usgs_data(data)
+
+    def merge_earthquake(self, existing, incoming):
+        """Merge the same USGS event found by multiple subfeeds."""
+        if not existing:
+            return dict(incoming or {})
+        merged = dict(existing)
+        for key, value in (incoming or {}).items():
+            if key in ("feed", "scope", "feed_label", "global_major"):
+                continue
+            if value not in (None, "", []):
+                merged[key] = value
+        feeds = unique_csv_values(existing.get("feed"), incoming.get("feed"))
+        scopes = unique_csv_values(existing.get("scope"), incoming.get("scope"))
+        labels = unique_csv_values(existing.get("feed_label"), incoming.get("feed_label"))
+        merged["feed"] = ", ".join(feeds)
+        merged["scope"] = ", ".join(scopes)
+        merged["feed_label"] = ", ".join(labels)
+        merged["global_major"] = bool(
+            existing.get("global_major") or incoming.get("global_major")
+        )
+        return merged
 
     def fetch_json(self, url):
         """Fetch one USGS GeoJSON URL."""
@@ -267,11 +374,14 @@ class USGSCollector(BaseCollector):
         distance = number_or_none((data or {}).get("distance_km"))
         nearby_mag = float(self.config.get("warning_magnitude_nearby", 4.0))
         regional_mag = float(self.config.get("warning_magnitude_regional", 5.0))
+        global_mag = float(self.config.get("warning_magnitude_global", 6.5))
         nearby_radius = float(self.config.get("warning_nearby_radius_km", 100))
         alert_color = str((data or {}).get("alert_color") or "").lower()
         if int((data or {}).get("tsunami") or 0):
             return True
         if alert_color in ("yellow", "orange", "red"):
+            return True
+        if magnitude >= global_mag:
             return True
         if distance is not None and distance <= nearby_radius and magnitude >= nearby_mag:
             return True
@@ -284,6 +394,20 @@ def number_or_none(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def unique_csv_values(*values):
+    """Return unique comma-separated scalar values preserving input order."""
+    output = []
+    seen = set()
+    for value in values:
+        for item in str(value or "").split(","):
+            text = compact_usgs_text(item, 120)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            output.append(text)
+    return output
 
 
 def millis_epoch(value):

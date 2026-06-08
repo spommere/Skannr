@@ -24,21 +24,21 @@
   </header>
 
   <nav class="tabs">
-    <button class="tab active" data-tab="insights">Insights</button>
-    <button class="tab" data-tab="reports">Reports</button>
-    <button class="tab" data-tab="history">Subject History</button>
-    <button class="tab" data-tab="wifi">Wi-Fi Scan <span class="tab-status-dots" data-status-tab="wifi"></span></button>
-    <button class="tab" data-tab="wifi_monitor">Wi-Fi Monitor <span class="tab-status-dots" data-status-tab="wifi_monitor"></span></button>
-    <button class="tab" data-tab="bluetooth">Bluetooth <span class="tab-status-dots" data-status-tab="bluetooth"></span></button>
-    <button class="tab" data-tab="rtlsdr">RTL-SDR <span class="tab-status-dots" data-status-tab="rtlsdr"></span></button>
-    <button class="tab" data-tab="aprsis">APRS-IS <span class="tab-status-dots" data-status-tab="aprsis"></span></button>
-    <button class="tab" data-tab="noaa">NOAA <span class="tab-status-dots" data-status-tab="noaa"></span></button>
-    <button class="tab" data-tab="usgs">USGS <span class="tab-status-dots" data-status-tab="usgs"></span></button>
-    <button class="tab" data-tab="swpc">SWPC <span class="tab-status-dots" data-status-tab="swpc"></span></button>
-    <button class="tab" data-tab="pws">PWS <span class="tab-status-dots" data-status-tab="pws"></span></button>
-    <button class="tab" data-tab="lan">LAN <span class="tab-status-dots" data-status-tab="lan"></span></button>
-    <button class="tab" data-tab="system">System Status</button>
-    <button class="tab" data-tab="alerts">Alerts <span id="alerts-tab-count" class="tab-alert-count"></span></button>
+    <button class="tab active" data-tab="insights">Insights <span class="tab-row-count" data-tab-count="insights"></span></button>
+    <button class="tab" data-tab="reports">Reports <span class="tab-row-count" data-tab-count="reports"></span></button>
+    <button class="tab" data-tab="history">Subject History <span class="tab-row-count" data-tab-count="history"></span></button>
+    <button class="tab" data-tab="wifi">Wi-Fi Scan <span class="tab-row-count" data-tab-count="wifi"></span><span class="tab-status-dots" data-status-tab="wifi"></span></button>
+    <button class="tab" data-tab="wifi_monitor">Wi-Fi Monitor <span class="tab-row-count" data-tab-count="wifi_monitor"></span><span class="tab-status-dots" data-status-tab="wifi_monitor"></span></button>
+    <button class="tab" data-tab="bluetooth">Bluetooth <span class="tab-row-count" data-tab-count="bluetooth"></span><span class="tab-status-dots" data-status-tab="bluetooth"></span></button>
+    <button class="tab" data-tab="rtlsdr">RTL-SDR <span class="tab-row-count" data-tab-count="rtlsdr"></span><span class="tab-status-dots" data-status-tab="rtlsdr"></span></button>
+    <button class="tab" data-tab="aprsis">APRS-IS <span class="tab-row-count" data-tab-count="aprsis"></span><span class="tab-status-dots" data-status-tab="aprsis"></span></button>
+    <button class="tab" data-tab="noaa">NOAA <span class="tab-row-count" data-tab-count="noaa"></span><span class="tab-status-dots" data-status-tab="noaa"></span></button>
+    <button class="tab" data-tab="usgs">USGS <span class="tab-row-count" data-tab-count="usgs"></span><span class="tab-status-dots" data-status-tab="usgs"></span></button>
+    <button class="tab" data-tab="swpc">SWPC <span class="tab-row-count" data-tab-count="swpc"></span><span class="tab-status-dots" data-status-tab="swpc"></span></button>
+    <button class="tab" data-tab="pws">PWS <span class="tab-row-count" data-tab-count="pws"></span><span class="tab-status-dots" data-status-tab="pws"></span></button>
+    <button class="tab" data-tab="lan">LAN <span class="tab-row-count" data-tab-count="lan"></span><span class="tab-status-dots" data-status-tab="lan"></span></button>
+    <button class="tab" data-tab="system">System Status <span class="tab-row-count" data-tab-count="system"></span></button>
+    <button class="tab" data-tab="alerts">Alerts <span class="tab-row-count" data-tab-count="alerts"></span><span id="alerts-tab-count" class="tab-alert-count"></span></button>
   </nav>
 
   <div id="global-alerts" class="global-alerts" hidden></div>
@@ -356,7 +356,7 @@
       </div>
       <h3>Live USGS Events</h3>
       <table class="usgs-events-table">
-        <thead><tr><th>Time</th><th>Event Time (desc)</th><th>Event</th><th>Magnitude</th><th>Place</th><th>Distance</th><th>Depth</th><th>Alert</th><th>Status</th></tr></thead>
+        <thead><tr><th>Time</th><th>Event Time (desc)</th><th>Event</th><th>Scope</th><th>Magnitude</th><th>Place</th><th>Distance</th><th>Depth</th><th>Alert</th><th>Status</th></tr></thead>
         <tbody id="usgs-events"></tbody>
       </table>
     </section>
@@ -409,9 +409,15 @@
         </label>
       </div>
       <h3>Live LAN Events</h3>
-      <table>
-        <thead><tr><th>Time</th><th>Type</th><th>IP / MAC</th><th>Identity</th><th>Interface / State</th><th>Source</th><th>Gateway</th><th>Change</th></tr></thead>
+      <table class="lan-events-table">
+        <thead><tr><th>Time</th><th>Type</th><th>IP / MAC</th><th>Vendor</th><th>Identity</th><th>Interface / State</th><th>Source</th><th>Gateway</th><th>Change</th><th>Action</th></tr></thead>
         <tbody id="lan-events"></tbody>
+      </table>
+      <h3>LAN Identify Activity</h3>
+      <div id="lan_identify-banner" class="status-strip muted">Identify runs only when requested for a LAN IP</div>
+      <table class="lan-identify-results-table">
+        <thead><tr><th>Time</th><th>Target</th><th>Result</th><th>Open Ports</th><th>HTTP</th><th>Hints</th><th>Errors</th></tr></thead>
+        <tbody id="lan-identify-results"></tbody>
       </table>
     </section>
 

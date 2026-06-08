@@ -7,39 +7,59 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
-## 0.2.3 - 2026-06-05
+## 0.2.4 - 2026-06-07
 
+- Added official tsunami.gov NTWC/PTWC support under the NOAA collector. Tsunami
+  incident ID, message number, magnitude, depth, event time, coordinates, and
+  source/map URLs flow into the NOAA live feed, Subject History, Insights, and
+  Reports. Tsunami Warning/Watch/Advisory/Threat products open Alerts; Tsunami
+  Information/final threat-passed products remain context rows only. Browser
+  refreshes now recover recent tsunami feed rows, and PTWC bulletin timestamps
+  are normalized into the standard date/time display.
+- Added a global-major USGS earthquake subfeed. The normal USGS live tab now
+  includes local-radius earthquakes and low-volume worldwide M6.5+ earthquakes,
+  with Alerts for global major events and critical Alerts for M7.5+.
 - Added optional Ambient Weather PWS collection with live feed, Subject History,
-  Insights, Reports, and Alerts. PWS rows keep station weather, wind, rain
-  rates/totals, pressure, solar/UV, indoor readings, location/elevation, and
-  battery context while keeping Ambient API keys and street addresses out of
-  persisted/displayed data.
+  Insights, Reports, and Alerts. PWS rows retain station weather, rain
+  rates/totals, wind, pressure, solar/UV, indoor readings, coarse location,
+  elevation, and battery context while excluding Ambient API keys and street
+  address text.
 - Added NWS hourly forecast summaries to the NOAA collector. Forecast rows are
-  treated as state-like poll subjects: repeated polls update one latest row per
-  configured point, and forecast detail links work before the next materialized
+  state-like poll subjects: repeated polls update one latest row per configured
+  point, and live forecast details work before the next materialized
   Subject History/Reports refresh.
-- Added OpenStreetMap links for rendered latitude/longitude text and APRS range
-  filters, plus first/latest APRS movement coordinates where retained.
+- Added optional SWPC space-weather collection with live feed, Subject History,
+  Reports, and Alerts for X-class flares, R/S/G scale conditions, Kp storms,
+  and relevant SWPC alert/watch/warning products. SWPC now tolerates partial
+  product failures and reports failed subproducts in collector status.
+- Tightened poll-feed identity and de-duplication. NOAA/NWS keys use Source +
+  Area + Event, NHC storm products roll up by basin + storm/system + advisory
+  number, USGS/SWPC rows upsert by event ID, and poll-feed live rows age out by
+  `ui.poll_feed_live_ttl_sec` without deleting logs or materialized history.
+- Added explicit collector acquisition metadata (`scan`, `poll`, `listen`) and
+  documented the subject-identity contract used by Subject History, live feeds,
+  Reports, and Alerts.
 - Added population-first Reports ordering. Cross-subject pattern rows now appear
   before per-subject rows for APRS-IS, NOAA, USGS, SWPC, LAN, and existing
   Wi-Fi/BLE/privacy aggregate reports.
-- Added optional SWPC space-weather collection with live feed, Subject History,
-  Reports, and Alerts for X-class flares, R/S/G scale conditions, Kp storms,
-  and relevant SWPC alert/watch/warning products.
-- Added explicit collector acquisition metadata (`scan`, `poll`, `listen`) and
-  documented the subject-identity contract used by Subject History, live
-  feed de-duplication, Reports, and Alerts.
-- Tightened NOAA/USGS/SWPC poll-feed behavior so repeated polls update one
-  event/subject row, while different NOAA areas, NHC product families/advisory
-  numbers, USGS event IDs, and SWPC event IDs stay distinct.
-- Made SWPC polling tolerant of partial product failures, matching NOAA's
-  sub-feed behavior: successful SWPC product rows still update while failed
-  products appear as collector warning status.
-- Fixed PWS rain-transition report evidence so a stopped rain episode keeps the
-  episode start/stop context in one place rather than leaving ambiguous
-  start/stop rows.
-- Added `ui.poll_feed_live_ttl_sec` and a collector contract validation script
-  for future collector changes.
+- Added OpenStreetMap links for rendered latitude/longitude text and APRS range
+  filters, plus first/latest APRS movement coordinates where retained.
+- Expanded LAN collection with optional passive mDNS/SSDP, DHCP/raw ARP,
+  DHCP lease import, active ARP inventory via `arp-scan`, Avahi service import,
+  vendor enrichment, and more stable LAN subject retention across intermittent
+  missed ARP replies.
+- Added an on-demand LAN Identify action for one selected IP address. It runs
+  bounded `nmap` and short `curl` probes, shows open ports and HTTP/service
+  hints, emits a compact Insight, and enriches the matching LAN subject/report.
+- Reduced BLE Insights noise from randomized/private-address churn while
+  retaining full BLE Subject History and Reports. Anonymous/recent BLE activity
+  is summarized as population context, while per-device Insights focus on recent
+  named or otherwise identifiable subjects.
+- Removed `has_subject_history` from shipped collector YAML templates. Subject
+  History participation is now internal collector metadata, and the collector
+  contract validation script covers acquisition groups, poll identity, alert-key
+  alignment, NOAA ACK de-duplication, SWPC partial failures, and PWS
+  normalization examples.
 
 ## 0.2.2 - 2026-06-04
 

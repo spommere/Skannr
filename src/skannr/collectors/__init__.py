@@ -6,6 +6,7 @@ collector keys from YAML metadata to concrete Python classes.
 
 from .aprsis import APRSISCollector
 from .lan import LANCollector
+from .lan_identify import LANIdentifyCollector
 from .noaa import NOAACollector
 from .pws import PWSCollector
 from .rtlsdr import RTLSDRCollector
@@ -40,6 +41,7 @@ COLLECTOR_CLASS_BY_KEY = {
 
 ACTION_CLASS_BY_KEY = {
     "ble_identify": BLEIdentifyCollector,
+    "lan_identify": LANIdentifyCollector,
 }
 
 

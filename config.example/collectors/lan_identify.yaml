@@ -1,0 +1,37 @@
+key: lan_identify
+kind: action
+order: 115
+label: LAN Identify
+description: On-demand active LAN service and HTTP clue collector
+source_group: lan
+source_group_label: LAN
+acquisition_mode: scan
+enabled: true
+auto_start: false
+identify_timeout_sec: 30
+nmap_timeout_sec: 20
+curl_timeout_sec: 8
+curl_output_max_bytes: 30000
+nmap_ports: 22,23,53,80,443,554,1900,5000,5353,8008,8080,8443,9100
+http_probe_ports:
+- 80
+- 443
+- 5000
+- 8008
+- 8080
+- 8443
+http_hint_patterns:
+- myq
+- chamberlain
+- liftmaster
+- ring
+- reolink
+- airplay
+- homekit
+- printer
+- ipp
+- sonos
+- roku
+- chromecast
+- unifi
+- ubiquiti

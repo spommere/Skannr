@@ -62,6 +62,7 @@ const TABLE_SCHEMAS = {
     (item) => displayTimestamp(item, "last_seen"),
     (item) => displayTimestamp(item, "event_time") || displayTimestamp(item, "last_seen"),
     (item) => usgsSubjectLink(item),
+    (item) => usgsScopeText(item),
     (item) => usgsMagnitudeText(item),
     (item) => item.place || "",
     (item) => usgsDistanceText(item),
@@ -92,11 +93,26 @@ const TABLE_SCHEMAS = {
     (item) => item.last_seen || "",
     (item) => item.event_type || "",
     (item) => lanSubjectLink(item),
+    (item) => lanVendorText(item),
     (item) => lanIdentityText(item),
     (item) => lanInterfaceStateText(item),
     (item) => compactList(item.sources || (item.source ? [item.source] : []), 3),
     (item) => lanGatewayText(item),
-    (item) => item.change_type || ""
+    (item) => item.change_type || "",
+    (item) => lanIdentifyButton(item)
+  ],
+  lanIdentifyResults: [
+    (item) => item.timestamp || "",
+    (item) => detailLink(lanIdentifyTargetText(item), "lan-subject", item.subject_key || item.mac || item.ip || item.target || ""),
+    (item) => item.event_type === "identify_result" ? "identified" : "identify failed",
+    (item) => compactList(item.open_ports || [], 4),
+    (item) => [
+      compactList(item.http_titles || [], 2),
+      compactList(item.http_scripts || [], 3),
+      compactList(item.http_headers || [], 2)
+    ].filter(Boolean).join("; "),
+    (item) => compactList(item.http_hints || item.service_banners || [], 4),
+    (item) => compactList(item.identify_errors || [], 3)
   ],
   wifiAccessPoints: [
     (item) => detailLink(item.ssid || "(blank)", "wifi-ssid", item.ssid || "(blank)"),

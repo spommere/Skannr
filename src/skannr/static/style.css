@@ -115,14 +115,42 @@ h3 {
   background: var(--ok);
 }
 
-.tab-alert-count {
-  display: none;
+.tab-row-count,
+.source-filter-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 18px;
   min-height: 18px;
   margin-left: 6px;
   padding: 1px 6px;
+  border: 1px solid var(--line);
   border-radius: 999px;
-  background: var(--warn);
+  background: #f7f9fa;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+.source-filter-count {
+  min-width: 16px;
+  min-height: 16px;
+  margin-left: 4px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.tab-alert-count {
+  display: none;
+  min-width: 18px;
+  min-height: 18px;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--alert);
   color: #fff;
   font-size: 11px;
   font-weight: 750;
@@ -484,6 +512,50 @@ table {
   min-width: 150px;
   width: 150px;
   white-space: nowrap;
+}
+
+.lan-identify-results-table th:nth-child(1),
+.lan-identify-results-table td:nth-child(1) {
+  min-width: 150px;
+  white-space: nowrap;
+}
+
+.lan-identify-results-table th:nth-child(2),
+.lan-identify-results-table td:nth-child(2) {
+  min-width: 12ch;
+  white-space: nowrap;
+}
+
+.lan-identify-results-table th:nth-child(3),
+.lan-identify-results-table td:nth-child(3) {
+  min-width: 14ch;
+  white-space: nowrap;
+}
+
+.lan-identify-results-table th:nth-child(4),
+.lan-identify-results-table td:nth-child(4) {
+  min-width: 24ch;
+  white-space: nowrap;
+}
+
+.lan-identify-results-table th:nth-child(7),
+.lan-identify-results-table td:nth-child(7) {
+  min-width: 360px;
+  width: 38%;
+}
+
+.lan-events-table th:nth-child(1),
+.lan-events-table td:nth-child(1),
+.lan-events-table th:nth-child(2),
+.lan-events-table td:nth-child(2),
+.lan-events-table th:nth-child(3),
+.lan-events-table td:nth-child(3) {
+  white-space: nowrap;
+}
+
+.lan-events-table th:nth-child(4),
+.lan-events-table td:nth-child(4) {
+  min-width: 18ch;
 }
 
 .reports-table .report-col-source {
