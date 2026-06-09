@@ -22,8 +22,8 @@ The current implementation focuses on:
 - optional NOAA SWPC internet-fed space-weather context
 - optional Ambient Weather personal weather station context
 - optional passive LAN neighbor/default-gateway context
-- deterministic Findings, Insights, Device History, and Reports generated from
-  retained local logs
+- deterministic Findings, Insights, Subject History, Alerts, and Reports
+  generated from retained local logs
 
 Skannr is intentionally small. It uses Flask, a local browser UI, JSONL files,
 and materialized JSON summaries. It does not require a database, message
@@ -71,7 +71,8 @@ Skannr is a single Python process with these major components:
 - `src/skannr/notifications.py`: optional external alert delivery such as
   Pushover.
 - `src/skannr/connectivity.py`: shared generic internet connectivity checks.
-- `src/skannr/device_history.py`: materialized Wi-Fi and Bluetooth device state.
+- `src/skannr/device_history.py`: internal Wi-Fi/Bluetooth compatibility view
+  used by older browser drilldown and live-table code.
 - `src/skannr/subject_history.py`: collector-neutral subject rollups for
   Wi-Fi, Bluetooth, APRS-IS, Rayhunter, RTL-SDR, NOAA, USGS, SWPC, PWS, and LAN.
 - `src/skannr/history_analysis.py`: deterministic Insights from the subject
@@ -134,7 +135,7 @@ raw collector JSONL
        USGS earthquake, SWPC space-weather event, PWS station, LAN device/gateway
 
 Subject History
-  -> Device History compatibility view          Wi-Fi/Bluetooth history tables
+  -> Wi-Fi/Bluetooth compatibility view         device_history.json tables
   -> Insights                                   short-lived tactical findings
   -> Reports                                    ranked intelligence summary
 
@@ -143,10 +144,14 @@ findings JSONL
      retained Findings/Insights history
 ```
 
+The `device_history` directory name is historical. `subject_history.json` is the
+primary materialized history model; `device_history.json` is the derived
+Wi-Fi/Bluetooth compatibility view.
+
 Subject History is the main materialized layer. Reports and longer-window
 analysis should read Subject History instead of rescanning raw collector logs.
-The compatibility Device History view exists so older Wi-Fi/Bluetooth UI code
-can keep using its existing table model while APRS-IS, Rayhunter, RTL-SDR,
+The Wi-Fi/Bluetooth compatibility view exists only so older Wi-Fi/Bluetooth UI
+code can keep using its existing table model while APRS-IS, Rayhunter, RTL-SDR,
 NOAA, USGS, SWPC, PWS, and LAN share the same subject-oriented contract.
 
 Live BLE Findings are intentionally identity-gated. Anonymous or
@@ -169,9 +174,9 @@ Cleanup follows those dependencies:
 - Removing raw collector logs limits future rebuilds from scratch but does not
   automatically delete already-materialized Subject History, Findings History,
   Insights, or Reports.
-- Removing Subject History forces Device History compatibility, Insights, and
-  Reports to rebuild from retained raw collector logs on the next forced
-  refresh.
+- Removing Subject History forces the Wi-Fi/Bluetooth compatibility view,
+  Insights, and Reports to rebuild from retained raw collector logs on the next
+  forced refresh.
 - Removing Reports has no upstream effect; Reports rebuild from Subject History.
 - Removing Findings History has no upstream effect; it rebuilds from retained
   `runtime/logs/findings` JSONL.
@@ -368,7 +373,7 @@ Important events:
 - `collector_retrying`
 - `collector_offline`
 
-Device History contribution:
+Subject History contribution:
 
 - Wi-Fi AP records keyed by BSSID
 - SSID history
@@ -405,7 +410,7 @@ Important events:
 High-rate `monitor_channel_changed` events are shown live but are not persisted,
 because they are channel-hop state rather than device history.
 
-Device History contribution:
+Subject History contribution:
 
 - AP beacons fold into the same Wi-Fi AP model as Wi-Fi Scan.
 - Probe, association, deauth, and disassociation events fold into Wi-Fi client
@@ -437,7 +442,7 @@ Important events:
 - `collector_retrying`
 - `collector_offline`
 
-Device History contribution:
+Subject History contribution:
 
 - Bluetooth device records keyed by MAC
 - names, manufacturer IDs, service UUIDs, RSSI range
@@ -509,11 +514,11 @@ Important events:
 - `identify_failed`
 - `collector_offline`
 
-Device History contribution:
+Subject History contribution:
 
 - Identify results enrich the Bluetooth record for the MAC.
 - Identify activity is displayed as an unfiltered activity log under BLE Scan;
-  Device History and Reports retain the longer-term Bluetooth history.
+  Subject History and Reports retain the longer-term Bluetooth history.
 
 ### Bluetooth Classic (`bt_classic`)
 
@@ -536,7 +541,7 @@ Important events:
 - `classic_device_lost`
 - `collector_retrying`
 
-Device History contribution:
+Subject History contribution:
 
 - Classic results are folded into the same Bluetooth device model.
 - Transport is marked as `classic`.
@@ -572,10 +577,10 @@ Important events:
 - `scanner_stopped`
 - `collector_offline`
 
-Device History contribution:
+Subject History contribution:
 
 - Subject History keeps a minimal frequency-bin rollup for detected signals.
-  The older Wi-Fi/Bluetooth Device History compatibility view does not expose
+  The Wi-Fi/Bluetooth compatibility view does not expose
   RTL-SDR-specific device rows.
 - Frequency subjects retain first seen, last seen, signal count, lost count,
   maximum power, and maximum above-floor delta.
@@ -660,10 +665,10 @@ Important events:
 - `aprs_status`
 - `aprs_weather`
 
-Device History contribution:
+Subject History contribution:
 
-- None. APRS-IS is not local device-history evidence. Subject History rolls
-  APRS packets up by callsign/object/weather station for Insights and Reports.
+- APRS-IS is not local RF evidence. Subject History rolls APRS packets up by
+  callsign/object/weather station for Insights and Reports.
 - APRS-IS weather stations also get daily aggregates that roll into weekly,
   monthly, and yearly period summaries. Reports use those period rows for
   longitudinal weather patterns such as temperature range/change, rain-rate
@@ -724,11 +729,10 @@ Important events:
 - `noaa_forecast_summary`
 - `noaa_tsunami_alert`
 
-Device History contribution:
+Subject History contribution:
 
-- None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
-  NOAA alerts/advisories and point forecasts up by the same feed-specific
-  identities used by the live tab, Reports, and Alerts.
+- Subject History rolls NOAA alerts/advisories and point forecasts up by the
+  same feed-specific identities used by the live tab, Reports, and Alerts.
 - NOAA also builds monthly and yearly period summaries over distinct material
   NOAA subjects. These rows track tropical systems, basins, NWS hazard subjects,
   hazard areas/severities, tsunami incidents/messages, forecast-context rows,
@@ -761,10 +765,10 @@ Important events:
 - `collector_offline`
 - `usgs_earthquake`
 
-Device History contribution:
+Subject History contribution:
 
-- None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
-  earthquakes up by USGS event identity for live detail, Reports, and Alerts.
+- Subject History rolls earthquakes up by USGS event identity for live detail,
+  Reports, and Alerts.
 - USGS also builds weekly, monthly, and yearly period summaries over unique
   event IDs. Reports use those rows for longitudinal seismic context: local
   versus global-major counts, notable and tsunami-flagged counts, magnitude
@@ -806,11 +810,10 @@ Important events:
 - `collector_offline`
 - `swpc_event`
 
-Device History contribution:
+Subject History contribution:
 
-- None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
-  SWPC space-weather events up by event identity for live detail, Reports, and
-  Alerts.
+- Subject History rolls SWPC space-weather events up by event identity for live
+  detail, Reports, and Alerts.
 - SWPC also builds weekly, monthly, and yearly period summaries over unique
   space-weather subjects. Reports use those rows to show alert-threshold and
   critical counts, event-kind counts, highest X-ray flare class, max Kp, and
@@ -865,11 +868,10 @@ Important events:
 - `collector_offline`
 - `pws_weather`
 
-Device History contribution:
+Subject History contribution:
 
-- None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
-  PWS samples up by station and by period for live detail, Insights, Reports,
-  and Alerts.
+- Subject History rolls PWS samples up by station and by period for live detail,
+  Insights, Reports, and Alerts.
 
 Alert behavior:
 
@@ -931,11 +933,10 @@ Important events:
 - `lan_gateway_seen`
 - `lan_gateway_changed`
 
-Device History contribution:
+Subject History contribution:
 
-- None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
-  LAN observations up by MAC/IP identity and default gateway identity for live
-  detail, Reports, and Alerts.
+- Subject History rolls LAN observations up by MAC/IP identity and default
+  gateway identity for live detail, Reports, and Alerts.
 
 ### LAN Identify (`lan_identify`)
 
@@ -962,12 +963,11 @@ Important events:
 - `identify_failed`
 - `collector_offline`
 
-Device History contribution:
+Subject History contribution:
 
-- None in the older Wi-Fi/Bluetooth compatibility view. Subject History stores
-  LAN Identify enrichment on the LAN subject so Reports can show clues such as
-  `Wi-Fi Setup`, `myq.js`, Chamberlain/MyQ hints, or open HTTP ports alongside
-  passive vendor and service observations.
+- Subject History stores LAN Identify enrichment on the LAN subject so Reports
+  can show clues such as `Wi-Fi Setup`, `myq.js`, Chamberlain/MyQ hints, or open
+  HTTP ports alongside passive vendor and service observations.
 
 ## 7. Persistence
 
@@ -1004,13 +1004,14 @@ checkpoints to avoid rereading old raw logs during normal refresh.
 
 ## 8. Derived Data
 
-Skannr has five derived data products:
+Skannr has four operator-facing derived data products plus one internal
+compatibility view:
 
 - Findings
 - Subject History
-- Device History
 - Insights
 - Reports
+- Wi-Fi/Bluetooth compatibility view stored in `device_history.json`
 
 The dashboard-facing derived views have distinct responsibilities:
 
@@ -1018,8 +1019,8 @@ The dashboard-facing derived views have distinct responsibilities:
 - Reports: ranked intelligence summary, strategic/operator-facing.
 - Subject History: collector-neutral subject rollup for every collector family
   and the visible History tab.
-- Device History: Wi-Fi/Bluetooth state database view derived from Subject
-  History for compatibility and existing drilldowns.
+- Wi-Fi/Bluetooth compatibility view: derived from Subject History for older
+  browser drilldown and live-table code.
 
 All four products use the same selected dashboard view window as their maximum
 raw-log scope. Insights then apply an additional recent-event lookback,
@@ -1073,13 +1074,14 @@ refreshes share the same post-refresh cooldown used by automatic refreshes, so
 slow Pis do not immediately start another catch-up cycle after a refresh has
 completed.
 Successful derived refreshes also rehydrate the live Wi-Fi Scan and BLE Scan
-tables from Device History so missed browser events do not leave the scan tabs
-showing stale rows when newer materialized data exists. The BLE Scan table is
-also periodically repainted so its recent-device filter can age rows out even
-when no new BLE event arrives after a sleeping browser wakes. Device History
-records carry numeric epoch fields next to display timestamps, and the browser
-uses those epochs for live/recent filtering when available. Display timestamps
-remain the Skannr-host strings from the event or derived summary.
+tables from the Wi-Fi/Bluetooth compatibility view so missed browser events do
+not leave the scan tabs showing stale rows when newer materialized data exists.
+The BLE Scan table is also periodically repainted so its recent-device filter
+can age rows out even when no new BLE event arrives after a sleeping browser
+wakes. Subject History and the compatibility view carry numeric epoch fields
+next to display timestamps, and the browser uses those epochs for live/recent
+filtering when available. Display timestamps remain the Skannr-host strings from
+the event or derived summary.
 Poll-feed live tables for NOAA, USGS, and SWPC upsert by source event/subject
 identity and hide rows older than `ui.poll_feed_live_ttl_sec`, default 24
 hours. This TTL only limits browser live-feed clutter. It does not delete raw
@@ -1089,7 +1091,7 @@ Manual or automatic refresh of any derived tab refreshes the whole bundle in
 dependency order:
 
 1. Subject History and Findings History
-2. Device History compatibility view
+2. Wi-Fi/Bluetooth compatibility view
 3. History-based Insights and Reports
 
 ### Findings
@@ -1166,10 +1168,10 @@ The summary also carries report-compatible sections such as `wifi`, `bluetooth`,
 visible History tab renders Subject History rows so APRS-IS callsigns,
 Rayhunter endpoints, RTL-SDR subjects, NOAA alerts, USGS earthquakes, SWPC
 space-weather events, PWS stations, and LAN subjects can be inspected directly.
-Device History remains the Wi-Fi/Bluetooth compatibility view derived from this
+The Wi-Fi/Bluetooth compatibility view remains derived from this
 summary.
 
-For collectors that do not have the older Wi-Fi/Bluetooth Device History fold,
+For collectors outside the Wi-Fi/Bluetooth compatibility fold,
 Subject History keeps compact `direct_observations` for APRS-IS, Rayhunter,
 RTL-SDR, NOAA, USGS, SWPC, PWS, and LAN. Refresh reads only JSONL bytes beyond the
 saved checkpoint, appends those normalized observations, and rebuilds the
@@ -1177,16 +1179,16 @@ selected-window subject rows from the materialized data. The browser API omits
 those durable observations and exposes the smaller normalized `subjects` list
 instead.
 
-### Subject History And Device History
+### Subject History And Wi-Fi/Bluetooth Compatibility
 
 Subject History is the collector-neutral materialized view used by the visible
-History tab. Device History is the materialized per-device Wi-Fi/Bluetooth
-compatibility view used by existing drilldowns. It is derived from Subject
-History so the dashboard API remains stable while the backend has one
-collector-neutral base layer.
+History tab. The historical `device_history` code/file is now the materialized
+per-device Wi-Fi/Bluetooth compatibility view used by existing drilldowns and
+live-table hydration. It is derived from Subject History so the dashboard API
+remains stable while the backend has one collector-neutral base layer.
 
-System events are intentionally excluded from Device History because they are
-runtime state, not per-device history. They remain eligible for Insights and
+System events are intentionally excluded from Subject History because they are
+runtime state, not durable subjects. They remain eligible for Insights and
 Reports when they are actionable.
 
 Current Wi-Fi AP history tracks:
@@ -1245,7 +1247,7 @@ are not the normal runtime query path.
 ### Insights
 
 Insights are the recent event feed. They combine live Findings with
-short-horizon Device History observations so an operator can debug recent
+short-horizon Subject History observations so an operator can debug recent
 changes and see the lower-level events that may later roll up into Reports.
 They are intentionally event-oriented: one row describes one finding or
 observation, sorted by event/activity time descending. Device-centric
@@ -1501,8 +1503,8 @@ fields for operator drilldown:
   APRS `r/lat/lon/radius` filters, so collectors should prefer those display
   forms instead of embedding provider-specific map URLs.
 
-The detail view is browser-side and uses the currently loaded Subject
-History/Device History compatibility payload plus Reports. It shows identity,
+The detail view is browser-side and uses the currently loaded Subject History,
+the Wi-Fi/Bluetooth compatibility payload, and Reports. It shows identity,
 first/last seen, collector-specific context, signal or event counts when
 available, related reports, and for SSIDs a BSSID radio table. This keeps the
 main Reports rows compact while still preserving the evidence needed to inspect
@@ -1788,8 +1790,9 @@ complexity before the collector set stabilizes.
 
 - Use filesystem JSONL instead of SQLite to keep deployment simple and make raw
   logs easy to inspect.
-- Materialize Subject History, Device History, Findings History, Insights, and
-  Reports so refresh does not repeatedly scan all raw logs.
+- Materialize Subject History, Findings History, Insights, Reports, and the
+  Wi-Fi/Bluetooth compatibility view so refresh does not repeatedly scan all raw
+  logs.
 - Keep Wi-Fi Scan and Wi-Fi Monitor separate because monitor-mode channel
   hopping has different hardware, CPU, and connectivity implications.
 - Group BLE Scan, BLE Identify, and Bluetooth Classic under one Bluetooth UI
