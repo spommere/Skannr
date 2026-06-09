@@ -34,6 +34,11 @@ DEFAULT_ALERT_CONFIG = {
     "ack_memory_ttl_sec": 604800,
     "ack_memory_alert_types": ["noaa_hazard"],
     "_disabled_noaa_sources": [],
+    "pushover": {
+        "enabled": False,
+        "userkey": "",
+        "appkey": "",
+    },
     "drone_wifi": {
         "enabled": True,
         "level": "critical",
@@ -525,7 +530,7 @@ class AlertEngine:
         if not self.matches_ble_tracker(data, rule):
             return []
         mac = data.get("mac") or "unknown"
-        name = data.get("name") or mac
+        name = data.get("name") or data.get("findmy_label") or mac
         summary = "Tracker-like BLE device seen nearby: {}; {}; {}".format(
             name,
             mac,
@@ -547,8 +552,15 @@ class AlertEngine:
                 "name": data.get("name") or "",
                 "manufacturer": data.get("manufacturer") or "",
                 "service_uuids": data.get("service_uuids") or [],
+                "findmy_accessory": bool(data.get("findmy_accessory")),
+                "findmy_label": data.get("findmy_label") or "",
+                "findmy_payload_type": data.get("findmy_payload_type") or "",
+                "findmy_status": data.get("findmy_status") or "",
+                "findmy_hint": data.get("findmy_hint") or "",
                 "rssi": self.to_number(data.get("rssi")),
-                "confidence": "High" if data.get("name") else "Medium",
+                "confidence": "High"
+                if data.get("name") or data.get("findmy_accessory")
+                else "Medium",
             },
         )
 
@@ -558,6 +570,8 @@ class AlertEngine:
         min_rssi = self.to_number(rule.get("min_rssi"))
         if rssi is not None and min_rssi is not None and rssi < min_rssi:
             return False
+        if data.get("findmy_accessory"):
+            return True
         if pattern_match(data.get("name"), rule.get("name_patterns")):
             return True
         if pattern_match(data.get("manufacturer"), rule.get("manufacturer_patterns")):
@@ -1096,7 +1110,9 @@ class AlertEngine:
         previous = self.active.get(key)
         remembered_ack = self.ack_memory.get(key)
         should_emit = bool(emit)
+        emit_reason = "new"
         if previous:
+            emit_reason = "repeat"
             previous["source"] = source
             previous["title"] = title
             previous["subject"] = subject
@@ -1112,6 +1128,7 @@ class AlertEngine:
                 previous.pop("ack_key_version", None)
                 self.ack_memory.pop(key, None)
                 should_emit = bool(emit)
+                emit_reason = "escalated"
             elif previous.get("acked"):
                 self.remember_ack(previous, now)
                 should_emit = False
@@ -1162,7 +1179,7 @@ class AlertEngine:
         alert["last_emitted_epoch"] = now
         public = public_alert(alert)
         self.recent.appendleft(public)
-        return [alert_event(public)]
+        return [alert_event(public, emit_reason)]
 
     def canonical_alert_key(self, alert, fallback):
         """Return current canonical ID for a persisted alert."""
@@ -1477,15 +1494,18 @@ def merge_config(base, override):
     return output
 
 
-def alert_event(alert):
+def alert_event(alert, emit_reason=None):
     """Wrap one alert for the normal Skannr event stream."""
+    data = dict(alert or {})
+    if emit_reason:
+        data["emit_reason"] = emit_reason
     return {
         "collector": "alerts",
         "type": "alert",
         "severity": "error" if alert.get("level") == "critical" else "warning",
         "timestamp": alert.get("last_seen"),
         "timestamp_epoch": alert.get("last_seen_epoch"),
-        "data": alert,
+        "data": data,
     }
 
 

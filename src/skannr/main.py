@@ -36,6 +36,7 @@ from .collectors.metadata import (
     collector_definitions,
     collector_keys,
 )
+from .connectivity import internet_available
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
 from .config import load_config
 from .device_history import DeviceHistoryBuilder
@@ -56,6 +57,7 @@ from .log_utils import (
     view_window_options,
     window_metadata,
 )
+from .notifications import pushover_enabled, send_pushover_alert
 from .paths import (
     CONFIG_COLLECTORS_DIR,
     CONFIG_PATH,
@@ -293,6 +295,8 @@ runtime = {
     "reports": None,
     "derived_cache_lock": threading.RLock(),
     "web_servers": [],
+    "push_executor": None,
+    "internet_status": None,
 }
 
 
@@ -931,6 +935,7 @@ def process_bus_event(event):
                 persistence.write(alert_event)
             except Exception as exc:
                 logging.exception("failed to persist alert: %s", exc)
+        submit_alert_notification(alert_event)
         broadcast("skannr_event", alert_event)
         broadcast("alerts_snapshot", runtime["alerts"].snapshot())
     save_alert_state()
@@ -956,6 +961,29 @@ def process_bus_event(event):
         collector_statuses(),
     )
     broadcast("system_status", system_status())
+
+
+def submit_alert_notification(alert_event):
+    """Submit optional external notification delivery for a new alert."""
+    alert = (alert_event or {}).get("data") or {}
+    if alert.get("emit_reason") not in ("new", "escalated"):
+        return
+    pushover_config = (((runtime.get("config") or {}).get("alerts") or {}).get("pushover") or {})
+    if not pushover_enabled(pushover_config):
+        return
+    executor = runtime.get("push_executor")
+    if not executor:
+        logging.warning("Pushover alert delivery skipped: worker is not running")
+        return
+    executor.submit(deliver_pushover_alert, dict(alert), dict(pushover_config))
+
+
+def deliver_pushover_alert(alert, pushover_config):
+    """Run Pushover delivery in a worker thread."""
+    try:
+        send_pushover_alert(alert, pushover_config)
+    except Exception as exc:
+        logging.warning("Pushover alert delivery failed: %s", exc)
 
 
 async def consume_events(bus):
@@ -1140,7 +1168,25 @@ def system_status():
     config = runtime.get("config") or {}
     return {
         "hardware": config.get("hardware", {}),
+        "internet": cached_internet_status(),
     }
+
+
+def cached_internet_status():
+    """Return a cached generic internet connectivity status."""
+    now = now_epoch()
+    cached = runtime.get("internet_status") or {}
+    if now - float(cached.get("checked_at_epoch") or 0) < 60:
+        return cached
+    online = internet_available(timeout=1.5)
+    status = {
+        "online": online,
+        "state": "ONLINE" if online else "OFFLINE",
+        "checked_at": local_now(now),
+        "checked_at_epoch": now,
+    }
+    runtime["internet_status"] = status
+    return status
 
 
 def record_live_observation(event):
@@ -1205,6 +1251,11 @@ def record_live_observation(event):
             "last_seen_epoch": timestamp_epoch_value,
             "signal_latest": data.get("rssi"),
             "service_uuids": data.get("service_uuids") or [],
+            "findmy_accessory": bool(data.get("findmy_accessory")),
+            "findmy_label": data.get("findmy_label") or "",
+            "findmy_payload_type": data.get("findmy_payload_type") or "",
+            "findmy_status": data.get("findmy_status") or "",
+            "findmy_hint": data.get("findmy_hint") or "",
         }
         with runtime["live_observations_lock"]:
             runtime["live_observations"]["bluetooth"][mac] = observation
@@ -2375,6 +2426,11 @@ BLUETOOTH_DEVICE_BROWSER_KEYS = {
     "classic_seen_count",
     "finding_count",
     "firmware_revision",
+    "findmy_accessory",
+    "findmy_hint",
+    "findmy_label",
+    "findmy_payload_type",
+    "findmy_status",
     "first_seen",
     "first_seen_epoch",
     "group_key",
@@ -3454,9 +3510,15 @@ def overlay_bluetooth_live_observations(records, live_observations, stats):
             "pnp_id",
             "vendor_name",
             "vendor_prefix",
+            "findmy_label",
+            "findmy_payload_type",
+            "findmy_status",
+            "findmy_hint",
         ):
             if observation.get(field):
                 record[field] = observation[field]
+        if observation.get("findmy_accessory"):
+            record["findmy_accessory"] = True
         for uuid in observation.get("service_uuids") or []:
             append_unique(record, "service_uuids", uuid)
         update_signal_from_live(record, observation.get("signal_latest"))
@@ -3753,6 +3815,10 @@ async def shutdown_runtime():
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
     save_alert_state(force=True)
+    executor = runtime.get("push_executor")
+    if executor:
+        executor.shutdown(wait=False)
+        runtime["push_executor"] = None
     loop = runtime.get("loop")
     if loop and loop.is_running():
         loop.call_soon(loop.stop)
@@ -3875,6 +3941,9 @@ def main():
     runtime["event_log"] = deque(maxlen=runtime_int("event_log_maxlen", 100, minimum=1))
     runtime["alerts"] = AlertEngine(alert_engine_config(config))
     runtime["findings"] = FindingsEngine(config.get("findings", {}))
+    runtime["push_executor"] = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="skannr-push"
+    )
     log_dir = configured_log_dir()
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "skannr.log")

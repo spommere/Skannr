@@ -35,6 +35,17 @@ def clean_usgs_data(data):
         "longitude",
         "depth_km",
         "distance_km",
+        "period_start_epoch",
+        "period_end_epoch",
+        "event_count",
+        "local_count",
+        "global_major_count",
+        "notable_count",
+        "tsunami_count",
+        "magnitude_min",
+        "magnitude_max",
+        "nearest_distance_km",
+        "shallowest_depth_km",
         "event_time_epoch",
         "updated_epoch",
         "felt",
@@ -43,6 +54,7 @@ def clean_usgs_data(data):
         "tsunami",
     }
     bool_keys = {"internet_fed", "global_major"}
+    list_keys = {"event_ids", "alert_colors", "scopes", "feeds"}
     for key, value in data.items():
         if value in (None, "", []):
             continue
@@ -50,6 +62,14 @@ def clean_usgs_data(data):
             cleaned[key] = value
         elif key in bool_keys:
             cleaned[key] = bool(value)
+        elif key in list_keys and isinstance(value, list):
+            items = []
+            for item in value:
+                text = compact_usgs_text(item, 80)
+                if text and text not in items:
+                    items.append(text)
+            if items:
+                cleaned[key] = items[:24]
         else:
             text = compact_usgs_text(value)
             if text:

@@ -79,6 +79,10 @@ alerts:
   - noaa_hazard
   - usgs_earthquake
   - swpc_space_weather
+  pushover:
+    enabled: false
+    userkey: ""
+    appkey: ""
   drone_wifi:
     enabled: true
     level: critical

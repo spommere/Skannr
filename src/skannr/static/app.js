@@ -750,6 +750,10 @@ function alertDetailsNode(alert) {
 function alertDetailItems(alert) {
   const evidence = (alert || {}).evidence || {};
   const items = [];
+  const swpcLevel = swpcLevelText(evidence);
+  if (swpcLevel) {
+    items.push({key: "swpc_level", label: "SWPC Level", value: swpcLevel, unit: ""});
+  }
   [
     ["bssid", "BSSID", ""],
     ["mac", "MAC", ""],
@@ -787,6 +791,9 @@ function alertDetailItems(alert) {
     ["channel", "Channel", ""],
     ["rain_1h_in", "1h Rain Rate", " in/hr"],
     ["wind_gust_mph", "Gust", " mph"],
+    ["findmy_payload_type", "Find My Type", ""],
+    ["findmy_status", "Find My Status", ""],
+    ["findmy_hint", "Find My Hint", ""],
     ["confidence", "Confidence", ""]
   ].forEach(([key, label, unit]) => {
     if (evidence[key] !== undefined && evidence[key] !== null && evidence[key] !== "") {
@@ -795,6 +802,9 @@ function alertDetailItems(alert) {
   });
   if (Array.isArray(evidence.service_uuids) && evidence.service_uuids.length) {
     items.push({key: "service_uuids", label: "Services", value: compactList(evidence.service_uuids, 3), unit: ""});
+  }
+  if (evidence.findmy_accessory) {
+    items.push({key: "findmy_accessory", label: "Find My", value: evidence.findmy_label || "Apple Find My accessory", unit: ""});
   }
   if (Array.isArray(evidence.nhc_product_types) && evidence.nhc_product_types.length) {
     items.push({key: "nhc_product_types", label: "Products", value: compactList(evidence.nhc_product_types, 5), unit: ""});
@@ -2476,10 +2486,10 @@ function reportFilterTypeLabel(type) {
 
 function sortReports(items) {
   return (items || []).sort((left, right) => {
-    const severity = severityRank(right.severity) - severityRank(left.severity);
-    if (severity !== 0) return severity;
     const scope = reportScopeRank(right) - reportScopeRank(left);
     if (scope !== 0) return scope;
+    const severity = severityRank(right.severity) - severityRank(left.severity);
+    if (severity !== 0) return severity;
     const score = Number(right.score || 0) - Number(left.score || 0);
     if (score !== 0) return score;
     const leftMs = recordTimestampMs(left, "last_seen") || recordTimestampMs(left, "timestamp");
@@ -3115,6 +3125,7 @@ function bleDeviceIdentity(item) {
     .forEach((name) => parts.push(name));
   const manufacturer = bluetoothManufacturerIdentity(device);
   if (manufacturer) parts.push(`Mfr: ${manufacturer}`);
+  if (device.findmy_accessory) parts.push(device.findmy_label || "Apple Find My accessory");
   return parts.join(" | ");
 }
 
@@ -5218,6 +5229,8 @@ function buildBluetoothDetail(mac) {
         ["MAC", device.mac],
         ["Transport", (device.transports || []).join(", ")],
         ["Identity", bleDeviceIdentity(device)],
+        ["Find My", device.findmy_accessory ? (device.findmy_label || "Apple Find My accessory") : ""],
+        ["Find My Payload", findmyPayloadText(device)],
         ["Services / UUIDs", bluetoothServiceList(device.service_uuids)],
         ["Model", device.model_number],
         ["Serial", device.serial_number],
@@ -5238,6 +5251,15 @@ function buildBluetoothDetail(mac) {
       reportsSection(reports)
     ]
   };
+}
+
+function findmyPayloadText(device) {
+  const item = device || {};
+  return [
+    item.findmy_payload_type ? `type ${item.findmy_payload_type}` : "",
+    item.findmy_status ? `status ${item.findmy_status}` : "",
+    item.findmy_hint ? `hint ${item.findmy_hint}` : ""
+  ].filter(Boolean).join(", ");
 }
 
 function buildWifiSsidDetail(ssid) {
@@ -6112,6 +6134,7 @@ function rayhunterReportEvidenceItems(evidence) {
 
 function aprsisReportEvidenceItems(evidence) {
   if (evidence.population_kind) return aprsisPopulationReportEvidenceItems(evidence);
+  if (evidence.period || evidence.coverage) return aprsisWeatherPeriodEvidenceItems(evidence);
   const parts = [];
   const isWeatherStation = Number(evidence.weather_count || 0) > 0;
   const findings = findingsText(evidence.findings, "", false);
@@ -6153,6 +6176,32 @@ function aprsisReportEvidenceItems(evidence) {
   ].filter(Boolean).join("; ");
   if (feed) parts.push({label: "Route / Feed", value: feed});
   return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function aprsisWeatherPeriodEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const period = [
+    evidence.period || "",
+    evidence.coverage || "",
+    timeRangeText(evidence.first_seen, evidence.last_seen)
+  ].filter(Boolean).join("; ");
+  if (period) parts.push({label: "Period", value: period});
+  const weather = [
+    evidence.temperature || "",
+    evidence.rain || "",
+    evidence.wind || "",
+    evidence.pressure || ""
+  ].filter(Boolean).join("; ");
+  if (weather) parts.push({label: "Weather", value: weather});
+  const station = [
+    evidence.callsign || "",
+    evidence.location ? `location ${evidence.location}` : "",
+    evidence.source || ""
+  ].filter(Boolean).join("; ");
+  if (station) parts.push({label: "Station", value: station});
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
 }
 
 function aprsisPopulationReportEvidenceItems(evidence) {
@@ -6329,6 +6378,7 @@ function rainTransitionTimestamp(evidence, state) {
 
 function noaaReportEvidenceItems(evidence) {
   if (evidence.population_kind) return noaaPopulationReportEvidenceItems(evidence);
+  if (evidence.period || evidence.counts) return noaaPeriodEvidenceItems(evidence);
   const parts = [];
   const findings = findingsText(evidence.findings, "", false);
   if (findings) parts.push({label: "Findings", value: findings});
@@ -6384,6 +6434,33 @@ function noaaReportEvidenceItems(evidence) {
     });
   }
   return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function noaaPeriodEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const period = [
+    evidence.period || "",
+    evidence.counts || "",
+    timeRangeText(evidence.first_seen, evidence.last_seen)
+  ].filter(Boolean).join("; ");
+  if (period) parts.push({label: "Period", value: period});
+  const hazards = [
+    evidence.tropical_systems && evidence.tropical_systems.length ? `tropical ${compactList(evidence.tropical_systems, 4)}` : "",
+    evidence.basins && evidence.basins.length ? `basins ${compactList(evidence.basins, 4)}` : "",
+    evidence.nws_hazards || "",
+    evidence.tsunami || "",
+    evidence.forecast_count ? `${evidence.forecast_count} forecast subject(s)` : "",
+    evidence.sources && evidence.sources.length ? `sources ${compactList(evidence.sources, 4)}` : ""
+  ].filter(Boolean).join("; ");
+  if (hazards) parts.push({label: "Hazards", value: hazards});
+  const trend = [
+    evidence.change || "",
+    evidence.latest || ""
+  ].filter(Boolean).join("; ");
+  if (trend) parts.push({label: "Trend", value: trend});
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
 }
 
 function noaaTsunamiEvidenceText(data) {
@@ -6482,6 +6559,7 @@ function noaaPopulationReportEvidenceItems(evidence) {
 
 function usgsReportEvidenceItems(evidence) {
   if (evidence.population_kind) return usgsPopulationReportEvidenceItems(evidence);
+  if (evidence.period || evidence.counts) return usgsPeriodEvidenceItems(evidence);
   const parts = [];
   const findings = findingsText(evidence.findings, "", false);
   if (findings) parts.push({label: "Findings", value: findings});
@@ -6521,6 +6599,32 @@ function usgsReportEvidenceItems(evidence) {
   return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
 }
 
+function usgsPeriodEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const period = [
+    evidence.period || "",
+    evidence.counts || "",
+    timeRangeText(evidence.first_seen, evidence.last_seen)
+  ].filter(Boolean).join("; ");
+  if (period) parts.push({label: "Period", value: period});
+  const seismic = [
+    evidence.magnitude || "",
+    evidence.distance_depth || "",
+    evidence.alert_colors && evidence.alert_colors.length ? `alerts ${compactList(evidence.alert_colors, 4)}` : "",
+    evidence.scopes && evidence.scopes.length ? `scopes ${compactList(evidence.scopes, 4)}` : "",
+    evidence.feeds && evidence.feeds.length ? `feeds ${compactList(evidence.feeds, 4)}` : ""
+  ].filter(Boolean).join("; ");
+  if (seismic) parts.push({label: "Seismic", value: seismic});
+  const latest = [
+    evidence.latest || "",
+    evidence.event_ids && evidence.event_ids.length ? `IDs ${compactList(evidence.event_ids, 5)}` : ""
+  ].filter(Boolean).join("; ");
+  if (latest) parts.push({label: "Latest", value: latest});
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
+}
+
 function usgsPopulationReportEvidenceItems(evidence) {
   const parts = [];
   const findings = findingsText(evidence.findings, "", false);
@@ -6545,6 +6649,7 @@ function usgsPopulationReportEvidenceItems(evidence) {
 
 function swpcReportEvidenceItems(evidence) {
   if (evidence.population_kind) return swpcPopulationReportEvidenceItems(evidence);
+  if (evidence.period || evidence.counts) return swpcPeriodEvidenceItems(evidence);
   const parts = [];
   const findings = findingsText(evidence.findings, "", false);
   if (findings) parts.push({label: "Findings", value: findings});
@@ -6588,6 +6693,30 @@ function swpcReportEvidenceItems(evidence) {
   return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
 }
 
+function swpcPeriodEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const period = [
+    evidence.period || "",
+    evidence.counts || "",
+    timeRangeText(evidence.first_seen, evidence.last_seen)
+  ].filter(Boolean).join("; ");
+  if (period) parts.push({label: "Period", value: period});
+  const level = [
+    evidence.scale || "",
+    evidence.scale_labels && evidence.scale_labels.length ? compactList(evidence.scale_labels, 5) : "",
+    evidence.kinds && evidence.kinds.length ? `kinds ${compactList(evidence.kinds, 5)}` : ""
+  ].filter(Boolean).join("; ");
+  if (level) parts.push({label: "Level", value: level});
+  const latest = [
+    evidence.latest || "",
+    evidence.events && evidence.events.length ? compactList(evidence.events, 5) : ""
+  ].filter(Boolean).join("; ");
+  if (latest) parts.push({label: "Latest", value: latest});
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
+}
+
 function swpcPopulationReportEvidenceItems(evidence) {
   const parts = [];
   const findings = findingsText(evidence.findings, "", false);
@@ -6613,6 +6742,7 @@ function swpcPopulationReportEvidenceItems(evidence) {
 
 function pwsReportEvidenceItems(evidence) {
   if (evidence.population_kind) return pwsPopulationReportEvidenceItems(evidence);
+  if (evidence.period || evidence.coverage) return pwsPeriodEvidenceItems(evidence);
   const parts = [];
   const findings = findingsText(evidence.findings, "", false);
   if (findings) parts.push({label: "Findings", value: findings});
@@ -6649,6 +6779,28 @@ function pwsReportEvidenceItems(evidence) {
     });
   }
   return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function pwsPeriodEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const period = [
+    evidence.period || "",
+    evidence.coverage || "",
+    timeRangeText(evidence.first_seen, evidence.last_seen)
+  ].filter(Boolean).join("; ");
+  if (period) parts.push({label: "Period", value: period});
+  const weather = [
+    evidence.temperature || "",
+    evidence.rain || "",
+    evidence.wind || "",
+    evidence.pressure || "",
+    evidence.solar || ""
+  ].filter(Boolean).join("; ");
+  if (weather) parts.push({label: "Weather", value: weather});
+  if (evidence.station_id) parts.push({label: "Station", value: evidence.station_id});
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
 }
 
 function pwsPopulationReportEvidenceItems(evidence) {
@@ -6976,7 +7128,7 @@ function genericEvidenceItems(evidence, detail) {
 }
 
 function internalEvidenceKey(key) {
-  return ["identity_key", "internet_fed"].includes(key);
+  return ["identity_key", "internet_fed", "findmy_accessory"].includes(key);
 }
 
 function evidenceDisplayValue(evidence, key) {
@@ -6991,6 +7143,11 @@ function evidenceDisplayValue(evidence, key) {
 
 function evidenceLabel(key) {
   if (key === "service_uuids") return "Services / UUIDs";
+  if (key === "findmy_accessory") return "Find My";
+  if (key === "findmy_label") return "Find My";
+  if (key === "findmy_payload_type") return "Find My Type";
+  if (key === "findmy_status") return "Find My Status";
+  if (key === "findmy_hint") return "Find My Hint";
   return key;
 }
 
@@ -7282,14 +7439,23 @@ function hardwareSummary(item) {
     if (feeds.length) {
       return [
         detected.enabled === false ? "disabled" : "",
+        internetStatusText(),
         `${feeds.length} feed${feeds.length === 1 ? "" : "s"}`,
         feeds.map(aprsisFeedSummary).filter(Boolean).join("; ")
       ].filter(Boolean).join(", ");
     }
     return [
       detected.enabled === false ? "disabled" : "",
+      internetStatusText(),
       detected.host ? `feed: ${detected.host}:${detected.port || ""}` : "no feed configured",
       detected.filter ? `filter: ${detected.filter}` : "no filter configured"
+    ].filter(Boolean).join(", ");
+  }
+  if (detected.internet_source) {
+    return [
+      detected.enabled === false ? "disabled" : "",
+      internetStatusText(),
+      cleanActiveHardware(item.hardware)
     ].filter(Boolean).join(", ");
   }
   if (item.key === "lan") {
@@ -7299,6 +7465,12 @@ function hardwareSummary(item) {
     ].filter(Boolean).join(", ");
   }
   return item.hardware || "";
+}
+
+function internetStatusText() {
+  const internet = latestSystemStatus.internet || {};
+  if (!internet.state && internet.online === undefined) return "";
+  return `internet ${internet.online ? "online" : "offline"}`;
 }
 
 function aprsisFeedSummary(feed) {

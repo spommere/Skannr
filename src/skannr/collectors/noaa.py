@@ -137,6 +137,17 @@ def clean_noaa_data(data):
         "max_precip_probability",
         "next_precip_probability",
         "max_wind_mph",
+        "period_start_epoch",
+        "period_end_epoch",
+        "event_count",
+        "tropical_system_count",
+        "nhc_product_count_total",
+        "nws_hazard_count",
+        "tsunami_incident_count",
+        "tsunami_message_count",
+        "forecast_count",
+        "previous_event_count",
+        "event_count_delta",
     }
     bool_keys = {"internet_fed", "precip_likely_soon"}
     list_keys = {
@@ -148,6 +159,13 @@ def clean_noaa_data(data):
         "nhc_product_urls",
         "resource_urls",
         "map_urls",
+        "basins",
+        "tropical_systems",
+        "hazard_events",
+        "hazard_areas",
+        "hazard_severities",
+        "tsunami_incidents",
+        "sources",
     }
     dict_list_keys = {"nhc_products"}
     long_text_keys = {"description", "instruction", "summary"}

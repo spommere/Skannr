@@ -81,6 +81,11 @@ DEFAULT_CONFIG = {
             "usgs_earthquake",
             "swpc_space_weather",
         ],
+        "pushover": {
+            "enabled": False,
+            "userkey": "",
+            "appkey": "",
+        },
         "drone_wifi": {
             "enabled": True,
             "level": "critical",

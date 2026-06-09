@@ -422,6 +422,11 @@ class DeviceHistoryBuilder:
                 "lost_count": 0,
                 "manufacturer": None,
                 "service_uuids": set(),
+                "findmy_accessory": False,
+                "findmy_label": "",
+                "findmy_payload_type": "",
+                "findmy_status": "",
+                "findmy_hint": "",
                 "sessions": [],
                 "active_session": None,
                 "finding_count": 0,
@@ -440,6 +445,16 @@ class DeviceHistoryBuilder:
             item["manufacturer"] = self.clean(data.get("manufacturer"))
         for uuid in data.get("service_uuids") or []:
             self.add_set_value(item["service_uuids"], uuid)
+        for field in (
+            "findmy_label",
+            "findmy_payload_type",
+            "findmy_status",
+            "findmy_hint",
+        ):
+            if data.get(field):
+                item[field] = self.clean(data.get(field))
+        if data.get("findmy_accessory"):
+            item["findmy_accessory"] = True
         self.update_signal(item, data.get("rssi"))
         if event_type == "device_seen":
             # Sessions are the basis for "comes and goes" analysis. A seen event
@@ -478,6 +493,11 @@ class DeviceHistoryBuilder:
                 "lost_count": 0,
                 "manufacturer": None,
                 "service_uuids": set(),
+                "findmy_accessory": False,
+                "findmy_label": "",
+                "findmy_payload_type": "",
+                "findmy_status": "",
+                "findmy_hint": "",
                 "sessions": [],
                 "active_session": None,
                 "finding_count": 0,
@@ -745,6 +765,10 @@ class DeviceHistoryBuilder:
             "software_revision",
             "pnp_id",
             "service_uuids",
+            "findmy_label",
+            "findmy_payload_type",
+            "findmy_status",
+            "findmy_hint",
         ):
             if device.get(field):
                 return False
@@ -1044,11 +1068,17 @@ class DeviceHistoryBuilder:
                 "classic_class",
                 "classic_clock_offset",
                 "service_uuids",
+                "findmy_label",
+                "findmy_payload_type",
+                "findmy_status",
+                "findmy_hint",
             ):
                 if not record.get(field) and old.get(field):
                     record[field] = old[field]
             if old.get("randomized_mac"):
                 record["randomized_mac"] = True
+            if old.get("findmy_accessory"):
+                record["findmy_accessory"] = True
         return sorted(
             current_records,
             key=lambda item: record_time_epoch(item, "last_seen") or 0,

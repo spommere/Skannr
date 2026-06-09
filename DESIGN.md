@@ -1,6 +1,6 @@
 # Skannr Design Document
 
-Version: 0.2.4, 2026-06-07
+Version: 0.2.5, 2026-06-09
 
 ## 1. Overview
 
@@ -68,6 +68,9 @@ Skannr is a single Python process with these major components:
 - `src/skannr/persistence/`: persistence backend interface and filesystem JSONL backend.
 - `src/skannr/findings.py`: live deterministic findings engine over collector events.
 - `src/skannr/alerts.py`: live alert engine for operator-attention events.
+- `src/skannr/notifications.py`: optional external alert delivery such as
+  Pushover.
+- `src/skannr/connectivity.py`: shared generic internet connectivity checks.
 - `src/skannr/device_history.py`: materialized Wi-Fi and Bluetooth device state.
 - `src/skannr/subject_history.py`: collector-neutral subject rollups for
   Wi-Fi, Bluetooth, APRS-IS, Rayhunter, RTL-SDR, NOAA, USGS, SWPC, PWS, and LAN.
@@ -99,9 +102,14 @@ The normal event path is:
 7. `AlertEngine.process()` may emit alert events. Alert events are persisted
    under `runtime/logs/alerts` and broadcast to browsers. Active alerts are kept
    in memory and appear globally until ACKed or expired.
-8. `FindingsEngine.process()` may emit one or more finding events.
-9. Finding events are persisted under `runtime/logs/findings` and broadcast to browsers.
-10. Collector health and system status snapshots are broadcast.
+8. If Pushover is enabled, newly emitted or escalated alert events are submitted
+   to a background notification worker. Duplicate/update alert traffic is not
+   pushed. Delivery is best-effort and guarded by the generic internet
+   connectivity check, so unavailable internet or Pushover API failures are
+   logged without blocking collector fan-out.
+9. `FindingsEngine.process()` may emit one or more finding events.
+10. Finding events are persisted under `runtime/logs/findings` and broadcast to browsers.
+11. Collector health and system status snapshots are broadcast.
 
 Browser updates use Server-Sent Events from `/events`. Socket.IO remains present
 for compatibility, but the dashboard does not depend on a CDN-hosted Socket.IO
@@ -206,6 +214,7 @@ The global file owns:
 - runtime queue/status timing knobs
 - live Findings thresholds
 - live AlertEngine rules and thresholds
+- optional alert notification delivery, currently Pushover
 - history-analysis thresholds
 - Reports thresholds
 - UI row limits, poll-feed live TTL, stale-data threshold, and automatic
@@ -432,6 +441,8 @@ Device History contribution:
 
 - Bluetooth device records keyed by MAC
 - names, manufacturer IDs, service UUIDs, RSSI range
+- Apple Find My marker, payload type, status byte, and owner-lookup hint bytes
+  when Apple manufacturer data uses payload type `0x12`
 - first/last seen
 - seen/update/lost counts
 - presence sessions, including active sessions persisted across refreshes
@@ -453,6 +464,15 @@ also load optional offline UUID assigned-number files from
 Standard service UUID labels and member/vendor UUID labels are displayed in
 Services / UUIDs fields. Member UUIDs are labeled explicitly, for example
 `Member UUID FEAF: Nest Labs Inc`. Unknown UUIDs remain visible as raw values.
+
+Apple Find My accessories are detected from BLE manufacturer data, not from
+names or GATT reads. Bleak exposes Apple company ID `0x004C` separately from
+the payload bytes, so Skannr matches payload byte `0x12` and records compact
+fields only: `findmy_accessory`, `findmy_label`, `findmy_payload_type`,
+`findmy_status`, and `findmy_hint`. This intentionally does not claim an
+AirTag-specific identity because AirTags, AirPods cases, and third-party Find
+My accessories can share the same advertisement family, and the BLE address
+rotates.
 
 ### BLE Identify (`ble_identify`)
 
@@ -526,12 +546,22 @@ Device History contribution:
 
 Purpose: passive spectrum scanning over a configured frequency range.
 
+RTL-SDR is currently a power-level collector, not a decoder. It answers "was
+there signal energy around this frequency bin above the local noise floor?" It
+does not decode APRS, ADS-B, GPS, LoRa, weather sensors, or any other protocol.
+Protocol-specific decoding belongs in separate decoder-backed collectors that
+consume outputs from tools such as `direwolf`, `dump1090` / `readsb`,
+`gnss-sdr`, `rtl_433`, or GNU Radio based pipelines.
+
 Implementation:
 
 - Validates `rtl_power`, `rtl_test`, and connected device presence.
 - Runs `rtl_power` as an asyncio subprocess.
 - Builds a baseline noise floor for `baseline_period_sec`.
 - Emits signal detections when bins exceed the baseline by `threshold_db`.
+- Suppresses detections while the baseline is being learned.
+- Tracks active bins and emits `signal_lost` when a previously active bin drops
+  below threshold.
 
 Important events:
 
@@ -547,6 +577,59 @@ Device History contribution:
 - Subject History keeps a minimal frequency-bin rollup for detected signals.
   The older Wi-Fi/Bluetooth Device History compatibility view does not expose
   RTL-SDR-specific device rows.
+- Frequency subjects retain first seen, last seen, signal count, lost count,
+  maximum power, and maximum above-floor delta.
+- Reports do not yet create dedicated RTL-SDR rows; power-pattern reporting and
+  protocol decoder integrations are planned separately.
+
+### Rayhunter (`rayhunter`)
+
+Purpose: poll an optional Rayhunter cellular-monitor HTTP endpoint and convert
+its health, recording metadata, and analysis warning count into Skannr subjects,
+reports, and alerts.
+
+Rayhunter is a cellular-monitor integration, not a generic Skannr RF scan. The
+signal and protocol interpretation is Rayhunter's responsibility. Skannr treats
+the configured endpoint as provenance and records only compact status and
+warning metadata.
+
+Implementation:
+
+- Requires `endpoint` before the collector can start.
+- Polls the endpoint every `poll_interval_sec`, default 30 seconds.
+- Uses `request_timeout_sec` for HTTP requests.
+- Prefers Rayhunter JSON APIs:
+  `/api/system-stats`, `/api/qmdl-manifest`, `/api/config`, and
+  `/api/analysis-report/<recording>`.
+- Falls back to parsing the visible status page when the JSON APIs are missing.
+- Accepts gzip responses.
+- Sanitizes status text and older persisted data so HTML, JavaScript bundles,
+  and minified Svelte fragments are not retained as operator evidence.
+- Does not fetch or retain `.qmdl`, `.pcap`, ZIP, or other large Rayhunter
+  artifacts.
+
+Important events:
+
+- `collector_online`
+- `rayhunter_status`
+- `collector_retrying`
+- `collector_offline`
+
+Subject History contribution:
+
+- Subject History keeps one endpoint subject keyed by the configured endpoint.
+- The subject stores the latest reachable/retrying/offline state, warning count,
+  Rayhunter version, device OS, storage, memory, battery, GPS mode, current
+  recording ID/size/start time, and recording last-message time when available.
+- Reports show one row per endpoint using subject `Rayhunter <endpoint>`.
+  The summary carries the warning count and selected-window status-event count.
+
+Alert behavior:
+
+- `rayhunter_warning` emits an alert when Rayhunter reports a non-zero warning
+  count.
+- Generic collector-health alerts are controlled separately by
+  `alerts.collector_issue`.
 
 ### APRS-IS (`aprsis`)
 
@@ -581,6 +664,12 @@ Device History contribution:
 
 - None. APRS-IS is not local device-history evidence. Subject History rolls
   APRS packets up by callsign/object/weather station for Insights and Reports.
+- APRS-IS weather stations also get daily aggregates that roll into weekly,
+  monthly, and yearly period summaries. Reports use those period rows for
+  longitudinal weather patterns such as temperature range/change, rain-rate
+  maxima, rain episodes, wind/gust maxima, pressure range/change, and
+  sample/day coverage. APRS-IS mobile-station trip rollups are intentionally
+  left for a later design pass.
 
 ### NOAA (`noaa`)
 
@@ -640,6 +729,12 @@ Device History contribution:
 - None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
   NOAA alerts/advisories and point forecasts up by the same feed-specific
   identities used by the live tab, Reports, and Alerts.
+- NOAA also builds monthly and yearly period summaries over distinct material
+  NOAA subjects. These rows track tropical systems, basins, NWS hazard subjects,
+  hazard areas/severities, tsunami incidents/messages, forecast-context rows,
+  sources, and retained previous-period subject-count deltas. They deliberately
+  avoid advisory-package product count by storm/system and max-severity rollups
+  as primary outputs.
 
 ### USGS (`usgs`)
 
@@ -670,6 +765,11 @@ Device History contribution:
 
 - None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
   earthquakes up by USGS event identity for live detail, Reports, and Alerts.
+- USGS also builds weekly, monthly, and yearly period summaries over unique
+  event IDs. Reports use those rows for longitudinal seismic context: local
+  versus global-major counts, notable and tsunami-flagged counts, magnitude
+  range, nearest configured-point distance, shallowest depth, alert colors,
+  scopes, feeds, and latest-event context.
 
 ### SWPC (`swpc`)
 
@@ -711,6 +811,10 @@ Device History contribution:
 - None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
   SWPC space-weather events up by event identity for live detail, Reports, and
   Alerts.
+- SWPC also builds weekly, monthly, and yearly period summaries over unique
+  space-weather subjects. Reports use those rows to show alert-threshold and
+  critical counts, event-kind counts, highest X-ray flare class, max Kp, and
+  strongest R/S/G scale labels directly in the report row.
 
 Alert behavior:
 
@@ -746,6 +850,13 @@ Implementation:
 - Tracks simple rain episodes in Subject History. When the latest transition is
   `stopped`, report evidence keeps the episode start and stop together so
   Reports do not show ambiguous standalone rain start/stop rows.
+- Builds daily PWS station aggregates and rolls them into weekly, monthly, and
+  yearly summaries for Reports. Period rows carry temperature range/change,
+  average humidity, observed rain total, maximum one-hour rain rate, rain
+  episode count, approximate rain-active span, maximum wind/gust, pressure
+  range/change, solar/UV maxima, and sample/day coverage. These are derived
+  from retained PWS samples, so longer-period comparisons are sparse until
+  enough data has accumulated.
 
 Important events:
 
@@ -757,7 +868,8 @@ Important events:
 Device History contribution:
 
 - None in the older Wi-Fi/Bluetooth compatibility view. Subject History rolls
-  PWS samples up by station for live detail, Insights, Reports, and Alerts.
+  PWS samples up by station and by period for live detail, Insights, Reports,
+  and Alerts.
 
 Alert behavior:
 
@@ -1211,6 +1323,9 @@ Current report families include:
   activity, SWPC space-weather product sets, LAN subject population,
   multi-BSSID Wi-Fi SSID profiles, BLE private-address clusters, and local RF
   privacy exposure
+- materialized period rows for longitudinal patterns such as PWS and APRS-IS
+  weather station trends, USGS seismic periods, SWPC space-weather periods, and
+  NOAA monthly/yearly hazard context
 
 Bluetooth sessions are clipped to the selected report window so a last-24-hours
 report does not count hours before the window boundary.
@@ -1247,6 +1362,13 @@ Monitor client reports show client, probe, and activity context. This keeps the
 table readable without discarding the raw evidence fields. In the table, the
 Evidence cell is rendered as compact stacked label/value lines rather than a
 pipe-delimited log string.
+Materialized period reports use explicit evidence renderers for the same
+reason. PWS and APRS-IS weather station period rows are per-subject
+longitudinal rows, while NOAA, USGS, and SWPC period rows are population
+patterns. Their evidence is grouped as period, weather/seismic/space-weather
+level, latest event, and source coverage instead of falling back to raw JSON
+key names. This keeps Reports readable while preserving the underlying
+structured evidence for search and drilldown.
 Bluetooth report generation is device-centric on the server side. Stable BLE
 MACs produce one device-profile row with a Subject, merged findings, summary,
 and behavioral evidence. Unnamed/private BLE address churn is grouped by a
@@ -1343,25 +1465,32 @@ Top-level tabs:
 
 - Insights
 - Reports
-- Device History
+- Subject History
 - Wi-Fi Scan
 - Wi-Fi Monitor
 - Bluetooth
 - RTL-SDR
+- APRS-IS
+- NOAA
+- USGS
+- SWPC
+- PWS
+- LAN
 - System Status
+- Alerts
 
-Insights, Reports, and Device History have Source filter chips built from
+Insights, Reports, and Subject History have Source filter chips built from
 collector metadata. They are filters over one dataset, not navigation tabs.
 Bluetooth collectors are grouped under a single Bluetooth source group. Wi-Fi
 Scan and Wi-Fi Monitor remain separate sources because one is managed scanning
 and the other is monitor-mode capture.
 Live Wi-Fi Scan and BLE Scan tables use one row-search box each instead of
 separate per-column selector controls.
-Device History omits System from its Source filter; System is not a device
-source.
+Subject History omits System from its Source filter; System is runtime state,
+not a durable subject source.
 
-Reports, Device History, and live scan tables expose clickable identity fields
-for operator drilldown:
+Reports, Subject History, and live scan/feed tables expose clickable identity
+fields for operator drilldown:
 
 - Bluetooth MAC opens the Bluetooth device detail view.
 - Wi-Fi SSID opens a grouped network detail view across all BSSIDs for that
@@ -1372,11 +1501,12 @@ for operator drilldown:
   APRS `r/lat/lon/radius` filters, so collectors should prefer those display
   forms instead of embedding provider-specific map URLs.
 
-The detail view is browser-side and uses the currently loaded Device History and
-Reports payloads. It shows identity, first/last seen, radio/security context,
-signal, session/count fields, related reports, and for SSIDs a BSSID radio
-table. This keeps the main Reports rows compact while still preserving the
-evidence needed to inspect a device or network.
+The detail view is browser-side and uses the currently loaded Subject
+History/Device History compatibility payload plus Reports. It shows identity,
+first/last seen, collector-specific context, signal or event counts when
+available, related reports, and for SSIDs a BSSID radio table. This keeps the
+main Reports rows compact while still preserving the evidence needed to inspect
+a device, network, station, endpoint, event, or LAN subject.
 
 The header contains:
 
@@ -1390,11 +1520,12 @@ is populated from `config/skannr.yaml`, `retention_days`, and optional
 hardware and keeps software checks in a separate column.
 
 Collector tabs include compact status dots derived from the live collector
-status snapshot. Wi-Fi Scan, Wi-Fi Monitor, and RTL-SDR show one dot each.
-Bluetooth shows two dots: BLE Scan first, Bluetooth Classic second. A filled
-dot means `ONLINE`; a hollow dot means stopped, offline, retrying, or otherwise
-not online. Color is only a secondary cue, with tooltips and ARIA labels
-carrying the exact collector state.
+status snapshot. Single-collector tabs show one dot each. Bluetooth shows one
+dot per Bluetooth-family collector. A filled dot means `ONLINE`; a hollow dot
+means stopped, offline, retrying, disabled, or otherwise not online. Color is
+only a secondary cue, with tooltips and ARIA labels carrying the exact collector
+state. System Status shows an online/total collector summary instead of a dot;
+Alerts shows total row count plus a separate unacknowledged-alert badge.
 
 The dashboard uses local assets only. No CDN is required.
 

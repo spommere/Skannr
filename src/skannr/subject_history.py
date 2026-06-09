@@ -7,6 +7,8 @@ endpoints, and RTL-SDR frequencies.
 """
 
 import copy
+import datetime
+import math
 import os
 from collections import Counter, defaultdict
 
@@ -20,7 +22,14 @@ from .collectors.noaa import (
 from .collectors.aprsis import aprsis_distance_km, aprsis_float, clean_aprs_data
 from .collectors.pws import clean_pws_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
-from .collectors.swpc import clean_swpc_data, number_or_none, swpc_event_is_alert
+from .collectors.swpc import (
+    clean_swpc_data,
+    number_or_none,
+    swpc_event_is_alert,
+    swpc_event_is_critical,
+    swpc_scale_label,
+    xray_class_to_flux,
+)
 from .collectors.usgs import clean_usgs_data
 from .device_history import DeviceHistoryBuilder
 from .log_utils import (
@@ -498,6 +507,7 @@ class SubjectHistoryBuilder:
         """Return compact per-callsign APRS-IS summaries for this view window."""
         records_read = 0
         stations = {}
+        weather_daily = {}
         latest_health = {}
         latest_health_epoch = None
         latest_epoch = None
@@ -539,10 +549,28 @@ class SubjectHistoryBuilder:
                 self.aprsis_station_summary_template(callsign, data, epoch),
             )
             self.aprsis_update_station_summary(station, data, event_type, epoch)
+            if self.aprsis_is_weather_packet(data, event_type):
+                day_key, day_label = self.period_key(epoch, "daily")
+                daily_record = weather_daily.setdefault(
+                    (callsign, day_key),
+                    self.new_aprsis_weather_period_record(
+                        callsign, data, epoch, "daily", day_key, day_label
+                    ),
+                )
+                self.update_aprsis_weather_period_record(daily_record, data, epoch)
             latest_epoch = epoch if latest_epoch is None else max(latest_epoch, epoch)
         if not records_read:
             return [], 0
 
+        weather_periods = self.build_aprsis_weather_period_summaries(
+            sorted(
+                weather_daily.values(),
+                key=lambda item: (
+                    item.get("callsign") or "",
+                    item.get("period_start_epoch") or 0,
+                ),
+            )
+        )
         output = []
         for station in sorted(
             stations.values(),
@@ -563,6 +591,27 @@ class SubjectHistoryBuilder:
                     "data": clean_aprs_data(summary),
                 }
             )
+
+        output.extend(
+            {
+                "collector": "aprsis",
+                "type": "aprsis_weather_period_summary",
+                "timestamp": record.get("last_seen"),
+                "timestamp_epoch": record.get("last_seen_epoch"),
+                "severity": "info",
+                "data": clean_aprs_data(record),
+            }
+            for record in sorted(
+                weather_periods,
+                key=lambda item: (
+                    {"weekly": 0, "monthly": 1, "yearly": 2}.get(
+                        item.get("period_kind"), 9
+                    ),
+                    -(item.get("period_start_epoch") or 0),
+                    item.get("callsign") or "",
+                ),
+            )
+        )
 
         if latest_health and (
             latest_health.get("collector_state") != "ONLINE" or not output
@@ -892,6 +941,199 @@ class SubjectHistoryBuilder:
         if len(station[key]) < limit:
             station[key].append(text)
 
+    def aprsis_is_weather_packet(self, data, event_type):
+        """Return True when an APRS event contains weather station data."""
+        packet_type = data.get("packet_type") or event_type.replace("aprs_", "")
+        return packet_type == "weather" or bool(data.get("weather_summary"))
+
+    def new_aprsis_weather_period_record(self, callsign, data, epoch, kind, key, label):
+        """Return a new APRS weather aggregate record."""
+        record = {
+            "callsign": callsign,
+            "period_kind": kind,
+            "period_key": key,
+            "period_label": label,
+            "weather_station": True,
+            "internet_fed": True,
+            "sample_count": 0,
+            "day_count": 1 if kind == "daily" else 0,
+            **self.period_time_fields(epoch),
+        }
+        self.update_aprsis_weather_period_metadata(record, data)
+        return record
+
+    def update_aprsis_weather_period_metadata(self, record, data):
+        """Copy latest APRS weather station metadata into an aggregate record."""
+        for key in (
+            "callsign",
+            "destination",
+            "via_path",
+            "q_construct",
+            "igate",
+            "feed_name",
+            "feed_role",
+            "server_name",
+            "server_address",
+            "host",
+            "port",
+            "filter",
+            "latitude",
+            "longitude",
+            "weather_summary",
+        ):
+            if data.get(key) not in (None, "", []):
+                record[key] = data.get(key)
+
+    def update_aprsis_weather_period_record(self, record, data, epoch):
+        """Fold one APRS weather packet into a daily aggregate."""
+        record["sample_count"] = int(record.get("sample_count") or 0) + 1
+        self.update_aprsis_weather_period_metadata(record, data)
+        if epoch < record.get("first_seen_epoch", epoch):
+            record["first_seen_epoch"] = epoch
+            record["first_seen"] = local_now(epoch)
+        if epoch >= record.get("last_seen_epoch", 0):
+            record["last_seen_epoch"] = epoch
+            record["last_seen"] = local_now(epoch)
+            for key in (
+                "weather_summary",
+                "temperature_f",
+                "humidity_percent",
+                "pressure_hpa",
+                "wind_direction_deg",
+                "wind_speed_mph",
+                "wind_gust_mph",
+                "rain_1h_in",
+                "rain_24h_in",
+                "rain_since_midnight_in",
+                "luminosity_w_m2",
+            ):
+                if data.get(key) not in (None, "", []):
+                    record[key] = data.get(key)
+        self.update_min_max_numeric(
+            record, "temperature_min_f", "temperature_max_f", data.get("temperature_f")
+        )
+        self.update_pws_average(
+            record, "temperature", data.get("temperature_f"), "temperature_avg_f"
+        )
+        self.update_pws_first_latest_change(
+            record, "temperature", data.get("temperature_f"), epoch, "temperature_change_f"
+        )
+        self.update_min_max_numeric(
+            record, "humidity_min_percent", "humidity_max_percent", data.get("humidity_percent")
+        )
+        self.update_pws_average(
+            record, "humidity", data.get("humidity_percent"), "humidity_avg_percent"
+        )
+        self.update_min_max_numeric(
+            record, "pressure_min_hpa", "pressure_max_hpa", data.get("pressure_hpa")
+        )
+        self.update_pws_average(
+            record, "pressure_hpa", data.get("pressure_hpa"), "pressure_avg_hpa"
+        )
+        self.update_pws_first_latest_change(
+            record,
+            "pressure_hpa",
+            data.get("pressure_hpa"),
+            epoch,
+            "pressure_change_hpa",
+            digits=1,
+        )
+        self.update_max_numeric(record, "wind_speed_max_mph", data.get("wind_speed_mph"))
+        self.update_max_numeric(record, "wind_gust_max_mph", data.get("wind_gust_mph"))
+        self.update_pws_wind_direction(record, data.get("wind_direction_deg"))
+        self.update_max_numeric(record, "rain_1h_max_in", data.get("rain_1h_in"))
+        self.update_max_numeric(record, "rain_24h_max_in", data.get("rain_24h_in"))
+        self.update_max_numeric(
+            record, "rain_since_midnight_max_in", data.get("rain_since_midnight_in")
+        )
+        self.update_pws_rain_episode_totals(record, data.get("rain_1h_in"), epoch)
+        self.update_max_numeric(record, "luminosity_max_w_m2", data.get("luminosity_w_m2"))
+
+    def build_aprsis_weather_period_summaries(self, daily_records):
+        """Roll APRS daily weather summaries into weekly/monthly/yearly rows."""
+        periods = {}
+        for day in daily_records or []:
+            epoch = day.get("period_start_epoch") or day.get("first_seen_epoch")
+            if epoch is None:
+                continue
+            callsign = day.get("callsign") or "unknown"
+            for kind in ("weekly", "monthly", "yearly"):
+                key, label = self.period_key(epoch, kind)
+                record = periods.setdefault(
+                    (callsign, kind, key),
+                    self.new_aprsis_weather_period_record(
+                        callsign, day, epoch, kind, key, label
+                    ),
+                )
+                self.update_aprsis_weather_period_from_day(record, day)
+        return [self.finalize_pws_period_record(record) for record in periods.values()]
+
+    def update_aprsis_weather_period_from_day(self, record, day):
+        """Fold one APRS weather daily aggregate into a longer period."""
+        self.update_aprsis_weather_period_metadata(record, day)
+        record["day_count"] = int(record.get("day_count") or 0) + 1
+        record["sample_count"] = int(record.get("sample_count") or 0) + int(day.get("sample_count") or 0)
+        self.update_period_bounds_from_day(record, day)
+        for target_min, target_max in (
+            ("temperature_min_f", "temperature_max_f"),
+            ("humidity_min_percent", "humidity_max_percent"),
+            ("pressure_min_hpa", "pressure_max_hpa"),
+        ):
+            self.update_min_max_numeric(record, target_min, target_max, day.get(target_min))
+            self.update_min_max_numeric(record, target_min, target_max, day.get(target_max))
+        self.update_pws_weighted_average(record, "temperature", day)
+        self.update_pws_weighted_average(record, "humidity", day)
+        self.update_aprsis_pressure_weighted_average(record, day)
+        self.update_pws_first_latest_from_day(
+            record, "temperature", day, "temperature_change_f"
+        )
+        self.update_pws_first_latest_from_day(
+            record, "pressure_hpa", day, "pressure_change_hpa", digits=1
+        )
+        self.update_max_numeric(record, "wind_speed_max_mph", day.get("wind_speed_max_mph"))
+        self.update_max_numeric(record, "wind_gust_max_mph", day.get("wind_gust_max_mph"))
+        self.update_max_numeric(record, "rain_1h_max_in", day.get("rain_1h_max_in"))
+        self.update_max_numeric(record, "rain_24h_max_in", day.get("rain_24h_max_in"))
+        self.update_max_numeric(
+            record, "rain_since_midnight_max_in", day.get("rain_since_midnight_max_in")
+        )
+        self.update_max_numeric(record, "luminosity_max_w_m2", day.get("luminosity_max_w_m2"))
+        self.update_pws_wind_direction(record, day.get("wind_direction_avg_deg"))
+        record["rain_episode_count"] = int(record.get("rain_episode_count") or 0) + int(day.get("rain_episode_count") or 0)
+        record["rain_active_sample_count"] = int(record.get("rain_active_sample_count") or 0) + int(day.get("rain_active_sample_count") or 0)
+        record["rain_active_span_sec"] = float(record.get("rain_active_span_sec") or 0) + float(day.get("rain_active_span_sec") or 0)
+        if (day.get("last_seen_epoch") or 0) >= record.get("last_seen_epoch", 0):
+            for key in (
+                "temperature_f",
+                "humidity_percent",
+                "pressure_hpa",
+                "weather_summary",
+                "rain_1h_in",
+                "wind_speed_mph",
+                "wind_gust_mph",
+            ):
+                if day.get(key) not in (None, "", []):
+                    record[key] = day.get(key)
+
+    def update_aprsis_pressure_weighted_average(self, record, day):
+        """Fold APRS daily pressure average into a longer weighted average."""
+        value = day.get("pressure_avg_hpa")
+        try:
+            number = float(value)
+            weight = max(1, int(day.get("sample_count") or 1))
+        except (TypeError, ValueError):
+            return
+        record["_pressure_hpa_weighted_sum"] = (
+            float(record.get("_pressure_hpa_weighted_sum") or 0) + number * weight
+        )
+        record["_pressure_hpa_weighted_count"] = (
+            int(record.get("_pressure_hpa_weighted_count") or 0) + weight
+        )
+        record["pressure_avg_hpa"] = round(
+            record["_pressure_hpa_weighted_sum"] / record["_pressure_hpa_weighted_count"],
+            1,
+        )
+
     def build_rayhunter_history(self, observations, window_days):
         """Return the latest Rayhunter endpoint status for this view window."""
         latest = None
@@ -1044,6 +1286,7 @@ class SubjectHistoryBuilder:
                 "noaa_weather_alert",
                 "noaa_tropical_advisory",
                 "noaa_forecast_summary",
+                "noaa_tsunami_alert",
                 "collector_offline",
                 "collector_retrying",
             ):
@@ -1130,6 +1373,29 @@ class SubjectHistoryBuilder:
                 reverse=True,
             )
         ]
+        output.extend(
+            {
+                "collector": "noaa",
+                "type": "noaa_period_summary",
+                "timestamp": record.get("last_seen"),
+                "timestamp_epoch": record.get("last_seen_epoch"),
+                "severity": "warning"
+                if record.get("tropical_system_count")
+                or record.get("nws_hazard_count")
+                or record.get("tsunami_incident_count")
+                else "info",
+                "data": clean_noaa_data(record),
+            }
+            for record in sorted(
+                self.add_noaa_period_comparisons(
+                    self.build_noaa_period_summaries(alerts.values())
+                ),
+                key=lambda item: (
+                    {"monthly": 0, "yearly": 1}.get(item.get("period_kind"), 9),
+                    -(item.get("period_start_epoch") or 0),
+                ),
+            )
+        )
         if latest_health and not output:
             output.append(
                 {
@@ -1142,6 +1408,126 @@ class SubjectHistoryBuilder:
                 }
             )
         return output, records_read
+
+    def build_noaa_period_summaries(self, alerts):
+        """Build monthly/yearly NOAA hazard/tropical/tsunami summaries."""
+        periods = {}
+        for item in alerts or []:
+            kind = item.get("alert_kind") or ""
+            if kind == "tropical_outlook":
+                continue
+            epoch = (
+                item.get("event_time_epoch")
+                or item.get("updated_epoch")
+                or item.get("effective_epoch")
+                or item.get("last_seen_epoch")
+                or item.get("first_seen_epoch")
+            )
+            if epoch is None:
+                continue
+            for period_kind in ("monthly", "yearly"):
+                key, label = self.period_key(epoch, period_kind)
+                record = periods.setdefault(
+                    (period_kind, key),
+                    {
+                        "period_kind": period_kind,
+                        "period_key": key,
+                        "period_label": label,
+                        "internet_fed": True,
+                        "event_count": 0,
+                        "tropical_system_count": 0,
+                        "nhc_product_count_total": 0,
+                        "nws_hazard_count": 0,
+                        "tsunami_incident_count": 0,
+                        "tsunami_message_count": 0,
+                        "forecast_count": 0,
+                        "basins": [],
+                        "tropical_systems": [],
+                        "hazard_events": [],
+                        "hazard_areas": [],
+                        "hazard_severities": [],
+                        "tsunami_incidents": [],
+                        "sources": [],
+                        "_tropical_systems": set(),
+                        "_tsunami_incidents": set(),
+                        **self.period_time_fields(epoch),
+                    },
+                )
+                self.update_noaa_period_record(record, item, epoch)
+        output = []
+        for record in periods.values():
+            systems = sorted(record.pop("_tropical_systems", set()))
+            incidents = sorted(record.pop("_tsunami_incidents", set()))
+            record["tropical_system_count"] = len(systems)
+            record["tsunami_incident_count"] = len(incidents)
+            record["tropical_systems"] = systems[:24]
+            record["tsunami_incidents"] = incidents[:24]
+            output.append(record)
+        return output
+
+    def update_noaa_period_record(self, record, item, epoch):
+        """Fold one unique NOAA subject into a monthly/yearly summary."""
+        record["event_count"] = int(record.get("event_count") or 0) + 1
+        kind = item.get("alert_kind") or ""
+        source = item.get("source") or ""
+        self.sample_direct_value(record, "sources", source, 12)
+        if kind == "tropical":
+            system = (
+                item.get("nhc_system")
+                or item.get("nhc_storm_id")
+                or item.get("event")
+                or item.get("headline")
+            )
+            if system:
+                record["_tropical_systems"].add(str(system))
+            self.sample_direct_value(record, "basins", item.get("basin"), 12)
+            record["nhc_product_count_total"] = int(record.get("nhc_product_count_total") or 0) + int(item.get("nhc_product_count") or 1)
+        elif kind == "tsunami":
+            incident = (
+                item.get("incident_id")
+                or item.get("tsunami_identifier")
+                or item.get("event_id")
+            )
+            if incident:
+                record["_tsunami_incidents"].add(str(incident))
+            record["tsunami_message_count"] = int(record.get("tsunami_message_count") or 0) + 1
+        elif kind == "forecast":
+            record["forecast_count"] = int(record.get("forecast_count") or 0) + 1
+        else:
+            record["nws_hazard_count"] = int(record.get("nws_hazard_count") or 0) + 1
+            self.sample_direct_value(record, "hazard_events", item.get("event"), 16)
+            self.sample_direct_value(record, "hazard_areas", item.get("area_desc"), 16)
+            self.sample_direct_value(record, "hazard_severities", item.get("severity"), 8)
+        event_seen = item.get("last_seen_epoch") or epoch
+        if event_seen >= record.get("last_seen_epoch", 0):
+            record["last_seen_epoch"] = event_seen
+            record["last_seen"] = local_now(event_seen)
+            for key in ("event_id", "event", "headline", "source", "alert_kind"):
+                if item.get(key) not in (None, "", []):
+                    record["latest_{}".format(key)] = item.get(key)
+        first_seen = item.get("first_seen_epoch") or epoch
+        if first_seen < record.get("first_seen_epoch", first_seen):
+            record["first_seen_epoch"] = first_seen
+            record["first_seen"] = local_now(first_seen)
+
+    def add_noaa_period_comparisons(self, records):
+        """Add previous-period count deltas where retained history has one."""
+        by_kind = defaultdict(list)
+        for record in records or []:
+            by_kind[record.get("period_kind")].append(record)
+        output = []
+        for _kind, items in by_kind.items():
+            items = sorted(items, key=lambda item: item.get("period_start_epoch") or 0)
+            previous = None
+            for item in items:
+                if previous is not None:
+                    previous_count = int(previous.get("event_count") or 0)
+                    current_count = int(item.get("event_count") or 0)
+                    item["previous_event_count"] = previous_count
+                    item["event_count_delta"] = current_count - previous_count
+                output.append(item)
+                previous = item
+        return output
 
     def build_usgs_history(self, observations, window_days):
         """Return compact per-event USGS earthquake summaries."""
@@ -1217,6 +1603,25 @@ class SubjectHistoryBuilder:
                 reverse=True,
             )
         ]
+        output.extend(
+            {
+                "collector": "usgs",
+                "type": "usgs_earthquake_period_summary",
+                "timestamp": record.get("last_seen"),
+                "timestamp_epoch": record.get("last_seen_epoch"),
+                "severity": "warning" if record.get("notable_count") else "info",
+                "data": clean_usgs_data(record),
+            }
+            for record in sorted(
+                self.build_usgs_period_summaries(earthquakes.values()),
+                key=lambda item: (
+                    {"weekly": 0, "monthly": 1, "yearly": 2}.get(
+                        item.get("period_kind"), 9
+                    ),
+                    -(item.get("period_start_epoch") or 0),
+                ),
+            )
+        )
         if latest_health and not output:
             output.append(
                 {
@@ -1229,6 +1634,81 @@ class SubjectHistoryBuilder:
                 }
             )
         return output, records_read
+
+    def build_usgs_period_summaries(self, earthquakes):
+        """Build weekly/monthly/yearly unique-earthquake summaries."""
+        periods = {}
+        for quake in earthquakes or []:
+            epoch = (
+                quake.get("event_time_epoch")
+                or quake.get("last_seen_epoch")
+                or quake.get("first_seen_epoch")
+            )
+            if epoch is None:
+                continue
+            for kind in ("weekly", "monthly", "yearly"):
+                key, label = self.period_key(epoch, kind)
+                record = periods.setdefault(
+                    (kind, key),
+                    {
+                        "period_kind": kind,
+                        "period_key": key,
+                        "period_label": label,
+                        "internet_fed": True,
+                        "event_count": 0,
+                        "local_count": 0,
+                        "global_major_count": 0,
+                        "notable_count": 0,
+                        "tsunami_count": 0,
+                        "event_ids": [],
+                        "alert_colors": [],
+                        "scopes": [],
+                        "feeds": [],
+                        **self.period_time_fields(epoch),
+                    },
+                )
+                self.update_usgs_period_record(record, quake, epoch)
+        return list(periods.values())
+
+    def update_usgs_period_record(self, record, quake, epoch):
+        """Fold one unique earthquake into a USGS period summary."""
+        record["event_count"] = int(record.get("event_count") or 0) + 1
+        if quake.get("global_major") or str(quake.get("scope") or "") == "global":
+            record["global_major_count"] = int(record.get("global_major_count") or 0) + 1
+        else:
+            record["local_count"] = int(record.get("local_count") or 0) + 1
+        magnitude = self.safe_float(quake.get("magnitude"))
+        if magnitude is not None and magnitude >= 4.0:
+            record["notable_count"] = int(record.get("notable_count") or 0) + 1
+        if quake.get("tsunami"):
+            record["tsunami_count"] = int(record.get("tsunami_count") or 0) + 1
+        self.update_min_max_numeric(record, "magnitude_min", "magnitude_max", magnitude)
+        nearest = self.safe_float(quake.get("distance_km"))
+        if nearest is not None:
+            old = record.get("nearest_distance_km")
+            record["nearest_distance_km"] = nearest if old is None else min(float(old), nearest)
+        depth = self.safe_float(quake.get("depth_km"))
+        if depth is not None:
+            old = record.get("shallowest_depth_km")
+            record["shallowest_depth_km"] = depth if old is None else min(float(old), depth)
+        for list_key, value in (
+            ("event_ids", quake.get("event_id")),
+            ("alert_colors", quake.get("alert_color")),
+            ("scopes", quake.get("scope")),
+            ("feeds", quake.get("feed")),
+        ):
+            self.sample_direct_value(record, list_key, value, 24)
+        event_seen = quake.get("last_seen_epoch") or quake.get("event_time_epoch") or epoch
+        if event_seen >= record.get("last_seen_epoch", 0):
+            record["last_seen_epoch"] = event_seen
+            record["last_seen"] = local_now(event_seen)
+            for key in ("event_id", "place", "magnitude", "event_time", "depth_km", "alert_color"):
+                if quake.get(key) not in (None, "", []):
+                    record["latest_{}".format(key)] = quake.get(key)
+        first_seen = quake.get("first_seen_epoch") or epoch
+        if first_seen < record.get("first_seen_epoch", first_seen):
+            record["first_seen_epoch"] = first_seen
+            record["first_seen"] = local_now(first_seen)
 
     def build_swpc_history(self, observations, window_days):
         """Return compact per-event SWPC space-weather summaries."""
@@ -1300,6 +1780,25 @@ class SubjectHistoryBuilder:
                 reverse=True,
             )
         ]
+        output.extend(
+            {
+                "collector": "swpc",
+                "type": "swpc_event_period_summary",
+                "timestamp": record.get("last_seen"),
+                "timestamp_epoch": record.get("last_seen_epoch"),
+                "severity": "warning" if record.get("alert_count") else "info",
+                "data": clean_swpc_data(record),
+            }
+            for record in sorted(
+                self.build_swpc_period_summaries(events.values()),
+                key=lambda item: (
+                    {"weekly": 0, "monthly": 1, "yearly": 2}.get(
+                        item.get("period_kind"), 9
+                    ),
+                    -(item.get("period_start_epoch") or 0),
+                ),
+            )
+        )
         if latest_health and not output:
             output.append(
                 {
@@ -1313,13 +1812,124 @@ class SubjectHistoryBuilder:
             )
         return output, records_read
 
+    def build_swpc_period_summaries(self, events):
+        """Build weekly/monthly/yearly unique SWPC event summaries."""
+        periods = {}
+        for item in events or []:
+            epoch = (
+                item.get("event_time_epoch")
+                or item.get("start_time_epoch")
+                or item.get("peak_time_epoch")
+                or item.get("issue_epoch")
+                or item.get("last_seen_epoch")
+                or item.get("first_seen_epoch")
+            )
+            if epoch is None:
+                continue
+            for kind in ("weekly", "monthly", "yearly"):
+                key, label = self.period_key(epoch, kind)
+                record = periods.setdefault(
+                    (kind, key),
+                    {
+                        "period_kind": kind,
+                        "period_key": key,
+                        "period_label": label,
+                        "internet_fed": True,
+                        "event_count": 0,
+                        "alert_count": 0,
+                        "critical_count": 0,
+                        "xray_flare_count": 0,
+                        "radio_blackout_count": 0,
+                        "solar_radiation_storm_count": 0,
+                        "geomagnetic_storm_count": 0,
+                        "events": [],
+                        "kind_counts": [],
+                        "scale_labels": [],
+                        "_kind_counter": Counter(),
+                        **self.period_time_fields(epoch),
+                    },
+                )
+                self.update_swpc_period_record(record, item, epoch)
+        output = []
+        for record in periods.values():
+            counter = record.pop("_kind_counter", Counter())
+            record["kind_counts"] = self.counter_labels(counter, limit=8)
+            output.append(record)
+        return output
+
+    def update_swpc_period_record(self, record, item, epoch):
+        """Fold one unique SWPC event into a period summary."""
+        record["event_count"] = int(record.get("event_count") or 0) + 1
+        kind = item.get("event_kind") or "unknown"
+        record["_kind_counter"][kind] += 1
+        if swpc_event_is_alert(item):
+            record["alert_count"] = int(record.get("alert_count") or 0) + 1
+        if swpc_event_is_critical(item):
+            record["critical_count"] = int(record.get("critical_count") or 0) + 1
+        if kind == "xray_flare":
+            record["xray_flare_count"] = int(record.get("xray_flare_count") or 0) + 1
+            record["highest_xray_class"] = self.higher_xray_class(
+                record.get("highest_xray_class"), item.get("xray_class")
+            )
+        elif kind == "radio_blackout":
+            record["radio_blackout_count"] = int(record.get("radio_blackout_count") or 0) + 1
+            self.update_scale_max(record, "max_radio_blackout", item)
+        elif kind == "solar_radiation_storm":
+            record["solar_radiation_storm_count"] = int(record.get("solar_radiation_storm_count") or 0) + 1
+            self.update_scale_max(record, "max_solar_radiation_storm", item)
+        elif kind == "geomagnetic_storm":
+            record["geomagnetic_storm_count"] = int(record.get("geomagnetic_storm_count") or 0) + 1
+            self.update_scale_max(record, "max_geomagnetic_storm", item)
+        kp = number_or_none(item.get("kp_index"))
+        if kp is not None:
+            old = record.get("max_kp")
+            record["max_kp"] = kp if old is None else max(float(old), kp)
+        self.sample_direct_value(record, "events", item.get("event") or item.get("summary"), 24)
+        self.sample_direct_value(record, "scale_labels", item.get("scale_label"), 24)
+        event_seen = item.get("last_seen_epoch") or epoch
+        if event_seen >= record.get("last_seen_epoch", 0):
+            record["last_seen_epoch"] = event_seen
+            record["last_seen"] = local_now(event_seen)
+            for key in ("event_id", "event", "event_kind", "scale_label", "xray_class", "kp_index"):
+                if item.get(key) not in (None, "", []):
+                    record["latest_{}".format(key)] = item.get(key)
+        first_seen = item.get("first_seen_epoch") or epoch
+        if first_seen < record.get("first_seen_epoch", first_seen):
+            record["first_seen_epoch"] = first_seen
+            record["first_seen"] = local_now(first_seen)
+
+    def higher_xray_class(self, current, candidate):
+        """Return the stronger GOES X-ray flare class label."""
+        current_flux = xray_class_to_flux(current) if current else None
+        candidate_flux = xray_class_to_flux(candidate) if candidate else None
+        if candidate_flux is None:
+            return current or ""
+        if current_flux is None or candidate_flux > current_flux:
+            return str(candidate or "").upper()
+        return current or ""
+
+    def update_scale_max(self, record, key, item):
+        """Update a max R/S/G scale field from one SWPC item."""
+        value = number_or_none(item.get("scale_value"))
+        if value is None:
+            return
+        old = record.get(key)
+        record[key] = int(value) if old is None else max(int(old), int(value))
+        family = item.get("scale_family") or ""
+        label = swpc_scale_label(family, record[key])
+        if label:
+            record["{}_label".format(key)] = label
+
     def build_pws_history(self, observations, window_days):
         """Return compact per-station PWS summaries."""
         stations = {}
+        daily = {}
         latest_health = None
         latest_health_epoch = None
         records_read = 0
-        for event in observations or []:
+        for event in sorted(
+            observations or [], key=lambda item: event_time_epoch(item) or 0
+        ):
             if not event_in_window(event, window_days):
                 continue
             event_type = event.get("type") or ""
@@ -1365,6 +1975,22 @@ class SubjectHistoryBuilder:
                 },
             )
             self.update_pws_weather_summary(record, data, epoch)
+            day_key, day_label = self.pws_period_key(epoch, "daily")
+            day_record = daily.setdefault(
+                (station_id, day_key),
+                self.new_pws_period_record(
+                    station_id, data, epoch, "daily", day_key, day_label
+                ),
+            )
+            self.update_pws_period_record(day_record, data, epoch)
+        daily_records = sorted(
+            daily.values(),
+            key=lambda item: (
+                item.get("station_id") or "",
+                item.get("period_start_epoch") or 0,
+            ),
+        )
+        period_records = self.build_pws_period_summaries(daily_records)
         output = [
             {
                 "collector": "pws",
@@ -1380,6 +2006,26 @@ class SubjectHistoryBuilder:
                 reverse=True,
             )
         ]
+        output.extend(
+            {
+                "collector": "pws",
+                "type": "pws_weather_period_summary",
+                "timestamp": record.get("last_seen"),
+                "timestamp_epoch": record.get("last_seen_epoch"),
+                "severity": "info",
+                "data": clean_pws_data(record),
+            }
+            for record in sorted(
+                period_records,
+                key=lambda item: (
+                    {"weekly": 0, "monthly": 1, "yearly": 2}.get(
+                        item.get("period_kind"), 9
+                    ),
+                    -(item.get("period_start_epoch") or 0),
+                    item.get("station_id") or "",
+                ),
+            )
+        )
         if latest_health and not output:
             output.append(
                 {
@@ -1392,6 +2038,361 @@ class SubjectHistoryBuilder:
                 }
             )
         return output, records_read
+
+    def period_key(self, epoch, kind):
+        """Return a stable local-time aggregate key and label."""
+        dt = datetime.datetime.fromtimestamp(float(epoch))
+        if kind == "weekly":
+            iso_year, iso_week, _weekday = dt.isocalendar()
+            key = "{:04d}-W{:02d}".format(iso_year, iso_week)
+            return key, "week {}".format(key)
+        if kind == "monthly":
+            key = dt.strftime("%Y-%m")
+            return key, "month {}".format(key)
+        if kind == "yearly":
+            key = dt.strftime("%Y")
+            return key, "year {}".format(key)
+        key = dt.strftime("%Y-%m-%d")
+        return key, key
+
+    def pws_period_key(self, epoch, kind):
+        """Return a stable local-time PWS aggregate key and label."""
+        return self.period_key(epoch, kind)
+
+    def period_time_fields(self, epoch):
+        """Return common first/last fields for a one-event period record."""
+        return {
+            "period_start": local_now(epoch),
+            "period_start_epoch": epoch,
+            "period_end": local_now(epoch),
+            "period_end_epoch": epoch,
+            "first_seen": local_now(epoch),
+            "first_seen_epoch": epoch,
+            "last_seen": local_now(epoch),
+            "last_seen_epoch": epoch,
+        }
+
+    def update_period_bounds_from_day(self, record, day):
+        """Expand period start/end and first/last fields using one daily record."""
+        first_epoch = day.get("period_start_epoch") or day.get("first_seen_epoch")
+        last_epoch = day.get("period_end_epoch") or day.get("last_seen_epoch")
+        if first_epoch is not None and first_epoch < record.get("period_start_epoch", first_epoch):
+            record["period_start_epoch"] = first_epoch
+            record["period_start"] = local_now(first_epoch)
+        if last_epoch is not None and last_epoch >= record.get("period_end_epoch", 0):
+            record["period_end_epoch"] = last_epoch
+            record["period_end"] = local_now(last_epoch)
+        if first_epoch is not None and first_epoch < record.get("first_seen_epoch", first_epoch):
+            record["first_seen_epoch"] = first_epoch
+            record["first_seen"] = local_now(first_epoch)
+        if last_epoch is not None and last_epoch >= record.get("last_seen_epoch", 0):
+            record["last_seen_epoch"] = last_epoch
+            record["last_seen"] = local_now(last_epoch)
+
+    def new_pws_period_record(self, station_id, data, epoch, kind, key, label):
+        """Return a new PWS aggregate record."""
+        record = {
+            "station_id": station_id,
+            "station_name": data.get("station_name") or "",
+            "mac_address": data.get("mac_address") or "",
+            "model": data.get("model") or "",
+            "latitude": data.get("latitude"),
+            "longitude": data.get("longitude"),
+            "location_name": data.get("location_name") or "",
+            "elevation_m": data.get("elevation_m"),
+            "elevation_ft": data.get("elevation_ft"),
+            "timezone": data.get("timezone") or "",
+            "source": data.get("source") or "",
+            "source_url": data.get("source_url") or "",
+            "period_kind": kind,
+            "period_key": key,
+            "period_label": label,
+            "period_start": local_now(epoch),
+            "period_start_epoch": epoch,
+            "period_end": local_now(epoch),
+            "period_end_epoch": epoch,
+            "first_seen": local_now(epoch),
+            "first_seen_epoch": epoch,
+            "last_seen": local_now(epoch),
+            "last_seen_epoch": epoch,
+            "sample_count": 0,
+            "day_count": 1 if kind == "daily" else 0,
+        }
+        self.update_pws_latest_metadata(record, data)
+        return record
+
+    def update_pws_latest_metadata(self, record, data):
+        """Copy latest station metadata into a PWS aggregate record."""
+        for key in (
+            "station_id",
+            "station_name",
+            "mac_address",
+            "model",
+            "latitude",
+            "longitude",
+            "location_name",
+            "elevation_m",
+            "elevation_ft",
+            "timezone",
+            "source",
+            "source_url",
+        ):
+            if data.get(key) not in (None, "", []):
+                record[key] = data.get(key)
+
+    def update_pws_period_record(self, record, data, epoch):
+        """Fold one PWS sample into a daily aggregate record."""
+        record["sample_count"] = int(record.get("sample_count") or 0) + 1
+        self.update_pws_latest_metadata(record, data)
+        if epoch < record.get("first_seen_epoch", epoch):
+            record["first_seen_epoch"] = epoch
+            record["first_seen"] = local_now(epoch)
+        if epoch >= record.get("last_seen_epoch", 0):
+            record["last_seen_epoch"] = epoch
+            record["last_seen"] = local_now(epoch)
+            for key in (
+                "event_time",
+                "event_time_epoch",
+                "ambient_date",
+                "ambient_date_epoch",
+                "battery",
+                "weather_summary",
+            ):
+                if data.get(key) not in (None, "", []):
+                    record[key] = data.get(key)
+        self.update_min_max_numeric(
+            record, "temperature_min_f", "temperature_max_f", data.get("temperature_f")
+        )
+        self.update_pws_average(
+            record, "temperature", data.get("temperature_f"), "temperature_avg_f"
+        )
+        self.update_pws_first_latest_change(
+            record, "temperature", data.get("temperature_f"), epoch, "temperature_change_f"
+        )
+        self.update_min_max_numeric(
+            record, "humidity_min_percent", "humidity_max_percent", data.get("humidity_percent")
+        )
+        self.update_pws_average(
+            record, "humidity", data.get("humidity_percent"), "humidity_avg_percent"
+        )
+        self.update_min_max_numeric(
+            record, "dewpoint_min_f", "dewpoint_max_f", data.get("dewpoint_f")
+        )
+        self.update_pws_average(record, "dewpoint", data.get("dewpoint_f"), "dewpoint_avg_f")
+        self.update_min_max_numeric(
+            record,
+            "pressure_rel_min_inhg",
+            "pressure_rel_max_inhg",
+            data.get("pressure_rel_inhg"),
+        )
+        self.update_pws_first_latest_change(
+            record,
+            "pressure_rel",
+            data.get("pressure_rel_inhg"),
+            epoch,
+            "pressure_rel_change_inhg",
+            digits=3,
+        )
+        self.update_max_numeric(record, "wind_speed_max_mph", data.get("wind_speed_mph"))
+        self.update_max_numeric(record, "wind_gust_max_mph", data.get("wind_gust_mph"))
+        self.update_max_numeric(record, "max_daily_gust_mph", data.get("max_daily_gust_mph"))
+        self.update_pws_wind_direction(record, data.get("wind_direction_deg"))
+        self.update_max_numeric(record, "rain_1h_max_in", data.get("rain_1h_in"))
+        self.update_max_numeric(record, "rain_period_total_in", data.get("rain_day_in"))
+        self.update_pws_rain_episode_totals(record, data.get("rain_1h_in"), epoch)
+        self.update_max_numeric(record, "solar_max_w_m2", data.get("solar_w_m2"))
+        self.update_max_numeric(record, "uv_max_index", data.get("uv_index"))
+
+    def update_pws_average(self, record, prefix, value, output_key):
+        """Update a numeric average accumulator."""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return
+        sum_key = "_{}_sum".format(prefix)
+        count_key = "_{}_count".format(prefix)
+        record[sum_key] = float(record.get(sum_key) or 0) + number
+        record[count_key] = int(record.get(count_key) or 0) + 1
+        record[output_key] = round(record[sum_key] / record[count_key], 2)
+
+    def update_pws_first_latest_change(
+        self, record, prefix, value, epoch, output_key, digits=1
+    ):
+        """Track first/latest numeric values and their change."""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return
+        first_epoch_key = "_{}_first_epoch".format(prefix)
+        first_key = "_{}_first".format(prefix)
+        latest_epoch_key = "_{}_latest_epoch".format(prefix)
+        latest_key = "_{}_latest".format(prefix)
+        if record.get(first_epoch_key) is None or epoch < record.get(first_epoch_key):
+            record[first_epoch_key] = epoch
+            record[first_key] = number
+        if record.get(latest_epoch_key) is None or epoch >= record.get(latest_epoch_key):
+            record[latest_epoch_key] = epoch
+            record[latest_key] = number
+        if record.get(first_key) is not None and record.get(latest_key) is not None:
+            record[output_key] = round(float(record[latest_key]) - float(record[first_key]), digits)
+
+    def update_pws_wind_direction(self, record, value):
+        """Update a circular mean wind direction."""
+        try:
+            degrees = float(value)
+        except (TypeError, ValueError):
+            return
+        radians = math.radians(degrees)
+        record["_wind_dir_sin_sum"] = float(record.get("_wind_dir_sin_sum") or 0) + math.sin(radians)
+        record["_wind_dir_cos_sum"] = float(record.get("_wind_dir_cos_sum") or 0) + math.cos(radians)
+        record["_wind_dir_count"] = int(record.get("_wind_dir_count") or 0) + 1
+        angle = math.degrees(
+            math.atan2(record["_wind_dir_sin_sum"], record["_wind_dir_cos_sum"])
+        )
+        record["wind_direction_avg_deg"] = round(angle % 360, 1)
+
+    def update_pws_rain_episode_totals(self, record, rain, epoch):
+        """Track observed rain episodes and approximate rain-active sample span."""
+        try:
+            current = float(rain) > 0
+        except (TypeError, ValueError):
+            return
+        previous = record.get("_last_rain_active")
+        previous_epoch = record.get("_last_sample_epoch")
+        if previous_epoch is not None and previous:
+            delta = max(0, float(epoch) - float(previous_epoch))
+            record["rain_active_span_sec"] = float(record.get("rain_active_span_sec") or 0) + min(delta, 600)
+        if previous is None:
+            if current:
+                record["rain_episode_count"] = int(record.get("rain_episode_count") or 0) + 1
+        elif not previous and current:
+            record["rain_episode_count"] = int(record.get("rain_episode_count") or 0) + 1
+        if current:
+            record["rain_active_sample_count"] = int(record.get("rain_active_sample_count") or 0) + 1
+        record["_last_rain_active"] = current
+        record["_last_sample_epoch"] = epoch
+
+    def finalize_pws_period_record(self, record):
+        """Return one display-safe PWS aggregate record."""
+        record = dict(record or {})
+        if record.get("rain_active_span_sec") is not None:
+            record["rain_active_span_min"] = round(float(record.get("rain_active_span_sec") or 0) / 60.0, 1)
+        record["coverage_days"] = max(1, int(record.get("day_count") or 1))
+        for key in list(record):
+            if key.startswith("_"):
+                record.pop(key, None)
+        return record
+
+    def build_pws_period_summaries(self, daily_records):
+        """Roll daily PWS summaries into weekly, monthly, and yearly summaries."""
+        periods = {}
+        for day in daily_records or []:
+            epoch = day.get("period_start_epoch") or day.get("first_seen_epoch")
+            if epoch is None:
+                continue
+            station_id = day.get("station_id") or day.get("station_name") or "unknown"
+            for kind in ("weekly", "monthly", "yearly"):
+                key, label = self.pws_period_key(epoch, kind)
+                record = periods.setdefault(
+                    (station_id, kind, key),
+                    self.new_pws_period_record(station_id, day, epoch, kind, key, label),
+                )
+                self.update_pws_period_from_day(record, day)
+        return [self.finalize_pws_period_record(record) for record in periods.values()]
+
+    def update_pws_period_from_day(self, record, day):
+        """Fold one daily aggregate into a longer PWS period aggregate."""
+        self.update_pws_latest_metadata(record, day)
+        record["day_count"] = int(record.get("day_count") or 0) + 1
+        record["sample_count"] = int(record.get("sample_count") or 0) + int(day.get("sample_count") or 0)
+        first_epoch = day.get("period_start_epoch") or day.get("first_seen_epoch")
+        last_epoch = day.get("period_end_epoch") or day.get("last_seen_epoch")
+        if first_epoch is not None and first_epoch < record.get("period_start_epoch", first_epoch):
+            record["period_start_epoch"] = first_epoch
+            record["period_start"] = local_now(first_epoch)
+        if last_epoch is not None and last_epoch >= record.get("period_end_epoch", 0):
+            record["period_end_epoch"] = last_epoch
+            record["period_end"] = local_now(last_epoch)
+        for source_key, target_min, target_max in (
+            ("temperature", "temperature_min_f", "temperature_max_f"),
+            ("humidity", "humidity_min_percent", "humidity_max_percent"),
+            ("dewpoint", "dewpoint_min_f", "dewpoint_max_f"),
+            ("pressure_rel", "pressure_rel_min_inhg", "pressure_rel_max_inhg"),
+        ):
+            self.update_min_max_numeric(record, target_min, target_max, day.get(target_min))
+            self.update_min_max_numeric(record, target_min, target_max, day.get(target_max))
+            self.update_pws_weighted_average(record, source_key, day)
+        self.update_pws_first_latest_from_day(
+            record, "temperature", day, "temperature_change_f"
+        )
+        self.update_pws_first_latest_from_day(
+            record, "pressure_rel", day, "pressure_rel_change_inhg", digits=3
+        )
+        self.update_max_numeric(record, "rain_1h_max_in", day.get("rain_1h_max_in"))
+        if day.get("rain_period_total_in") is not None:
+            record["rain_period_total_in"] = round(
+                float(record.get("rain_period_total_in") or 0)
+                + float(day.get("rain_period_total_in") or 0),
+                3,
+            )
+        record["rain_episode_count"] = int(record.get("rain_episode_count") or 0) + int(day.get("rain_episode_count") or 0)
+        record["rain_active_sample_count"] = int(record.get("rain_active_sample_count") or 0) + int(day.get("rain_active_sample_count") or 0)
+        record["rain_active_span_sec"] = float(record.get("rain_active_span_sec") or 0) + float(day.get("rain_active_span_sec") or 0)
+        self.update_max_numeric(record, "wind_speed_max_mph", day.get("wind_speed_max_mph"))
+        self.update_max_numeric(record, "wind_gust_max_mph", day.get("wind_gust_max_mph"))
+        self.update_max_numeric(record, "max_daily_gust_mph", day.get("max_daily_gust_mph"))
+        self.update_max_numeric(record, "solar_max_w_m2", day.get("solar_max_w_m2"))
+        self.update_max_numeric(record, "uv_max_index", day.get("uv_max_index"))
+        self.update_pws_wind_direction(record, day.get("wind_direction_avg_deg"))
+        if last_epoch is not None and last_epoch >= record.get("last_seen_epoch", 0):
+            record["last_seen_epoch"] = last_epoch
+            record["last_seen"] = local_now(last_epoch)
+            for key in ("event_time", "event_time_epoch", "ambient_date", "ambient_date_epoch", "battery", "weather_summary"):
+                if day.get(key) not in (None, "", []):
+                    record[key] = day.get(key)
+        if first_epoch is not None and first_epoch < record.get("first_seen_epoch", first_epoch):
+            record["first_seen_epoch"] = first_epoch
+            record["first_seen"] = local_now(first_epoch)
+
+    def update_pws_weighted_average(self, record, prefix, day):
+        """Fold a daily average into a longer weighted average."""
+        value = day.get("{}_avg_f".format(prefix))
+        output_key = "{}_avg_f".format(prefix)
+        if prefix == "humidity":
+            value = day.get("humidity_avg_percent")
+            output_key = "humidity_avg_percent"
+        elif prefix == "pressure_rel":
+            return
+        try:
+            number = float(value)
+            weight = max(1, int(day.get("sample_count") or 1))
+        except (TypeError, ValueError):
+            return
+        sum_key = "_{}_weighted_sum".format(prefix)
+        count_key = "_{}_weighted_count".format(prefix)
+        record[sum_key] = float(record.get(sum_key) or 0) + number * weight
+        record[count_key] = int(record.get(count_key) or 0) + weight
+        record[output_key] = round(record[sum_key] / record[count_key], 2)
+
+    def update_pws_first_latest_from_day(self, record, prefix, day, output_key, digits=1):
+        """Fold daily first/latest values into a longer period change field."""
+        first_key = "_{}_first".format(prefix)
+        latest_key = "_{}_latest".format(prefix)
+        first_epoch_key = "_{}_first_epoch".format(prefix)
+        latest_epoch_key = "_{}_latest_epoch".format(prefix)
+        day_first = day.get(first_key)
+        day_latest = day.get(latest_key)
+        day_first_epoch = day.get(first_epoch_key)
+        day_latest_epoch = day.get(latest_epoch_key)
+        if day_first is None or day_latest is None:
+            return
+        if record.get(first_epoch_key) is None or day_first_epoch < record.get(first_epoch_key):
+            record[first_epoch_key] = day_first_epoch
+            record[first_key] = day_first
+        if record.get(latest_epoch_key) is None or day_latest_epoch >= record.get(latest_epoch_key):
+            record[latest_epoch_key] = day_latest_epoch
+            record[latest_key] = day_latest
+        record[output_key] = round(float(record[latest_key]) - float(record[first_key]), digits)
 
     def update_pws_weather_summary(self, record, data, epoch):
         """Fold one PWS sample into its station summary."""
@@ -1769,6 +2770,17 @@ class SubjectHistoryBuilder:
         if text not in record[key] and len(record[key]) < limit:
             record[key].append(text)
 
+    def counter_labels(self, counter, limit=8):
+        """Return compact counter labels sorted by count then name."""
+        return [
+            "{} {}".format(key, count)
+            for key, count in sorted(
+                (counter or {}).items(),
+                key=lambda item: (-item[1], str(item[0])),
+            )[:limit]
+            if key
+        ]
+
     def update_max_numeric(self, record, key, value):
         """Update a max numeric field when a collector reports a number."""
         try:
@@ -1788,6 +2800,13 @@ class SubjectHistoryBuilder:
         old_max = record.get(max_key)
         record[min_key] = number if old_min is None else min(float(old_min), number)
         record[max_key] = number if old_max is None else max(float(old_max), number)
+
+    def safe_float(self, value):
+        """Return a float for numeric values, otherwise None."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def build_subject_records(self, summary):
         """Return normalized subject rows for every collector family."""
@@ -1922,7 +2941,10 @@ class SubjectHistoryBuilder:
         """Add APRS callsign/object subjects."""
         for event in events:
             data = clean_aprs_data((event or {}).get("data") or {})
-            if (event or {}).get("type") == "aprsis_collector_summary":
+            event_type = (event or {}).get("type") or ""
+            if event_type == "aprsis_weather_period_summary":
+                continue
+            if event_type == "aprsis_collector_summary":
                 subject_id = data.get("host") or "aprsis"
                 subject = "APRS-IS {}".format(subject_id)
                 subject_type = "aprsis_collector"
@@ -2111,6 +3133,8 @@ class SubjectHistoryBuilder:
         for event in events:
             data = clean_noaa_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
+            if event_type == "noaa_period_summary":
+                continue
             subject_id = stable_noaa_event_key(data, event_type)
             subject = data.get("event") or data.get("headline") or subject_id
             if event_type == "noaa_collector_summary":
@@ -2230,6 +3254,8 @@ class SubjectHistoryBuilder:
         for event in events:
             data = clean_usgs_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
+            if event_type == "usgs_earthquake_period_summary":
+                continue
             subject_id = data.get("event_id") or "usgs"
             subject = data.get("place") or subject_id
             subject_type = (
@@ -2282,6 +3308,8 @@ class SubjectHistoryBuilder:
         for event in events:
             data = clean_swpc_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
+            if event_type == "swpc_event_period_summary":
+                continue
             subject_id = data.get("event_id") or "swpc"
             if event_type == "swpc_collector_summary":
                 subject = "SWPC collector"
@@ -2350,6 +3378,8 @@ class SubjectHistoryBuilder:
                 subject_id = "pws"
                 subject = "PWS collector"
                 subject_type = "pws_collector"
+            elif event_type == "pws_weather_period_summary":
+                continue
             else:
                 subject_id = data.get("station_id") or data.get("mac_address") or "unknown"
                 subject = data.get("station_id") or data.get("station_name") or subject_id

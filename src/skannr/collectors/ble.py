@@ -79,6 +79,8 @@ class BLECollector(BaseCollector):
     tab_label = "BLE Scan"
     required_hardware = "USB Bluetooth 5.0 dongle or built-in Bluetooth adapter"
     _company_identifiers = None
+    APPLE_COMPANY_ID = 0x004C
+    APPLE_FINDMY_PAYLOAD_TYPE = 0x12
     MAC_NAME_RE = re.compile(
         r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$|^[0-9A-Fa-f]{12}$"
     )
@@ -268,6 +270,7 @@ class BLECollector(BaseCollector):
                     "service_uuids": self.service_uuids(advertisement),
                     "adv_data_hex": None,
                 }
+                payload.update(self.findmy_accessory_fields(advertisement))
                 previous = seen.get(mac)
                 seen[mac] = dict(payload, last_seen=current)
                 if previous is None:
@@ -623,7 +626,15 @@ class BLECollector(BaseCollector):
 
     def display_payload_changed(self, previous, current):
         """Return True when any browser-visible BLE field changed."""
-        fields = ("name", "rssi", "manufacturer", "service_uuids")
+        fields = (
+            "name",
+            "rssi",
+            "manufacturer",
+            "service_uuids",
+            "findmy_accessory",
+            "findmy_status",
+            "findmy_hint",
+        )
         for field in fields:
             if previous.get(field) != current.get(field):
                 return True
@@ -651,6 +662,30 @@ class BLECollector(BaseCollector):
             # company ID so the user can look it up later.
             parts.append("{} ({})".format(name, code) if name else code)
         return ", ".join(parts)
+
+    def findmy_accessory_fields(self, advertisement):
+        """Return compact Apple Find My accessory markers from manufacturer data."""
+        if advertisement is None:
+            return {}
+        data = getattr(advertisement, "manufacturer_data", None) or {}
+        payload = data.get(self.APPLE_COMPANY_ID)
+        if payload is None:
+            payload = data.get("0x{:04X}".format(self.APPLE_COMPANY_ID))
+        if payload is None:
+            payload = data.get(str(self.APPLE_COMPANY_ID))
+        payload = bytes(payload or b"")
+        if not payload or payload[0] != self.APPLE_FINDMY_PAYLOAD_TYPE:
+            return {}
+        fields = {
+            "findmy_accessory": True,
+            "findmy_label": "Apple Find My accessory",
+            "findmy_payload_type": "0x{:02X}".format(payload[0]),
+        }
+        if len(payload) >= 2:
+            fields["findmy_status"] = "0x{:02X}".format(payload[1])
+        if len(payload) >= 4:
+            fields["findmy_hint"] = "0x{}".format(payload[2:4].hex().upper())
+        return fields
 
     def company_identifiers(self):
         """Load optional offline Bluetooth SIG company-id mappings.

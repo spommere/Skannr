@@ -7,6 +7,30 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.2.5 - 2026-06-09
+
+- Added longitudinal Reports rollups for PWS, APRS-IS weather stations, USGS,
+  SWPC, and NOAA. PWS and APRS-IS weather stations now produce weekly,
+  monthly, and yearly station patterns; USGS and SWPC produce weekly, monthly,
+  and yearly population patterns; NOAA produces monthly/yearly hazard-context
+  patterns. Reports expose period coverage, weather/rain/wind/pressure ranges,
+  seismic magnitude and distance/depth ranges, SWPC R/S/G/Kp/X-class levels,
+  and NOAA tropical/NWS/tsunami/forecast counts without duplicating repeated
+  poll samples.
+- Tightened Reports as the main intelligence product. Browser sorting now
+  preserves the population-first Reports contract, APRS-IS weather-period rows
+  are per-callsign subject reports, period-pattern rows get clearer
+  reason/confidence metadata, and the browser renders period evidence with
+  compact source-aware fields instead of sparse generic JSON labels.
+- Added BLE Apple Find My accessory detection. BLE advertisements with Apple
+  manufacturer data `0x004C` and payload type `0x12` are labeled as Apple Find
+  My accessories, carried through Subject History and Reports, and can trigger
+  the existing BLE tracker alert rule.
+- Added optional Pushover delivery for Alerts. `alerts.pushover` can send
+  newly emitted or escalated alerts through Pushover when configured, using a
+  background worker and generic internet-connectivity checks so notification
+  failures do not block collectors or the browser.
+
 ## 0.2.4 - 2026-06-07
 
 - Added official tsunami.gov NTWC/PTWC support under the NOAA collector. Tsunami

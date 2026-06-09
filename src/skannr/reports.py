@@ -258,6 +258,7 @@ class ReportsBuilder:
         """Return APRS-IS report rows grouped by source callsign."""
         reports = []
         station_entries = []
+        period_entries = []
         for event in events or []:
             data = clean_aprs_data(event.get("data") or {})
             event_type = event.get("type") or ""
@@ -265,9 +266,15 @@ class ReportsBuilder:
                 report = self.aprsis_collector_report(data, event, timestamp)
                 if report:
                     reports.append(report)
+            elif event_type == "aprsis_weather_period_summary":
+                period_entries.append((data, event))
             else:
                 station_entries.append((data, event))
         reports.extend(self.aprsis_population_reports(station_entries, timestamp))
+        for data, event in period_entries:
+            report = self.aprsis_weather_period_report(data, event, timestamp)
+            if report:
+                reports.append(report)
         for data, event in station_entries:
             report = self.aprsis_station_report(data, event, timestamp)
             if report:
@@ -487,6 +494,49 @@ class ReportsBuilder:
             subject="APRS-IS collector",
         )
 
+    def aprsis_weather_period_report(self, data, event, timestamp):
+        """Return one weekly/monthly/yearly APRS weather-station row."""
+        callsign = data.get("callsign") or ""
+        kind = data.get("period_kind") or ""
+        if not callsign or kind not in ("weekly", "monthly", "yearly"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = self.aprsis_weather_period_findings(data)
+        warning = self.aprsis_warning_findings(findings)
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "period": self.pws_period_label(data),
+                "callsign": callsign,
+                "coverage": self.pws_period_coverage_text(data),
+                "temperature": self.aprsis_weather_period_temperature_text(data),
+                "rain": self.aprsis_weather_period_rain_text(data),
+                "wind": self.aprsis_weather_period_wind_text(data),
+                "pressure": self.aprsis_weather_period_pressure_text(data),
+                "location": self.aprsis_position_text(data),
+                "source": self.aprsis_period_source_text(data),
+                "first_seen": data.get("first_seen") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning" if warning else "info",
+            "aprsis",
+            "aprsis_weather_{}_pattern".format(kind),
+            "APRS weather {} pattern".format(kind),
+            self.aprsis_weather_period_summary_text(data),
+            evidence,
+            self.score_aprsis_weather_period(data, findings, last_seen_epoch),
+            last_seen,
+            subject=self.aprsis_subject(data),
+        )
+
     def aprsis_station_report(self, data, event, timestamp):
         """Return one APRS-IS report row for a callsign/object source."""
         callsign = data.get("callsign") or "unknown"
@@ -671,6 +721,158 @@ class ReportsBuilder:
             "High wind gust",
         }
         return bool(warning_labels & set(findings or []))
+
+    def aprsis_weather_period_findings(self, data):
+        """Return deterministic findings for an APRS weather period."""
+        kind = data.get("period_kind") or "period"
+        findings = ["APRS weather {} pattern".format(kind)]
+        temp_min = self.to_number(data.get("temperature_min_f"))
+        temp_max = self.to_number(data.get("temperature_max_f"))
+        if temp_min is not None and temp_max is not None:
+            temp_range = temp_max - temp_min
+            if temp_range >= float(self.config["aprs_weather_temp_change_f"]):
+                findings.append("Weather temperature changed")
+        temp_change = self.to_number(data.get("temperature_change_f"))
+        if temp_change is not None and abs(temp_change) >= float(
+            self.config["aprs_weather_temp_change_f"]
+        ):
+            findings.append("Weather temperature changed")
+        if (self.to_number(data.get("rain_1h_max_in")) or 0) >= float(
+            self.config["aprs_weather_high_rain_1h_in"]
+        ):
+            findings.append("High rain rate")
+        episodes = self.to_number(data.get("rain_episode_count"))
+        if episodes is not None and episodes:
+            findings.append("{} rain episode(s)".format(int(episodes)))
+        if (self.to_number(data.get("wind_speed_max_mph")) or 0) >= float(
+            self.config["aprs_weather_high_wind_mph"]
+        ):
+            findings.append("High wind")
+        if (self.to_number(data.get("wind_gust_max_mph")) or 0) >= float(
+            self.config["aprs_weather_high_gust_mph"]
+        ):
+            findings.append("High wind gust")
+        pressure_change = self.to_number(data.get("pressure_change_hpa"))
+        if pressure_change is not None and abs(pressure_change) >= 1.0:
+            findings.append(
+                "Pressure {} {:.1f} hPa".format(
+                    "rose" if pressure_change > 0 else "fell",
+                    abs(pressure_change),
+                )
+            )
+        return self.unique_ordered(findings)
+
+    def score_aprsis_weather_period(self, data, findings, last_seen_epoch):
+        """Return attention score for an APRS weather period."""
+        score = 38
+        if data.get("period_kind") == "weekly":
+            score += 5
+        if "High rain rate" in findings:
+            score += 28
+        if "High wind" in findings:
+            score += 16
+        if "High wind gust" in findings:
+            score += 20
+        if any(str(item or "").startswith("Pressure ") for item in findings):
+            score += 6
+        if "Weather temperature changed" in findings:
+            score += 6
+        if self.to_number(data.get("rain_episode_count")):
+            score += 5
+        return self.score_with_recency(score, last_seen_epoch, cap=95)
+
+    def aprsis_weather_period_summary_text(self, data):
+        """Return compact APRS weather period summary."""
+        parts = [
+            self.pws_period_label(data),
+            self.aprsis_weather_period_temperature_text(data),
+            self.aprsis_weather_period_rain_text(data),
+            self.aprsis_weather_period_wind_text(data),
+            self.aprsis_weather_period_pressure_text(data),
+            self.pws_period_coverage_text(data),
+        ]
+        return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def aprsis_weather_period_temperature_text(self, data):
+        """Return APRS weather period temperature/humidity text."""
+        parts = []
+        temp_min = self.to_number(data.get("temperature_min_f"))
+        temp_max = self.to_number(data.get("temperature_max_f"))
+        temp_avg = self.to_number(data.get("temperature_avg_f"))
+        temp_change = self.to_number(data.get("temperature_change_f"))
+        humidity_avg = self.to_number(data.get("humidity_avg_percent"))
+        if temp_min is not None and temp_max is not None:
+            parts.append("temp {:.0f}-{:.0f} F".format(temp_min, temp_max))
+        if temp_avg is not None:
+            parts.append("avg {:.0f} F".format(temp_avg))
+        if temp_change is not None:
+            parts.append("change {:+.0f} F".format(temp_change))
+        if humidity_avg is not None:
+            parts.append("humidity avg {:.0f}%".format(humidity_avg))
+        return ", ".join(parts)
+
+    def aprsis_weather_period_rain_text(self, data):
+        """Return APRS weather period rain-rate/episode text."""
+        parts = []
+        rate = self.to_number(data.get("rain_1h_max_in"))
+        rain_24h = self.to_number(data.get("rain_24h_max_in"))
+        rain_day = self.to_number(data.get("rain_since_midnight_max_in"))
+        episodes = self.to_number(data.get("rain_episode_count"))
+        active_min = self.to_number(data.get("rain_active_span_min"))
+        if rate is not None:
+            parts.append("max 1h rate {:.2f} in/hr".format(rate))
+        if rain_24h is not None:
+            parts.append("max 24h {:.2f} in".format(rain_24h))
+        if rain_day is not None:
+            parts.append("max since-midnight {:.2f} in".format(rain_day))
+        if episodes is not None and episodes:
+            parts.append("{} episode(s)".format(int(episodes)))
+        if active_min is not None and active_min:
+            parts.append("active span {:.0f} min".format(active_min))
+        return ", ".join(parts)
+
+    def aprsis_weather_period_wind_text(self, data):
+        """Return APRS weather period wind/gust text."""
+        parts = []
+        direction = self.to_number(data.get("wind_direction_avg_deg"))
+        wind = self.to_number(data.get("wind_speed_max_mph"))
+        gust = self.to_number(data.get("wind_gust_max_mph"))
+        if direction is not None:
+            parts.append("avg dir {:.0f} deg".format(direction))
+        if wind is not None:
+            parts.append("max wind {:.0f} mph".format(wind))
+        if gust is not None:
+            parts.append("max gust {:.0f} mph".format(gust))
+        return ", ".join(parts)
+
+    def aprsis_weather_period_pressure_text(self, data):
+        """Return APRS weather period pressure text."""
+        parts = []
+        pressure_min = self.to_number(data.get("pressure_min_hpa"))
+        pressure_max = self.to_number(data.get("pressure_max_hpa"))
+        pressure_avg = self.to_number(data.get("pressure_avg_hpa"))
+        pressure_change = self.to_number(data.get("pressure_change_hpa"))
+        if pressure_min is not None and pressure_max is not None:
+            parts.append("pressure {:.1f}-{:.1f} hPa".format(pressure_min, pressure_max))
+        if pressure_avg is not None:
+            parts.append("avg {:.1f} hPa".format(pressure_avg))
+        if pressure_change is not None:
+            parts.append("change {:+.1f} hPa".format(pressure_change))
+        return ", ".join(parts)
+
+    def aprsis_period_source_text(self, data):
+        """Return APRS feed/server source text without repeating APRS-IS basics."""
+        parts = []
+        feed = data.get("feed_name") or ""
+        server = data.get("server_name") or ""
+        host = data.get("host") or ""
+        if feed:
+            parts.append("feed {}".format(feed))
+        if server:
+            parts.append("server {}".format(server))
+        elif host:
+            parts.append(host)
+        return ", ".join(parts)
 
     def aprsis_station_evidence(self, data, findings, last_seen, last_seen_epoch):
         """Return compact APRS evidence for one callsign report."""
@@ -1021,6 +1223,7 @@ class ReportsBuilder:
         """Return NOAA/NWS/NHC/tsunami.gov report rows."""
         reports = []
         alert_entries = []
+        period_entries = []
         for event in events or []:
             data = clean_noaa_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
@@ -1028,9 +1231,15 @@ class ReportsBuilder:
                 report = self.noaa_collector_report(data, event, timestamp)
                 if report:
                     reports.append(report)
+            elif event_type == "noaa_period_summary":
+                period_entries.append((data, event))
             else:
                 alert_entries.append((data, event))
         reports.extend(self.noaa_population_reports(alert_entries, timestamp))
+        for data, event in period_entries:
+            report = self.noaa_period_report(data, event, timestamp)
+            if report:
+                reports.append(report)
         for data, event in alert_entries:
             report = self.noaa_alert_report(data, event, timestamp)
             if report:
@@ -1161,6 +1370,50 @@ class ReportsBuilder:
             self.score_with_recency(55 + len(high) * 12, last_seen_epoch, cap=95),
             last_seen,
             subject="NOAA/NWS hazards",
+            report_scope="population",
+        )
+
+    def noaa_period_report(self, data, event, timestamp):
+        """Return one monthly/yearly NOAA hazard-context report row."""
+        kind = data.get("period_kind") or ""
+        if kind not in ("monthly", "yearly"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = self.noaa_period_findings(data)
+        warning = self.noaa_warning_findings(findings)
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "period": self.pws_period_label(data),
+                "counts": self.noaa_period_counts_text(data),
+                "tropical_systems": data.get("tropical_systems") or [],
+                "basins": data.get("basins") or [],
+                "nws_hazards": self.noaa_period_hazard_text(data),
+                "tsunami": self.noaa_period_tsunami_text(data),
+                "forecast_count": data.get("forecast_count"),
+                "sources": data.get("sources") or [],
+                "change": self.noaa_period_change_text(data),
+                "latest": self.noaa_period_latest_text(data),
+                "first_seen": data.get("first_seen") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning" if warning else "info",
+            "noaa",
+            "noaa_{}_pattern".format(kind),
+            "NOAA {} hazard pattern".format(kind),
+            self.noaa_period_summary_text(data),
+            evidence,
+            self.score_noaa_period(data, findings, last_seen_epoch),
+            last_seen,
+            subject="NOAA hazards",
             report_scope="population",
         )
 
@@ -1340,6 +1593,121 @@ class ReportsBuilder:
         }
         return bool(warning_labels & set(findings or []))
 
+    def noaa_period_findings(self, data):
+        """Return deterministic NOAA period findings."""
+        kind = data.get("period_kind") or "period"
+        findings = ["NOAA {} pattern".format(kind)]
+        if self.to_int(data.get("tropical_system_count")):
+            findings.append("Tropical cyclone advisory")
+        if self.to_int(data.get("tsunami_incident_count")):
+            findings.append("Tsunami hazard")
+        if self.to_int(data.get("nws_hazard_count")):
+            findings.append("Weather hazard")
+        if self.to_int(data.get("forecast_count")):
+            findings.append("Point forecast context")
+        delta = self.to_number(data.get("event_count_delta"))
+        if delta is not None and delta > 0:
+            findings.append("More NOAA subjects than previous retained period")
+        elif delta is not None and delta < 0:
+            findings.append("Fewer NOAA subjects than previous retained period")
+        return self.unique_ordered(findings)
+
+    def score_noaa_period(self, data, findings, last_seen_epoch):
+        """Return attention score for a NOAA period report."""
+        score = 35 + min(self.to_int(data.get("event_count")) * 3, 25)
+        score += min(self.to_int(data.get("tropical_system_count")) * 12, 30)
+        score += min(self.to_int(data.get("tsunami_incident_count")) * 18, 35)
+        score += min(self.to_int(data.get("nws_hazard_count")) * 5, 25)
+        if "More NOAA subjects than previous retained period" in findings:
+            score += 6
+        return self.score_with_recency(score, last_seen_epoch, cap=95)
+
+    def noaa_period_summary_text(self, data):
+        """Return compact NOAA period summary."""
+        parts = [
+            self.pws_period_label(data),
+            self.noaa_period_counts_text(data),
+            self.noaa_period_tropical_text(data),
+            self.noaa_period_hazard_text(data),
+            self.noaa_period_tsunami_text(data),
+            self.noaa_period_change_text(data),
+        ]
+        return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def noaa_period_counts_text(self, data):
+        """Return compact NOAA period count text."""
+        count = self.to_int(data.get("event_count"))
+        if not count:
+            return ""
+        return "{} unique NOAA subject(s)".format(count)
+
+    def noaa_period_tropical_text(self, data):
+        """Return NOAA tropical-system period text."""
+        count = self.to_int(data.get("tropical_system_count"))
+        if not count:
+            return ""
+        systems = data.get("tropical_systems") or []
+        basins = data.get("basins") or []
+        parts = ["{} tropical system(s)".format(count)]
+        if systems:
+            parts.append(", ".join(systems[:4]))
+        if basins:
+            parts.append("basins {}".format(", ".join(basins[:4])))
+        return ", ".join(parts)
+
+    def noaa_period_hazard_text(self, data):
+        """Return NOAA/NWS hazard period text."""
+        count = self.to_int(data.get("nws_hazard_count"))
+        if not count:
+            return ""
+        events = data.get("hazard_events") or []
+        areas = data.get("hazard_areas") or []
+        severities = data.get("hazard_severities") or []
+        parts = ["{} NWS hazard subject(s)".format(count)]
+        if events:
+            parts.append("events {}".format(", ".join(events[:4])))
+        if severities:
+            parts.append("severity {}".format(", ".join(severities[:4])))
+        if areas:
+            parts.append("areas {}".format(", ".join(areas[:3])))
+        return "; ".join(parts)
+
+    def noaa_period_tsunami_text(self, data):
+        """Return NOAA tsunami period text."""
+        incidents = self.to_int(data.get("tsunami_incident_count"))
+        messages = self.to_int(data.get("tsunami_message_count"))
+        if not incidents and not messages:
+            return ""
+        parts = []
+        if incidents:
+            parts.append("{} tsunami incident(s)".format(incidents))
+        if messages:
+            parts.append("{} tsunami message(s)".format(messages))
+        values = data.get("tsunami_incidents") or []
+        if values:
+            parts.append(", ".join(values[:4]))
+        return ", ".join(parts)
+
+    def noaa_period_change_text(self, data):
+        """Return retained previous-period comparison text."""
+        delta = self.to_number(data.get("event_count_delta"))
+        previous = self.to_number(data.get("previous_event_count"))
+        if delta is None or previous is None:
+            return ""
+        if delta == 0:
+            return "same subject count as previous retained period"
+        direction = "more" if delta > 0 else "fewer"
+        return "{} {} than previous retained period".format(int(abs(delta)), direction)
+
+    def noaa_period_latest_text(self, data):
+        """Return the latest NOAA subject folded into the period."""
+        parts = [
+            data.get("latest_source") or "",
+            data.get("latest_alert_kind") or "",
+            data.get("latest_event") or data.get("latest_headline") or "",
+        ]
+        return "; ".join(str(part) for part in parts if part)
+
     def score_noaa_alert(self, data, findings, last_seen_epoch):
         """Return attention score for a NOAA alert/advisory."""
         score = 35
@@ -1407,6 +1775,7 @@ class ReportsBuilder:
         """Return USGS earthquake report rows."""
         reports = []
         earthquake_entries = []
+        period_entries = []
         for event in events or []:
             data = clean_usgs_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
@@ -1414,9 +1783,15 @@ class ReportsBuilder:
                 report = self.usgs_collector_report(data, event, timestamp)
                 if report:
                     reports.append(report)
+            elif event_type == "usgs_earthquake_period_summary":
+                period_entries.append((data, event))
             else:
                 earthquake_entries.append((data, event))
         reports.extend(self.usgs_population_reports(earthquake_entries, timestamp))
+        for data, event in period_entries:
+            report = self.usgs_period_report(data, event, timestamp)
+            if report:
+                reports.append(report)
         for data, event in earthquake_entries:
             report = self.usgs_earthquake_report(data, event, timestamp)
             if report:
@@ -1493,6 +1868,49 @@ class ReportsBuilder:
                 last_seen_epoch,
                 cap=95,
             ),
+            last_seen,
+            subject="USGS earthquakes",
+            report_scope="population",
+        )
+
+    def usgs_period_report(self, data, event, timestamp):
+        """Return one weekly/monthly/yearly USGS seismic-pattern row."""
+        kind = data.get("period_kind") or ""
+        if kind not in ("weekly", "monthly", "yearly"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = self.usgs_period_findings(data)
+        warning = self.usgs_warning_findings(findings)
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "period": self.pws_period_label(data),
+                "counts": self.usgs_period_counts_text(data),
+                "magnitude": self.usgs_period_magnitude_text(data),
+                "distance_depth": self.usgs_period_distance_depth_text(data),
+                "event_ids": data.get("event_ids") or [],
+                "alert_colors": data.get("alert_colors") or [],
+                "scopes": data.get("scopes") or [],
+                "feeds": data.get("feeds") or [],
+                "latest": self.usgs_period_latest_text(data),
+                "first_seen": data.get("first_seen") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning" if warning else "info",
+            "usgs",
+            "usgs_earthquake_{}_pattern".format(kind),
+            "USGS {} seismic pattern".format(kind),
+            self.usgs_period_summary_text(data),
+            evidence,
+            self.score_usgs_period(data, findings, last_seen_epoch),
             last_seen,
             subject="USGS earthquakes",
             report_scope="population",
@@ -1617,6 +2035,100 @@ class ReportsBuilder:
             for item in findings or []
         )
 
+    def usgs_period_findings(self, data):
+        """Return deterministic USGS period findings."""
+        kind = data.get("period_kind") or "period"
+        findings = ["USGS {} seismic pattern".format(kind)]
+        if self.to_int(data.get("global_major_count")):
+            findings.append("Global major earthquake")
+        if self.to_int(data.get("local_count")):
+            findings.append("Earthquake in configured query area")
+        if self.to_int(data.get("notable_count")):
+            findings.append("Notable magnitude")
+        if self.to_int(data.get("tsunami_count")):
+            findings.append("Tsunami flag")
+        for color in data.get("alert_colors") or []:
+            findings.append("USGS alert color {}".format(color))
+        return self.unique_ordered(findings)
+
+    def score_usgs_period(self, data, findings, last_seen_epoch):
+        """Return attention score for a USGS period report."""
+        magnitude = self.to_number(data.get("magnitude_max")) or 0
+        score = 35 + int(max(0, magnitude) * 5)
+        score += min(self.to_int(data.get("event_count")) * 3, 25)
+        score += min(self.to_int(data.get("global_major_count")) * 20, 35)
+        score += min(self.to_int(data.get("tsunami_count")) * 25, 40)
+        score += min(self.to_int(data.get("notable_count")) * 8, 30)
+        return self.score_with_recency(score, last_seen_epoch, cap=98)
+
+    def usgs_period_summary_text(self, data):
+        """Return compact USGS period summary."""
+        parts = [
+            self.pws_period_label(data),
+            self.usgs_period_counts_text(data),
+            self.usgs_period_magnitude_text(data),
+            self.usgs_period_distance_depth_text(data),
+            self.usgs_period_tsunami_text(data),
+        ]
+        return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def usgs_period_counts_text(self, data):
+        """Return compact USGS period count text."""
+        parts = []
+        total = self.to_int(data.get("event_count"))
+        local_count = self.to_int(data.get("local_count"))
+        global_count = self.to_int(data.get("global_major_count"))
+        notable = self.to_int(data.get("notable_count"))
+        if total:
+            parts.append("{} earthquake(s)".format(total))
+        if local_count:
+            parts.append("{} local".format(local_count))
+        if global_count:
+            parts.append("{} global major".format(global_count))
+        if notable:
+            parts.append("{} notable".format(notable))
+        return ", ".join(parts)
+
+    def usgs_period_magnitude_text(self, data):
+        """Return USGS period magnitude range text."""
+        minimum = self.to_number(data.get("magnitude_min"))
+        maximum = self.to_number(data.get("magnitude_max"))
+        if minimum is not None and maximum is not None:
+            return "magnitude {:.1f}-{:.1f}".format(minimum, maximum)
+        if maximum is not None:
+            return "max magnitude {:.1f}".format(maximum)
+        return ""
+
+    def usgs_period_distance_depth_text(self, data):
+        """Return nearest/shallowest USGS period text."""
+        parts = []
+        nearest = self.to_number(data.get("nearest_distance_km"))
+        shallowest = self.to_number(data.get("shallowest_depth_km"))
+        if nearest is not None:
+            parts.append("nearest {:.1f} km".format(nearest))
+        if shallowest is not None:
+            parts.append("shallowest {:.1f} km".format(shallowest))
+        return ", ".join(parts)
+
+    def usgs_period_tsunami_text(self, data):
+        """Return USGS tsunami-count text."""
+        count = self.to_int(data.get("tsunami_count"))
+        return "{} tsunami-flagged".format(count) if count else ""
+
+    def usgs_period_latest_text(self, data):
+        """Return latest USGS event folded into the period."""
+        parts = []
+        magnitude = self.to_number(data.get("latest_magnitude"))
+        if magnitude is not None:
+            parts.append("M{:.1f}".format(magnitude))
+        if data.get("latest_place"):
+            parts.append(data.get("latest_place"))
+        if data.get("latest_event_time"):
+            parts.append("event {}".format(data.get("latest_event_time")))
+        if data.get("latest_alert_color"):
+            parts.append("alert {}".format(data.get("latest_alert_color")))
+        return "; ".join(parts)
+
     def score_usgs_earthquake(self, data, findings, last_seen_epoch):
         """Return attention score for a USGS earthquake."""
         magnitude = self.to_number(data.get("magnitude")) or 0
@@ -1664,6 +2176,7 @@ class ReportsBuilder:
         """Return SWPC space-weather report rows."""
         reports = []
         swpc_entries = []
+        period_entries = []
         for event in events or []:
             data = clean_swpc_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
@@ -1671,9 +2184,15 @@ class ReportsBuilder:
                 report = self.swpc_collector_report(data, event, timestamp)
                 if report:
                     reports.append(report)
+            elif event_type == "swpc_event_period_summary":
+                period_entries.append((data, event))
             else:
                 swpc_entries.append((data, event))
         reports.extend(self.swpc_population_reports(swpc_entries, timestamp))
+        for data, event in period_entries:
+            report = self.swpc_period_report(data, event, timestamp)
+            if report:
+                reports.append(report)
         for data, event in swpc_entries:
             report = self.swpc_event_report(data, event, timestamp)
             if report:
@@ -1749,6 +2268,47 @@ class ReportsBuilder:
                 last_seen_epoch,
                 cap=98,
             ),
+            last_seen,
+            subject="SWPC space weather",
+            report_scope="population",
+        )
+
+    def swpc_period_report(self, data, event, timestamp):
+        """Return one weekly/monthly/yearly SWPC space-weather row."""
+        kind = data.get("period_kind") or ""
+        if kind not in ("weekly", "monthly", "yearly"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = self.swpc_period_findings(data)
+        warning = self.swpc_warning_findings(findings)
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "period": self.pws_period_label(data),
+                "counts": self.swpc_period_counts_text(data),
+                "scale": self.swpc_period_scale_text(data),
+                "kinds": data.get("kind_counts") or [],
+                "events": data.get("events") or [],
+                "scale_labels": data.get("scale_labels") or [],
+                "latest": self.swpc_period_latest_text(data),
+                "first_seen": data.get("first_seen") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        return self.report(
+            timestamp,
+            "warning" if warning else "info",
+            "swpc",
+            "swpc_space_weather_{}_pattern".format(kind),
+            "SWPC {} space-weather pattern".format(kind),
+            self.swpc_period_summary_text(data),
+            evidence,
+            self.score_swpc_period(data, findings, last_seen_epoch),
             last_seen,
             subject="SWPC space weather",
             report_scope="population",
@@ -1883,6 +2443,91 @@ class ReportsBuilder:
         """Return True for SWPC findings that should sort as warnings."""
         return "Alert threshold crossed" in set(findings or [])
 
+    def swpc_period_findings(self, data):
+        """Return deterministic SWPC period findings."""
+        kind = data.get("period_kind") or "period"
+        findings = ["SWPC {} space-weather pattern".format(kind)]
+        if self.to_int(data.get("xray_flare_count")):
+            findings.append("X-class solar flare")
+        if self.to_int(data.get("radio_blackout_count")):
+            findings.append("Radio blackout")
+        if self.to_int(data.get("solar_radiation_storm_count")):
+            findings.append("Solar radiation storm")
+        if self.to_int(data.get("geomagnetic_storm_count")):
+            findings.append("Geomagnetic storm")
+        if self.to_int(data.get("alert_count")):
+            findings.append("Alert threshold crossed")
+        if self.to_int(data.get("critical_count")):
+            findings.append("Critical SWPC level")
+        return self.unique_ordered(findings)
+
+    def score_swpc_period(self, data, findings, last_seen_epoch):
+        """Return attention score for a SWPC period report."""
+        score = 35 + min(self.to_int(data.get("event_count")) * 3, 25)
+        score += min(self.to_int(data.get("alert_count")) * 15, 40)
+        score += min(self.to_int(data.get("critical_count")) * 12, 35)
+        kp = self.to_number(data.get("max_kp"))
+        if kp is not None:
+            score += int(max(0, kp - 4) * 5)
+        if data.get("highest_xray_class"):
+            score += 10
+        return self.score_with_recency(score, last_seen_epoch, cap=98)
+
+    def swpc_period_summary_text(self, data):
+        """Return compact SWPC period summary."""
+        parts = [
+            self.pws_period_label(data),
+            self.swpc_period_counts_text(data),
+            self.swpc_period_scale_text(data),
+        ]
+        return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def swpc_period_counts_text(self, data):
+        """Return compact SWPC product count text."""
+        parts = []
+        total = self.to_int(data.get("event_count"))
+        alerts = self.to_int(data.get("alert_count"))
+        critical = self.to_int(data.get("critical_count"))
+        if total:
+            parts.append("{} SWPC event(s)".format(total))
+        if alerts:
+            parts.append("{} alert-threshold".format(alerts))
+        if critical:
+            parts.append("{} critical".format(critical))
+        return ", ".join(parts)
+
+    def swpc_period_scale_text(self, data):
+        """Return strongest SWPC scale/flare/Kp text for a period."""
+        parts = []
+        xray = data.get("highest_xray_class") or ""
+        kp = self.to_number(data.get("max_kp"))
+        radio = data.get("max_radio_blackout_label") or ""
+        radiation = data.get("max_solar_radiation_storm_label") or ""
+        geomagnetic = data.get("max_geomagnetic_storm_label") or ""
+        if xray:
+            parts.append("highest flare {}".format(xray))
+        if kp is not None:
+            parts.append("max Kp {:.1f}".format(kp))
+        if radio:
+            parts.append("max {}".format(radio))
+        if radiation:
+            parts.append("max {}".format(radiation))
+        if geomagnetic:
+            parts.append("max {}".format(geomagnetic))
+        return ", ".join(parts)
+
+    def swpc_period_latest_text(self, data):
+        """Return latest SWPC event folded into the period."""
+        parts = [
+            data.get("latest_event") or "",
+            data.get("latest_scale_label") or "",
+            data.get("latest_xray_class") or "",
+        ]
+        kp = self.to_number(data.get("latest_kp_index"))
+        if kp is not None:
+            parts.append("Kp {:.1f}".format(kp))
+        return "; ".join(str(part) for part in parts if part)
+
     def score_swpc_event(self, data, findings, last_seen_epoch):
         """Return attention score for an SWPC event."""
         score = 30
@@ -1940,6 +2585,7 @@ class ReportsBuilder:
         """Return PWS weather station report rows."""
         reports = []
         station_entries = []
+        period_entries = []
         for event in events or []:
             data = clean_pws_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
@@ -1947,10 +2593,18 @@ class ReportsBuilder:
                 report = self.pws_collector_report(data, event, timestamp)
                 if report:
                     reports.append(report)
+            elif event_type == "pws_weather_period_summary":
+                period_entries.append((data, event))
+            elif event_type == "pws_weather_summary":
+                station_entries.append((data, event))
             else:
                 station_entries.append((data, event))
         if len(station_entries) >= 2:
             reports.append(self.pws_population_report(station_entries, timestamp))
+        for data, event in period_entries:
+            report = self.pws_period_report(data, event, timestamp)
+            if report:
+                reports.append(report)
         for data, event in station_entries:
             report = self.pws_station_report(data, event, timestamp)
             if report:
@@ -2032,6 +2686,49 @@ class ReportsBuilder:
             subject="PWS collector",
         )
 
+    def pws_period_report(self, data, event, timestamp):
+        """Return one weekly/monthly/yearly PWS pattern row."""
+        station = data.get("station_id") or data.get("station_name") or ""
+        kind = data.get("period_kind") or ""
+        if not station or kind not in ("weekly", "monthly", "yearly"):
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = (
+            self.to_number(data.get("last_seen_epoch"))
+            or record_time_epoch(event, "timestamp")
+        )
+        findings = self.pws_period_findings(data)
+        warning = self.pws_warning_findings(findings)
+        evidence = self.clean_evidence(
+            {
+                "findings": findings,
+                "period": self.pws_period_label(data),
+                "station_id": station,
+                "coverage": self.pws_period_coverage_text(data),
+                "temperature": self.pws_period_temperature_text(data),
+                "rain": self.pws_period_rain_text(data),
+                "wind": self.pws_period_wind_text(data),
+                "pressure": self.pws_period_pressure_text(data),
+                "solar": self.pws_period_solar_text(data),
+                "first_seen": data.get("first_seen") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
+        title = "PWS {} weather pattern".format(kind)
+        return self.report(
+            timestamp,
+            "warning" if warning else "info",
+            "pws",
+            "pws_weather_{}_pattern".format(kind),
+            title,
+            self.pws_period_summary_text(data),
+            evidence,
+            self.score_pws_period(data, findings, last_seen_epoch),
+            last_seen,
+            subject=station,
+        )
+
     def pws_station_report(self, data, event, timestamp):
         """Return one PWS station report row."""
         station = data.get("station_id") or data.get("station_name") or ""
@@ -2107,6 +2804,52 @@ class ReportsBuilder:
             findings.append("Rain {}".format(data.get("rain_last_transition")))
         return self.unique_ordered(findings)
 
+    def pws_period_findings(self, data):
+        """Return deterministic PWS period findings."""
+        kind = data.get("period_kind") or "period"
+        findings = ["PWS {} pattern".format(kind)]
+        temp_min = self.to_number(data.get("temperature_min_f"))
+        temp_max = self.to_number(data.get("temperature_max_f"))
+        if temp_min is not None and temp_max is not None:
+            temp_range = temp_max - temp_min
+            if temp_range >= float(self.config.get("pws_weather_temp_change_f", 5)):
+                findings.append("Temperature range {:.0f} F".format(temp_range))
+        temp_change = self.to_number(data.get("temperature_change_f"))
+        if temp_change is not None and abs(temp_change) >= float(
+            self.config.get("pws_weather_temp_change_f", 5)
+        ):
+            findings.append("Temperature changed {:+.0f} F".format(temp_change))
+        rain_max = self.to_number(data.get("rain_1h_max_in"))
+        if rain_max is not None and rain_max >= float(
+            self.config.get("pws_weather_high_rain_1h_in", 0.25)
+        ):
+            findings.append("High 1h rain rate")
+        rain_total = self.to_number(data.get("rain_period_total_in"))
+        if rain_total is not None and rain_total > 0:
+            findings.append("Rain observed")
+        episodes = self.to_number(data.get("rain_episode_count"))
+        if episodes is not None and episodes >= 2:
+            findings.append("{} rain episode(s)".format(int(episodes)))
+        wind_max = self.to_number(data.get("wind_speed_max_mph"))
+        gust_max = self.to_number(data.get("wind_gust_max_mph"))
+        if wind_max is not None and wind_max >= float(
+            self.config.get("pws_weather_high_wind_mph", 25)
+        ):
+            findings.append("High wind")
+        if gust_max is not None and gust_max >= float(
+            self.config.get("pws_weather_high_gust_mph", 35)
+        ):
+            findings.append("High gust")
+        pressure_change = self.to_number(data.get("pressure_rel_change_inhg"))
+        if pressure_change is not None and abs(pressure_change) >= 0.03:
+            findings.append(
+                "Pressure {} {:.2f} inHg".format(
+                    "rose" if pressure_change > 0 else "fell",
+                    abs(pressure_change),
+                )
+            )
+        return self.unique_ordered(findings)
+
     def pws_warning_findings(self, findings):
         """Return True for PWS findings that should sort as warnings."""
         return any(
@@ -2129,6 +2872,28 @@ class ReportsBuilder:
             score += 8
         return self.score_with_recency(score, last_seen_epoch, cap=95)
 
+    def score_pws_period(self, data, findings, last_seen_epoch):
+        """Return attention score for a PWS period report."""
+        score = 38
+        kind = data.get("period_kind")
+        if kind == "weekly":
+            score += 5
+        elif kind == "monthly":
+            score += 3
+        if "High 1h rain rate" in findings:
+            score += 28
+        if "High wind" in findings:
+            score += 16
+        if "High gust" in findings:
+            score += 20
+        if "Rain observed" in findings:
+            score += 5
+        if any(str(item or "").startswith("Pressure ") for item in findings):
+            score += 6
+        if any(str(item or "").startswith("Temperature ") for item in findings):
+            score += 6
+        return self.score_with_recency(score, last_seen_epoch, cap=95)
+
     def pws_summary_text(self, data):
         """Return compact PWS report summary."""
         parts = [
@@ -2139,6 +2904,105 @@ class ReportsBuilder:
             data.get("event_time") and "sample {}".format(data.get("event_time")),
         ]
         return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def pws_period_summary_text(self, data):
+        """Return compact PWS period summary."""
+        parts = [
+            self.pws_period_label(data),
+            self.pws_period_temperature_text(data),
+            self.pws_period_rain_text(data),
+            self.pws_period_wind_text(data),
+            self.pws_period_pressure_text(data),
+            self.pws_period_coverage_text(data),
+        ]
+        return "{}.".format("; ".join(str(part) for part in parts if part))
+
+    def pws_period_label(self, data):
+        """Return one compact PWS period label."""
+        return data.get("period_label") or data.get("period_key") or data.get("period_kind") or ""
+
+    def pws_period_temperature_text(self, data):
+        """Return period temperature range/average/change text."""
+        parts = []
+        temp_min = self.to_number(data.get("temperature_min_f"))
+        temp_max = self.to_number(data.get("temperature_max_f"))
+        temp_avg = self.to_number(data.get("temperature_avg_f"))
+        temp_change = self.to_number(data.get("temperature_change_f"))
+        humidity_avg = self.to_number(data.get("humidity_avg_percent"))
+        if temp_min is not None and temp_max is not None:
+            parts.append("temp {:.0f}-{:.0f} F".format(temp_min, temp_max))
+        if temp_avg is not None:
+            parts.append("avg {:.0f} F".format(temp_avg))
+        if temp_change is not None:
+            parts.append("change {:+.0f} F".format(temp_change))
+        if humidity_avg is not None:
+            parts.append("humidity avg {:.0f}%".format(humidity_avg))
+        return ", ".join(parts)
+
+    def pws_period_rain_text(self, data):
+        """Return period rain total/rate/episode text."""
+        parts = []
+        total = self.to_number(data.get("rain_period_total_in"))
+        rate = self.to_number(data.get("rain_1h_max_in"))
+        episodes = self.to_number(data.get("rain_episode_count"))
+        active_min = self.to_number(data.get("rain_active_span_min"))
+        if total is not None:
+            parts.append("rain {:.2f} in".format(total))
+        if rate is not None:
+            parts.append("max 1h rate {:.2f} in/hr".format(rate))
+        if episodes is not None and episodes:
+            parts.append("{} episode(s)".format(int(episodes)))
+        if active_min is not None and active_min:
+            parts.append("active span {:.0f} min".format(active_min))
+        return ", ".join(parts)
+
+    def pws_period_wind_text(self, data):
+        """Return period wind/gust text."""
+        parts = []
+        wind = self.to_number(data.get("wind_speed_max_mph"))
+        gust = self.to_number(data.get("wind_gust_max_mph"))
+        direction = self.to_number(data.get("wind_direction_avg_deg"))
+        if direction is not None:
+            parts.append("avg dir {:.0f} deg".format(direction))
+        if wind is not None:
+            parts.append("max wind {:.0f} mph".format(wind))
+        if gust is not None:
+            parts.append("max gust {:.0f} mph".format(gust))
+        return ", ".join(parts)
+
+    def pws_period_pressure_text(self, data):
+        """Return period pressure range/change text."""
+        parts = []
+        pressure_min = self.to_number(data.get("pressure_rel_min_inhg"))
+        pressure_max = self.to_number(data.get("pressure_rel_max_inhg"))
+        pressure_change = self.to_number(data.get("pressure_rel_change_inhg"))
+        if pressure_min is not None and pressure_max is not None:
+            parts.append("pressure {:.2f}-{:.2f} inHg".format(pressure_min, pressure_max))
+        if pressure_change is not None:
+            parts.append("change {:+.2f} inHg".format(pressure_change))
+        return ", ".join(parts)
+
+    def pws_period_solar_text(self, data):
+        """Return period solar/UV maxima text."""
+        parts = []
+        solar = self.to_number(data.get("solar_max_w_m2"))
+        uv = self.to_number(data.get("uv_max_index"))
+        if solar is not None:
+            parts.append("max solar {:.0f} W/m2".format(solar))
+        if uv is not None:
+            parts.append("max UV {:.1f}".format(uv))
+        return ", ".join(parts)
+
+    def pws_period_coverage_text(self, data):
+        """Return period sample coverage text."""
+        samples = self.to_number(data.get("sample_count"))
+        days = self.to_number(data.get("coverage_days") or data.get("day_count"))
+        parts = []
+        if samples is not None:
+            parts.append("{} sample(s)".format(int(samples)))
+        if days is not None:
+            parts.append("{} day(s)".format(int(days)))
+        return ", ".join(parts)
 
     def pws_weather_text(self, data):
         """Return temperature/humidity text."""
@@ -3722,6 +4586,7 @@ class ReportsBuilder:
         if report_scope == "population":
             tags.append("pattern")
         candidates = [
+            ("pattern", ("pattern",)),
             ("recurring", ("recurring",)),
             ("long", ("long",)),
             ("intermittent", ("intermittent",)),
@@ -3746,6 +4611,8 @@ class ReportsBuilder:
             ("earthquake", ("earthquake", "usgs_earthquake")),
             ("tsunami", ("tsunami",)),
             ("tropical", ("tropical", "hurricane", "cyclone")),
+            ("space weather", ("space_weather", "space-weather", "swpc")),
+            ("solar", ("solar", "flare")),
             ("LAN", ("lan_", "gateway", "default gateway")),
         ]
         for label, needles in candidates:
@@ -3793,6 +4660,8 @@ class ReportsBuilder:
         if source == "rayhunter":
             return "High" if evidence.get("warning_count") else "Medium"
         if source == "aprsis":
+            if evidence.get("period") and evidence.get("callsign"):
+                return "High"
             if evidence.get("weather_count") or evidence.get("position_count"):
                 return "High" if evidence.get("packet_count") else "Medium"
             return "Medium"
@@ -3800,6 +4669,10 @@ class ReportsBuilder:
             return "High"
         if source == "swpc":
             return "High" if evidence.get("event_id") else "Medium"
+        if source == "pws":
+            if evidence.get("period") and evidence.get("station_id"):
+                return "High"
+            return "Medium" if evidence.get("station_id") else "Low"
         if source == "lan":
             if evidence.get("mac") or evidence.get("gateway_ip"):
                 return "Medium"
@@ -3848,6 +4721,11 @@ class ReportsBuilder:
             or device.get("vendor_name")
             or "",
             "service_uuids": self.list_values(device.get("service_uuids")),
+            "findmy_accessory": bool(device.get("findmy_accessory")),
+            "findmy_label": device.get("findmy_label") or "",
+            "findmy_payload_type": device.get("findmy_payload_type") or "",
+            "findmy_status": device.get("findmy_status") or "",
+            "findmy_hint": device.get("findmy_hint") or "",
             "first_seen": self.display_time(device, "first_seen"),
             "first_seen_epoch": record_time_epoch(device, "first_seen"),
             "last_seen": self.display_time(device, "last_seen"),

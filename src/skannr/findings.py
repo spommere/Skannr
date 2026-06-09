@@ -602,6 +602,11 @@ class FindingsEngine:
             "rssi": rssi,
             "manufacturer": data.get("manufacturer") or "",
             "service_uuids": data.get("service_uuids") or [],
+            "findmy_accessory": bool(data.get("findmy_accessory")),
+            "findmy_label": data.get("findmy_label") or "",
+            "findmy_payload_type": data.get("findmy_payload_type") or "",
+            "findmy_status": data.get("findmy_status") or "",
+            "findmy_hint": data.get("findmy_hint") or "",
         }
 
         if (
@@ -659,6 +664,15 @@ class FindingsEngine:
             current["name"] = data.get("name")
         if data.get("service_uuids"):
             current["service_uuids"] = data.get("service_uuids")
+        for field in (
+            "findmy_accessory",
+            "findmy_label",
+            "findmy_payload_type",
+            "findmy_status",
+            "findmy_hint",
+        ):
+            if data.get(field):
+                current[field] = data.get(field)
         self.ble_devices[mac] = current
 
         if (
@@ -711,6 +725,11 @@ class FindingsEngine:
             "name": name,
             "manufacturer": data.get("manufacturer") or "",
             "service_uuids": data.get("service_uuids") or [],
+            "findmy_accessory": bool(data.get("findmy_accessory")),
+            "findmy_label": data.get("findmy_label") or "",
+            "findmy_payload_type": data.get("findmy_payload_type") or "",
+            "findmy_status": data.get("findmy_status") or "",
+            "findmy_hint": data.get("findmy_hint") or "",
         }
 
     def ble_live_finding_worthy(self, data, signal=False):
@@ -720,6 +739,8 @@ class FindingsEngine:
         name = str((data or {}).get("name") or "").strip()
         mac = str((data or {}).get("mac") or "").strip().lower().replace("-", ":")
         if name and name.lower().replace("-", ":") != mac:
+            return True
+        if (data or {}).get("findmy_accessory"):
             return True
         if self.config.get("ble_live_service_identity", False):
             return bool((data or {}).get("service_uuids"))

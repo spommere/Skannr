@@ -59,6 +59,19 @@ def clean_swpc_data(data):
         "peak_time_epoch",
         "updated_epoch",
         "issue_epoch",
+        "period_start_epoch",
+        "period_end_epoch",
+        "event_count",
+        "alert_count",
+        "critical_count",
+        "xray_flare_count",
+        "radio_blackout_count",
+        "solar_radiation_storm_count",
+        "geomagnetic_storm_count",
+        "max_kp",
+        "max_radio_blackout",
+        "max_solar_radiation_storm",
+        "max_geomagnetic_storm",
         "scale_value",
         "kp_index",
         "xray_flux_peak",
@@ -68,6 +81,7 @@ def clean_swpc_data(data):
         "last_seen_epoch",
     }
     bool_keys = {"internet_fed", "alert_recommended"}
+    list_keys = {"events", "kind_counts", "scale_labels"}
     long_text_keys = {"message", "summary"}
     for key, value in data.items():
         if value in (None, "", []):
@@ -76,11 +90,25 @@ def clean_swpc_data(data):
             cleaned[key] = value
         elif key in bool_keys:
             cleaned[key] = bool(value)
+        elif key in list_keys and isinstance(value, list):
+            items = []
+            for item in value:
+                text = compact_swpc_text(item, 80)
+                if text and text not in items:
+                    items.append(text)
+            if items:
+                cleaned[key] = items[:24]
         else:
             max_length = SWPC_TEXT_MAX if key in long_text_keys else SWPC_FIELD_MAX
             text = compact_swpc_text(value, max_length)
             if text:
                 cleaned[key] = text
+    if not cleaned.get("scale_label"):
+        label = swpc_scale_label(
+            cleaned.get("scale_family"), cleaned.get("scale_value")
+        )
+        if label:
+            cleaned["scale_label"] = label
     return cleaned
 
 
@@ -287,6 +315,7 @@ class SWPCCollector(BaseCollector):
             "source_url": self.product_url("alerts", SWPC_ALERTS_URL),
             "scale_family": family,
             "scale_value": scale,
+            "scale_label": swpc_scale_label(family, scale),
             "xray_class": xray_class,
             "internet_fed": True,
         }
@@ -758,6 +787,17 @@ def scale_number(value, default=None):
         return int(float(match.group(1)))
     except (TypeError, ValueError):
         return default
+
+
+def swpc_scale_label(family, value):
+    """Return a compact NOAA scale label such as G3, R3, or S3."""
+    family_text = compact_swpc_text(family, 8).upper()
+    if family_text not in {"G", "R", "S"}:
+        return ""
+    number = scale_number(value)
+    if number is None:
+        return ""
+    return "{}{}".format(family_text, number)
 
 
 def swpc_event_is_alert(data, config=None):

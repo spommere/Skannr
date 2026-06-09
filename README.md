@@ -425,6 +425,24 @@ installs. `config/` is machine-specific local state.
   alert events. NOAA/NHC, USGS, and SWPC alert fingerprints are remembered by
   default for seven days so retained upstream feed entries do not require
   repeated ACKs after restart or after the active row expires.
+- `pushover.enabled`, `pushover.userkey`, `pushover.appkey`: optional Pushover
+  phone notification delivery for newly emitted or escalated alerts. It is off
+  by default. When enabled, Skannr checks generic internet connectivity
+  before sending and logs delivery failures without interrupting collectors.
+  `userkey` is the Pushover user key and `appkey` is the Pushover application
+  API token:
+
+  ```yaml
+  alerts:
+    pushover:
+      enabled: true
+      userkey: "your-pushover-user-key"
+      appkey: "your-pushover-application-token"
+  ```
+
+  Pushover delivery is best-effort. Browser Alerts remain the source of truth;
+  phone delivery runs in a background worker and is skipped when internet
+  connectivity is unavailable.
 - Every rule has `enabled` and `level`; some also have `critical_level`.
 - `drone_wifi.min_rssi`, `ssid_patterns`, `vendor_patterns`, `oui_prefixes`:
   DJI/Remote ID style Wi-Fi alert matching.
@@ -617,8 +635,10 @@ Collector-specific keys:
   `tsunami.fetch_bulletin_text`, `tsunami.feeds`.
 - `usgs.yaml`: `poll_interval_sec`, `request_timeout_sec`, `user_agent`,
   `latitude`, `longitude`, `radius_km`, `min_magnitude`, `orderby`,
+  `global_major.enabled`, `global_major.min_magnitude`,
+  `global_major.orderby`, optional `global_major.lookback_days`,
   `warning_magnitude_nearby`, `warning_magnitude_regional`,
-  `warning_nearby_radius_km`, `url`.
+  `warning_magnitude_global`, `warning_nearby_radius_km`, `url`.
 - `swpc.yaml`: `poll_interval_sec`, `request_timeout_sec`, `user_agent`,
   `products.alerts`, `products.noaa_scales`, `products.xray_flux`,
   `products.planetary_k`, `urls.alerts`, `urls.noaa_scales`,
@@ -638,8 +658,8 @@ Collector-specific keys:
   `collect_passive_dhcp`, `passive_dhcp_ports`, `collect_passive_arp`,
   `passive_arp_interfaces`, `collect_active_arp_scan`,
   `active_arp_scan_interval_sec`, `active_arp_scan_timeout_sec`,
-  `active_arp_scan_interfaces`, `active_arp_scan_command`,
-  `active_arp_scan_working_dir`,
+  `active_arp_scan_retention_sec`, `active_arp_scan_interfaces`,
+  `active_arp_scan_command`, `active_arp_scan_working_dir`,
   `dhcp_lease_import_interval_sec`, `dhcp_lease_import_timeout_sec`,
   `dhcp_lease_paths`, `dhcp_lease_command`.
 - `lan_identify.yaml`: `identify_timeout_sec`, `nmap_timeout_sec`,
@@ -663,9 +683,10 @@ When adding or changing a collector identity rule, run:
 python3 scripts/validate_collector_contract.py
 ```
 
-That check locks down the acquisition-mode groups, representative
-NOAA/USGS/SWPC subject/fingerprint behavior, NOAA ACK restart de-duplication,
-SWPC partial-product failure handling, and PWS Ambient Weather normalization.
+That check locks down the acquisition-mode groups, representative BLE Find My
+payload detection, NOAA/USGS/SWPC subject/fingerprint behavior, NOAA ACK
+restart de-duplication, SWPC partial-product failure handling, PWS Ambient
+Weather normalization, and representative period-rollup report rows.
 
 The Reports section includes Bluetooth privacy-address grouping:
 
@@ -864,21 +885,24 @@ private/randomized address clusters, local RF privacy exposure, APRS-IS weather
 station and mobile-station area patterns, NOAA tropical/hazard product sets,
 USGS seismic activity, SWPC space-weather product sets, and LAN subject
 population.
+Reports also include materialized period rows for longitudinal patterns such as
+PWS and APRS-IS weather station trends, USGS seismic periods, SWPC
+space-weather periods, and NOAA monthly/yearly hazard context.
 
-MAC, SSID, and BSSID values in Reports, Device History, and live scan tables are
+MAC, SSID, and BSSID values in Reports, Subject History, and live scan tables are
 clickable detail links. Bluetooth MAC links open one device view. Wi-Fi SSID
 links open a grouped network view across all BSSIDs for that SSID. Wi-Fi BSSID
 links open the one-radio/AP view. The detail panel uses the currently loaded
-Device History and Reports data, so run Manual Refresh if the panel looks older
-than the live scan table.
+Subject History/Device History compatibility payload and Reports data, so run
+Manual Refresh if the panel looks older than the live scan table.
 Latitude/longitude pairs rendered in tables, detail panels, report evidence,
 alerts, or status banners are linked to OpenStreetMap in a new browser tab.
 APRS range filters such as `r/19.6875/-155.9583/100` are linked to the filter
 center with a zoom level chosen from the radius.
 
-Device History does not include System in its Source filter because System
-events are not device histories. System events can still appear in Insights and
-Reports when they are actionable.
+Subject History does not include System in its Source filter because System
+events are runtime state, not durable subjects. System events can still appear
+in Insights and Reports when they are actionable.
 
 The header View selector defaults to `retention_days`. You can override only the
 dashboard default without changing log retention:
@@ -1010,6 +1034,13 @@ data, for example `N62N1 | Mfr: AR Timing (0x0201)`. The raw name,
 manufacturer-data company ID, and advertised UUIDs remain separate in the
 stored data for later drilldown.
 
+Apple Find My accessories are flagged from Apple manufacturer data when the
+payload type byte is `0x12` after company ID `0x004C`. The BLE row and device
+detail show `Apple Find My accessory` plus compact status/hint bytes when
+present. This identifies Find My protocol advertisements, not a specific
+physical tag: AirTags, AirPods cases, and third-party Find My accessories can
+share this pattern, and their BLE MAC addresses rotate.
+
 The Services / UUIDs column decodes common Bluetooth SIG UUIDs, such as `180A`
 to `Device Information`. Optional local UUID mapping files can also decode
 member/vendor UUIDs and label them explicitly, for example
@@ -1071,7 +1102,10 @@ identifying, so treat exported Identify data accordingly.
 
 ## RTL-SDR
 
-`RTL-SDR` uses `rtl_power` for passive spectrum scanning.
+`RTL-SDR` uses `rtl_power` for passive spectrum scanning. It is a local scan
+collector: Skannr asks the attached dongle for power measurements across the
+configured frequency range, learns a short baseline, then flags frequency bins
+that rise above that baseline.
 
 Default config:
 
@@ -1097,6 +1131,77 @@ gain: 40
 threshold_db: 10
 baseline_period_sec: 30
 ```
+
+What it records:
+
+- scan range, gain, threshold, and baseline state
+- frequency bin in MHz
+- observed power in dBm
+- dB above the learned noise floor
+- signal detected/lost transitions
+
+The RTL-SDR live tab shows active frequency-bin detections and recent
+scanner/baseline events. Subject History rolls detections up by frequency bin so
+you can see first seen, last seen, detection count, lost count, maximum power,
+and maximum above-floor delta. Current RTL-SDR support is power-only; it does
+not decode APRS, ADS-B, GPS, LoRa, weather sensors, or other protocols. Those
+need protocol-specific decoders such as `direwolf`, `dump1090` / `readsb`,
+`gnss-sdr`, `rtl_433`, or GNU Radio based tooling and are tracked separately in
+the version plan.
+
+The baseline window intentionally suppresses signal detections until
+`baseline_period_sec` has elapsed. If `rtl_test -t` reports no supported device,
+or `rtl_power` cannot be started, System Status shows the collector offline and
+records the validation/start failure.
+
+## Rayhunter
+
+`Rayhunter` is an optional poll collector for a Rayhunter cellular-monitor HTTP
+endpoint. It is not a general RF scanner. Skannr only records Rayhunter's own
+health, recording metadata, and analysis warning count from the configured
+endpoint.
+
+Default config:
+
+```text
+config/collectors/rayhunter.yaml
+```
+
+Typical local configuration:
+
+```yaml
+enabled: true
+endpoint: http://127.0.0.1:8080/
+poll_interval_sec: 30
+request_timeout_sec: 10
+retry_interval_sec: 10
+```
+
+Rayhunter support prefers the structured JSON APIs exposed by the Rayhunter UI:
+
+- `/api/system-stats`
+- `/api/qmdl-manifest`
+- `/api/config`
+- `/api/analysis-report/<recording>`
+
+If those APIs are unavailable, Skannr falls back to parsing the endpoint's
+visible status text. It accepts gzip responses and sanitizes HTML/Svelte page
+content so bundled web-application code is not treated as evidence.
+
+What it records:
+
+- endpoint reachability
+- warning count from Rayhunter's live analysis report
+- Rayhunter version and device OS when available
+- storage, memory, battery, and GPS mode
+- current recording ID, size, start time, and last message time
+- collector offline/retrying state when the endpoint cannot be reached
+
+Skannr does not download Rayhunter `.qmdl`, `.pcap`, ZIP, or other large
+artifacts. Reports show one row per endpoint using the subject
+`Rayhunter <endpoint>`, including the selected-window status-event count.
+Subject History keeps the latest endpoint status. Alerts can be generated by
+the `rayhunter_warning` rule when Rayhunter reports a non-zero warning count.
 
 ## APRS-IS
 
@@ -1137,6 +1242,12 @@ or a per-feed `OFFLINE` status and emits compact station/object/message/status
 packet metadata. The APRS-IS top tab shows live feed events, while Subject
 History and Reports group APRS activity by callsign, object, or weather
 station.
+
+For APRS weather stations, Subject History also builds daily aggregates and
+rolls them into weekly, monthly, and yearly Report rows. Those rows summarize
+temperature range/change, average humidity, rain-rate maxima, rain episode
+count, approximate rain-active span, wind/gust maxima, pressure range/change,
+sample coverage, and feed/server provenance.
 
 ## NOAA
 
@@ -1193,6 +1304,12 @@ update the same incident subject. This prevents the same polled item from
 creating one row per poll while still keeping different areas, advisory
 numbers, forecast points, and tsunami incidents separate.
 
+Reports also include monthly and yearly NOAA hazard-context rollups. These
+period rows count distinct NOAA subjects, tropical systems, NWS hazard subjects,
+tsunami incidents/messages, forecast-context rows, sources, basins, and retained
+period-over-period subject-count changes. They intentionally avoid treating NHC
+package product count or maximum severity as the main longitudinal signal.
+
 ## USGS
 
 `USGS` is an optional internet-fed earthquake collector. It polls the USGS
@@ -1228,6 +1345,12 @@ Global M6.5+ earthquakes alert by default; global M7.5+ earthquakes are
 critical by default. USGS subjects are keyed by the USGS event ID, and material
 fingerprints include the event time plus magnitude, place, status, felt/CDI/MMI,
 alert color, and tsunami flag.
+
+Reports also include weekly, monthly, and yearly USGS period rows. These rows
+summarize unique earthquake count, local versus global-major count, notable and
+tsunami-flagged counts, magnitude range, nearest configured-point distance,
+shallowest depth, alert colors, scopes, feeds, and the latest event folded into
+the period.
 
 ## SWPC
 
@@ -1272,6 +1395,11 @@ If one SWPC public product is temporarily unavailable, Skannr keeps successful
 product rows flowing and shows the failed product name in collector status. The
 collector only goes retrying when every enabled SWPC product fails.
 
+Reports also include weekly, monthly, and yearly SWPC period rows. These rows
+summarize unique event count, alert-threshold and critical counts, event-kind
+counts, highest X-ray flare class, max Kp, and strongest R/S/G scale labels so
+the report row itself shows conditions such as `R3`, `S3`, or `G3`.
+
 ## PWS
 
 `PWS` is an optional Ambient Weather personal weather station collector. It
@@ -1307,6 +1435,14 @@ become Alerts.
 Subject History also tracks simple rain episodes. If the latest transition is
 `stopped`, Reports keep the episode start and stop time together so the row does
 not show a disconnected "rain stopped" timestamp without its start context.
+For longer-window Reports, Subject History also rolls PWS samples into daily
+aggregates and then weekly, monthly, and yearly station summaries. Those period
+rows show temperature range/change, average humidity, observed rain total,
+maximum one-hour rain rate, rain episode count, approximate rain-active span,
+maximum wind/gust, pressure range/change, solar/UV maxima, and sample/day
+coverage. A new station will only have current-day/current-week information at
+first; week/month/year patterns become meaningful after enough samples have
+been retained.
 
 Keep Ambient keys in local `config/collectors/pws.yaml` only. The
 `config.example` template intentionally leaves them blank.
