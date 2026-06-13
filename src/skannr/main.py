@@ -728,6 +728,7 @@ def subject_annotations_update():
         annotations.pop(key, None)
     try:
         save_subject_annotations(annotations)
+        persist_subject_annotation_overlays(annotations)
     except OSError as exc:
         logging.exception("failed to persist subject annotation: %s", exc)
         return json_response({"ok": False, "error": str(exc)}, status=500)
@@ -2467,6 +2468,7 @@ def update_compact_device_history(reason="periodic"):
             time.monotonic() - prune_started,
             pruned_bluetooth,
         )
+        summary = apply_subject_annotations(summary)
         save_started = time.monotonic()
         save_json_file(device_history_path(), summary)
         logging.info(
@@ -3572,13 +3574,42 @@ ANNOTATABLE_SUBJECT_TYPES = {
 }
 
 
+ANNOTATION_MAC_SUBJECT_TYPES = {
+    ("bluetooth", "bluetooth_device"),
+    ("wifi", "wifi_bssid"),
+    ("wifi", "wifi_client"),
+}
+
+
+def normalize_annotation_subject_id(collector, subject_type, subject_id):
+    """Return the canonical subject id used by durable annotation keys."""
+    collector = str(collector or "").strip().lower()
+    subject_type = str(subject_type or "").strip().lower()
+    value = str(subject_id or "").strip()
+    if (collector, subject_type) in ANNOTATION_MAC_SUBJECT_TYPES:
+        compact = re.sub(r"[^0-9a-fA-F]", "", value)
+        if len(compact) == 12:
+            return ":".join(compact[index:index + 2] for index in range(0, 12, 2)).upper()
+    return value
+
+
 def subject_annotation_key(collector, subject_type, subject_id):
     """Return the durable key for a subject annotation overlay."""
+    collector = str(collector or "").strip().lower()
+    subject_type = str(subject_type or "").strip().lower()
     return "{}|{}|{}".format(
-        str(collector or "").strip().lower(),
-        str(subject_type or "").strip().lower(),
-        str(subject_id or "").strip(),
+        collector,
+        subject_type,
+        normalize_annotation_subject_id(collector, subject_type, subject_id),
     )
+
+
+def normalize_annotation_key(key):
+    """Canonicalize a stored annotation key while preserving unknown shapes."""
+    parts = str(key or "").split("|", 2)
+    if len(parts) != 3:
+        return str(key or "")
+    return subject_annotation_key(parts[0], parts[1], parts[2])
 
 
 def subject_annotation_allowed(collector, subject_type):
@@ -3604,7 +3635,7 @@ def load_subject_annotations():
         custom_name = str(value.get("custom_name") or "").strip()
         if not custom_name:
             continue
-        clean[str(key)] = {
+        clean[normalize_annotation_key(key)] = {
             "custom_name": custom_name[:160],
             "updated_at": value.get("updated_at") or "",
             "updated_at_epoch": value.get("updated_at_epoch"),
@@ -3615,13 +3646,18 @@ def load_subject_annotations():
 def save_subject_annotations(annotations):
     """Persist the user annotation overlay atomically."""
     updated_epoch = now_epoch()
+    path = subject_annotations_path()
     payload = {
         "schema": "subject_annotations.v1",
         "updated_at": local_now(updated_epoch),
         "updated_at_epoch": updated_epoch,
         "annotations": annotations,
     }
-    save_json_atomic(subject_annotations_path(), payload)
+    save_json_atomic(path, payload)
+    try:
+        os.chmod(path, 0o644)
+    except OSError:
+        logging.debug("could not chmod subject annotation file %s", path, exc_info=True)
 
 
 def apply_subject_annotations(summary, annotations=None):
@@ -3629,9 +3665,10 @@ def apply_subject_annotations(summary, annotations=None):
     if not isinstance(summary, dict):
         return summary
     annotations = annotations if annotations is not None else load_subject_annotations()
-    if not annotations:
-        return summary
     output = copy.deepcopy(summary)
+    strip_subject_annotation_fields(output)
+    if not annotations:
+        return output
     annotate_subject_rows(output.get("subjects") or [], annotations)
     annotate_wifi_records((output.get("wifi") or {}), annotations)
     annotate_bluetooth_records((output.get("bluetooth") or output.get("ble") or {}), annotations)
@@ -3639,6 +3676,46 @@ def apply_subject_annotations(summary, annotations=None):
     if output.get("ble") is not None and output.get("bluetooth") is not output.get("ble"):
         annotate_bluetooth_records((output.get("ble") or {}), annotations)
     return output
+
+
+def strip_annotation_fields(record):
+    """Remove derived annotation fields before applying the current overlay."""
+    if isinstance(record, dict):
+        record.pop("annotation", None)
+        record.pop("custom_name", None)
+
+
+def strip_subject_annotation_fields(summary):
+    """Remove stale annotation overlays from subject/device summaries."""
+    for subject in (summary.get("subjects") or []):
+        strip_annotation_fields(subject)
+    wifi = summary.get("wifi") or {}
+    for item in (wifi.get("access_points") or []):
+        strip_annotation_fields(item)
+    for item in (wifi.get("clients") or []):
+        strip_annotation_fields(item)
+    bluetooth_sections = []
+    if isinstance(summary.get("bluetooth"), dict):
+        bluetooth_sections.append(summary.get("bluetooth"))
+    if isinstance(summary.get("ble"), dict) and summary.get("ble") is not summary.get("bluetooth"):
+        bluetooth_sections.append(summary.get("ble"))
+    for bluetooth in bluetooth_sections:
+        for item in (bluetooth.get("devices") or []):
+            strip_annotation_fields(item)
+    for item in (summary.get("lan") or []):
+        strip_annotation_fields(item)
+
+
+def persist_subject_annotation_overlays(annotations):
+    """Update persisted subject/device summaries after annotation changes."""
+    for path in (subject_history_path(), device_history_path()):
+        summary = read_json_file(path)
+        if not isinstance(summary, dict):
+            continue
+        try:
+            save_json_file(path, apply_subject_annotations(summary, annotations))
+        except OSError:
+            logging.exception("failed to update annotation overlay in %s", path)
 
 
 def apply_report_annotations(reports, annotations=None):
@@ -4012,6 +4089,7 @@ def load_cached_device_history(window_days):
             state_path=device_history_path(),
             window_days=window_days,
         ).display_summary(summary, window_days)
+        output = apply_subject_annotations(output)
         output["cached"] = True
         return output
     return empty_device_history(window_days)
@@ -4550,6 +4628,7 @@ def build_or_reuse_device_history_for_refresh(log_dir, window_days):
         full_device_summary = apply_live_overlay_and_prune_device_history(
             device_builder, full_device_summary, persist=True
         )
+        full_device_summary = apply_subject_annotations(full_device_summary)
         try:
             save_started = time.monotonic()
             save_json_file(device_history_path(), full_device_summary)

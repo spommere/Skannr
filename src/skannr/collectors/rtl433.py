@@ -154,6 +154,35 @@ class RTL433Collector(BaseCollector):
         self._plan_summary = ""
         self._current_frequency_mhz = None
 
+    def status(self):
+        """Return collector status plus current rtl_433 tuning state."""
+        status = super().status()
+        process_started = bool(self._process and self._process.returncode is None)
+        fixed_frequency = fixed_plan_frequency_mhz(self._plan)
+        current_frequency = self._current_frequency_mhz
+        if current_frequency is not None:
+            status.update({
+                "current_frequency_mhz": round(current_frequency, 6),
+                "frequency_mhz": round(current_frequency, 6),
+            })
+        if fixed_frequency is not None:
+            status.update({
+                "planned_frequency_mhz": round(fixed_frequency, 6),
+                "fixed_plan_running": process_started,
+                "source": "configured plan",
+            })
+        elif current_frequency is not None:
+            status.update({
+                "source": "rtl_433 status",
+            })
+        status.update({
+            "frequency_plan": self.config.get("frequency_plan") or "",
+            "frequency_summary": self._plan_summary,
+            "process_started": process_started,
+            "device_index": self.config.get("device_index", 0),
+        })
+        return status
+
     def detect(self):
         """Validate rtl_433 and parse the configured frequency plan."""
         command = rtl433_command(self.config)

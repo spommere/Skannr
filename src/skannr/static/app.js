@@ -1672,7 +1672,8 @@ function subjectHistoryDisplayBundle(bundle) {
   const source = bundle || {};
   const subjectHistory = source.subject_history || {};
   const deviceHistory = source.device_history || {};
-  const bluetooth = deviceHistory.bluetooth || deviceHistory.ble || subjectHistory.bluetooth || subjectHistory.ble || {};
+  const bluetooth = subjectHistory.bluetooth || subjectHistory.ble || deviceHistory.bluetooth || deviceHistory.ble || {};
+  const wifi = subjectHistory.wifi || deviceHistory.wifi || {};
   return {
     ...subjectHistory,
     generated_at: subjectHistory.generated_at || deviceHistory.generated_at || "",
@@ -1681,7 +1682,7 @@ function subjectHistoryDisplayBundle(bundle) {
     refreshed_at_epoch: subjectHistory.refreshed_at_epoch || deviceHistory.refreshed_at_epoch,
     window: subjectHistory.window || deviceHistory.window || {},
     records_read: subjectHistory.records_read || deviceHistory.records_read || 0,
-    wifi: deviceHistory.wifi || subjectHistory.wifi || {},
+    wifi,
     ble: bluetooth,
     bluetooth,
     subjects: Array.isArray(subjectHistory.subjects) ? subjectHistory.subjects : [],
@@ -4590,6 +4591,22 @@ function rtl433SignalText(item) {
   return parts.join("; ");
 }
 
+function updateRtl433FrequencyStateFromStatus(item) {
+  if (!item || item.key !== "rtl433") return;
+  const state = String(item.state || "");
+  if (!["ONLINE", "DETECTING", "RETRYING"].includes(state)) return;
+  updateRtl433FrequencyState({
+    frequency_summary: item.frequency_summary || item.frequency_plan || "",
+    planned_frequency_mhz: item.planned_frequency_mhz,
+    current_frequency_mhz: item.current_frequency_mhz,
+    frequency_mhz: item.frequency_mhz,
+    fixed_plan_running: item.fixed_plan_running,
+    process_started: item.process_started || state === "ONLINE",
+    device_index: item.device_index,
+    source: item.source || "collector status"
+  });
+}
+
 function updateRtl433FrequencyState(data) {
   const incoming = {...(data || {})};
   if (incoming.clear_frequency_state) {
@@ -4599,10 +4616,17 @@ function updateRtl433FrequencyState(data) {
   if (incoming.source === "configured plan") {
     incoming.planned_frequency_mhz = firstPresentValue(
       incoming.planned_frequency_mhz,
-      incoming.frequency_mhz
+      incoming.frequency_mhz,
+      incoming.current_frequency_mhz
     );
-    delete incoming.frequency_mhz;
-    delete incoming.current_frequency_mhz;
+    if (incoming.process_started && incoming.planned_frequency_mhz !== undefined) {
+      incoming.current_frequency_mhz = incoming.planned_frequency_mhz;
+      incoming.fixed_plan_running = true;
+      incoming.tune_pending = false;
+    } else {
+      delete incoming.frequency_mhz;
+      delete incoming.current_frequency_mhz;
+    }
   }
   if (String(incoming.source || "").startsWith("rtl_433")) {
     incoming.tune_pending = false;
@@ -4610,18 +4634,21 @@ function updateRtl433FrequencyState(data) {
   rtl433ScannerState = {...rtl433ScannerState, ...incoming};
   const node = document.getElementById("rtl433-frequency-state");
   if (!node) return;
-  const reportedFrequency = firstPresentValue(
+  const rawReportedFrequency = firstPresentValue(
     rtl433ScannerState.frequency_mhz,
     rtl433ScannerState.current_frequency_mhz
   );
   const plannedFrequency = rtl433ScannerState.planned_frequency_mhz;
   const processStarted = Boolean(rtl433ScannerState.process_started);
+  const fixedPlanRunning = Boolean(rtl433ScannerState.fixed_plan_running) && plannedFrequency !== undefined;
+  const reportedFrequency = fixedPlanRunning ? undefined : rawReportedFrequency;
   const parts = [
     rtl433ScannerState.tune_pending ? "waiting for rtl_433 frequency confirmation" : "",
+    fixedPlanRunning ? `rtl_433 running fixed ${plannedFrequency} MHz` : "",
     reportedFrequency !== undefined ? `rtl_433 reports ${reportedFrequency} MHz` : "",
-    reportedFrequency === undefined && processStarted ? "rtl_433 process started" : "",
-    plannedFrequency !== undefined ? `planned ${plannedFrequency} MHz` : "",
-    reportedFrequency === undefined && plannedFrequency !== undefined ? "not frequency-confirmed" : "",
+    reportedFrequency === undefined && !fixedPlanRunning && processStarted ? "rtl_433 process started" : "",
+    plannedFrequency !== undefined && !fixedPlanRunning ? `planned ${plannedFrequency} MHz` : "",
+    reportedFrequency === undefined && !fixedPlanRunning && plannedFrequency !== undefined ? "not frequency-confirmed" : "",
     rtl433ScannerState.device_index !== undefined ? `RTL-SDR ${rtl433ScannerState.device_index}` : "",
     rtl433ScannerState.hop_index && rtl433ScannerState.hop_count ? `hop ${rtl433ScannerState.hop_index}/${rtl433ScannerState.hop_count}` : "",
     rtl433ScannerState.dwell_sec ? `dwell ${rtl433ScannerState.dwell_sec}s` : "",
@@ -4629,7 +4656,7 @@ function updateRtl433FrequencyState(data) {
     rtl433ScannerState.frequency_summary && reportedFrequency === undefined && plannedFrequency === undefined ? rtl433ScannerState.frequency_summary : ""
   ].filter(Boolean);
   node.textContent = parts.length ? parts.join(" | ") : "Waiting for current RTL-433 frequency";
-  node.className = `status-strip ${reportedFrequency !== undefined ? "ok" : (plannedFrequency !== undefined || processStarted ? "warning" : "muted")}`;
+  node.className = `status-strip ${(reportedFrequency !== undefined || fixedPlanRunning) ? "ok" : (plannedFrequency !== undefined || processStarted ? "warning" : "muted")}`;
 }
 
 function firstPresentValue(...values) {
@@ -8314,6 +8341,7 @@ function renderCollectorHealth(statuses) {
   tbody.innerHTML = "";
   latestCollectorStatuses.forEach((item) => {
     updateCollectorTabStatus(item);
+    if (item.key === "rtl433") updateRtl433FrequencyStateFromStatus(item);
     const tr = document.createElement("tr");
     [
       item.name,
