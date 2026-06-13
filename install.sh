@@ -15,9 +15,12 @@ usage() {
 Usage: ./install.sh
 
 Installs Skannr Python dependencies and creates local config/ from
-config.example/ when config/skannr.yaml does not exist. Optional system tools
-are reported by scripts/skannr_precheck.py and scripts/skannr_postcheck.py;
-install them with your OS package manager when needed.
+config.example/ when config/skannr.yaml does not exist. On fresh config it
+applies config/precheck.yaml, installs Python dependencies, runs
+scripts/skannr_postcheck.py to write config/postcheck.yaml, then applies the
+final postcheck enabled flags. Existing config/skannr.yaml is not rewritten.
+Optional system tools are reported by scripts/skannr_precheck.py and
+scripts/skannr_postcheck.py; install them with your OS package manager.
 EOF
 }
 

@@ -7,7 +7,9 @@
 /pcaps/
 /VERSION_PLAN.md
 /VERSION_HISTORY.md
-/scripts/
+/scripts/skannr_reg*
+/scripts/validate*
+/git/
 
 # Python caches.
 __pycache__/

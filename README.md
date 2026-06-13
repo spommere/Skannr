@@ -23,9 +23,10 @@ For architecture, event flow, collector internals, and extension notes, see
 - `CHANGELOG.md`: release notes and versioning policy
 - `src/skannr/`: Python package, collector code, shipped UI, and bundled lookup data
 - `config.example/`: generic config template for source upload and fresh installs
-- `config/`: local runtime configuration, created from `config.example/` by `install.sh`
+- `config/`: local runtime configuration; precheck may create it with only `precheck.yaml`, and `install.sh` fills it from `config.example/` on fresh installs
 - `runtime/`: generated logs, materialized views, and runtime state
 - `requirements/*.txt`: Python dependency manifests
+- `scripts/`: install checks, validation helpers, and internal regression tools
 
 Current version: see `VERSION`.
 
@@ -37,11 +38,35 @@ Versioning policy:
 
 The rest of this README is the operator manual.
 
+## Install Model
+
+Skannr installation is intentionally split into OS tools, Python dependencies,
+and local collector enablement:
+
+1. Install OS packages for the collectors this host may use.
+2. Run `python3 scripts/skannr_precheck.py` on a new host if you want to see
+   which collectors have the required software/hardware before install. This
+   creates `config/precheck.yaml`; it may create `config/` with only that file.
+3. Run `./install.sh`. On a fresh config, it copies `config.example/` into
+   `config/`, applies `precheck.yaml`, installs Python dependencies, runs
+   `scripts/skannr_postcheck.py`, writes `config/postcheck.yaml`, and applies
+   the final postcheck result. Existing configs are not rewritten.
+4. Review `config/collectors/*.yaml` for any collector you want to enable or
+   disable manually, especially config-required internet/API collectors.
+5. Start Skannr and use System Status for the authoritative runtime view of
+   collector state, missing required tools, and missing optional tools.
+
+Hardware-bound SDR collectors (`rtlsdr`, `rtl433`, and managed ADS-B) are
+auto-enabled on fresh config only when required software and visible RTL-SDR
+hardware are both present. Optional LAN enrichment tools such as `arp-scan` and
+`avahi-browse` are reported but do not disable the base LAN collector.
+
 ## Quick Start
 
 ```bash
 SKANNR_DIR=/path/to/skannr
 cd "$SKANNR_DIR"
+python3 scripts/skannr_precheck.py
 ./install.sh
 sudo env PYTHONPATH="$SKANNR_DIR/src" "$SKANNR_DIR/.venv/bin/python" -m skannr.main
 ```
@@ -54,6 +79,8 @@ http://127.0.0.1:5004/
 
 `install.sh` creates local `config/` from `config.example/` if
 `config/skannr.yaml` does not already exist. Existing YAML is not overwritten.
+The precheck step is recommended for a new host; it is safe to skip because
+`install.sh` runs it automatically when creating fresh config.
 
 ## Install System Packages
 

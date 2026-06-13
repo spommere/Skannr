@@ -69,15 +69,15 @@ Subject History should show durable subjects. For collectors that produce many r
 
 ## Report Samples
 
-Reports are the higher-level intelligence product. They should be regenerated from Subject History and Insights, not independently re-parse collector-specific special cases.
+Reports are the higher-level intelligence product. They should be regenerated from Subject History and Insights, not independently re-parse collector-specific special cases. The current UI renders cross-subject patterns and subject reports in separate sections with the same columns. The `Report` cell shows source on the first line and report title on the next line. The `Subject` cell shows the hyperlinked subject on the first line and the summary below it.
 
-| Report | Scope | Severity | Subject | Summary |
-| --- | --- | --- | --- | --- |
-| Cross-subject pattern | Wi-Fi/BLE | warning | `Randomized nearby devices` | Wi-Fi and BLE both show high randomized-device activity; grouped identities prevent noisy per-MAC rows. |
-| Bluetooth identity | Bluetooth | info | `Apple Find My accessory group` | Find My identity was observed across multiple private addresses and should be treated separately from generic Apple advertisements. |
-| RF device | RTL-433 | info | `Springfield-SoilId 1234` | Soil sensor decoded on tuned 915.000 MHz with stable model/id fields. |
-| Air activity | ADS-B | info | `Local aircraft activity` | Aircraft subjects are high volume but durable, so they remain individual report entries. |
-| Network inventory | LAN | info | `sample-host-4` | Stable LAN host has IP, hostname, and MAC evidence suitable for inventory-style reporting. |
+| Score | Confidence | Reasons | Report | Subject | Evidence | Last Seen |
+| ---: | --- | --- | --- | --- | --- | --- |
+| 90 | High | randomized, population | Wi-Fi/BLE<br>Cross-subject pattern | `Randomized nearby devices`<br>Wi-Fi and BLE both show high randomized-device activity; grouped identities prevent noisy per-MAC rows. | Pattern: many private Wi-Fi and BLE identities; Observed: 4934 Wi-Fi clients, 312 Bluetooth devices | 2026-06-12 09:14:15 |
+| 82 | High | identity, private-address | Bluetooth<br>Bluetooth identity | `Apple Find My accessory group`<br>Find My identity was observed across multiple private addresses and should be treated separately from generic Apple advertisements. | Identity: Apple Find My accessory; Activity: 19 private addresses; Signal: -82 to -55 dBm | 2026-06-12 09:14:15 |
+| 76 | Medium | recurring, rf | RTL-433<br>RF device | `Springfield-SoilId 1234`<br>Soil sensor decoded on tuned 915.000 MHz with stable model/id fields. | RF: tuned 915.000 MHz, RSSI -11.2 dB, SNR 10.7 dB; Decoded: moisture 38%, temperature 21.4 C | 2026-06-12 09:14:35 |
+| 70 | Medium | activity | ADS-B<br>Air activity | `Local aircraft activity`<br>Aircraft subjects are high volume but durable, so they remain individual report entries. | Population: 871 aircraft subjects; Motion: altitude/callsign fields present | 2026-06-12 09:14:41 |
+| 68 | Medium | inventory | LAN<br>Network inventory | `sample-host-4`<br>Stable LAN host has IP, hostname, and MAC evidence suitable for inventory-style reporting. | Identity: `sample-host-4.local`; Network: `192.0.2.44`, `02:11:22:33:44:04`; Seen: 28 observations | 2026-06-12 09:14:22 |
 
 ## Sanitization Rules For Future Samples
 
@@ -99,7 +99,8 @@ Use these rules whenever generating screenshots, docs examples, or test-like pro
 ## Notes For Documentation Writers
 
 - Subject History examples should show annotations as labels, but the underlying subject must remain unchanged for hyperlinks and detail lookups.
-- Wi-Fi scan, Wi-Fi monitor, Bluetooth, and weak LAN private MAC observations should demonstrate grouped randomized identities.
+- Report examples should match the current merged cell layout: Source plus title in the Report cell, and hyperlinked subject plus summary in the Subject cell.
+- Wi-Fi scan, Wi-Fi monitor, Bluetooth, and weak LAN private MAC observations should demonstrate grouped randomized identities. Bluetooth examples should not show Transport or Insights as main-table columns; those belong in detail context when needed.
 - ADS-B, APRS-IS, RTL-433, weather, earthquake, and space-weather subjects should normally remain distinct because their subject keys are durable.
 - RTL-433 examples should use the dongle tuned frequency when available, because the decoded payload frequency may differ from the actual tuned center.
 - If fake samples are regenerated, keep them manually reviewed. Automated sanitization can miss environment-specific names in free-text fields.

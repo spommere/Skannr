@@ -1,6 +1,6 @@
 # Skannr Design Document
 
-Version: 0.2.6, 2026-06-11
+Version: 0.2.7, 2026-06-13
 
 ## 1. Overview
 
@@ -57,7 +57,7 @@ that explicitly depend on it, such as APRS-IS, NOAA, USGS, SWPC, and PWS.
 - Skannr is not a multi-user production web service.
 - Skannr is not a full IDS replacement.
 - Skannr is not a high-rate SDR waterfall or signal visualization package.
-- Skannr does not manage monitor-mode setup automatically.
+- Skannr does not silently choose and convert a managed Wi-Fi adapter into monitor mode; monitor-mode preparation requires explicit collector configuration.
 - Skannr does not download vendor/manufacturer registries by itself.
 
 ## 3. Runtime Architecture
@@ -1817,14 +1817,19 @@ Skannr does not update these files automatically.
 
 ## 11. Deployment
 
-The normal local run path is:
+The normal local install/run path is:
 
 ```bash
 SKANNR_DIR=/path/to/skannr
 cd "$SKANNR_DIR"
+python3 scripts/skannr_precheck.py
 ./install.sh
 sudo env PYTHONPATH="$SKANNR_DIR/src" "$SKANNR_DIR/.venv/bin/python" -m skannr.main
 ```
+
+The standalone precheck is recommended on a new host because it explains which
+collectors have required software and selected hardware before config seeding.
+`install.sh` also runs the precheck automatically when creating fresh config.
 
 `install.sh` chooses a requirements file based on Python version:
 
