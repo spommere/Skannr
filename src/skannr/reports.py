@@ -10,11 +10,13 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
 from .bus import local_now
+from .collectors.adsb import clean_adsb_data
 from .collectors.aprsis import clean_aprs_data
 from .collectors.lan import clean_lan_data
 from .collectors.noaa import clean_noaa_data, tsunami_is_alertworthy
 from .collectors.pws import clean_pws_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
+from .collectors.rtl433 import clean_rtl433_data
 from .collectors.swpc import (
     clean_swpc_data,
     number_or_none,
@@ -64,6 +66,10 @@ DEFAULT_REPORT_CONFIG = {
     "swpc_report_solar_radiation_storm": "S3",
     "swpc_report_geomagnetic_storm": "G3",
     "swpc_report_kp": 7,
+    "adsb_low_altitude_ft": 1500,
+    "adsb_nearby_radius_km": 10,
+    "adsb_report_min_seen": 3,
+    "rtl433_report_min_events": 2,
     "lan_report_new_devices": True,
     "lan_report_gateway_changes": True,
 }
@@ -118,6 +124,12 @@ class ReportsBuilder:
         )
         reports.extend(
             self.pws_reports((history or {}).get("pws") or [], generated_at)
+        )
+        reports.extend(
+            self.adsb_reports((history or {}).get("adsb") or [], generated_at)
+        )
+        reports.extend(
+            self.rtl433_reports((history or {}).get("rtl433") or [], generated_at)
         )
         reports.extend(
             self.lan_reports((history or {}).get("lan") or [], generated_at)
@@ -3190,6 +3202,314 @@ class ReportsBuilder:
             if item
         )
 
+    def adsb_reports(self, events, timestamp):
+        """Return ADS-B aircraft reports from materialized subject history."""
+        aircraft = [
+            clean_adsb_data((event or {}).get("data") or {})
+            for event in events or []
+            if (event or {}).get("type") == "adsb_aircraft_summary"
+        ]
+        reports = []
+        if aircraft:
+            positioned = sum(1 for item in aircraft if item.get("position_count"))
+            low_nearby = [item for item in aircraft if self.adsb_is_low_nearby(item)]
+            emergency = [item for item in aircraft if item.get("emergency")]
+            closest = min(
+                [
+                    item
+                    for item in aircraft
+                    if number_or_none(item.get("min_distance_km")) is not None
+                ],
+                key=lambda item: number_or_none(item.get("min_distance_km")),
+                default=None,
+            )
+            findings = ["ADS-B aircraft observed"]
+            if emergency:
+                findings.append("Emergency squawk observed")
+            if low_nearby:
+                findings.append("Low nearby aircraft")
+            summary = "{} aircraft observed; {} with position".format(
+                len(aircraft), positioned
+            )
+            if closest:
+                summary += "; closest {} at {:.1f} km".format(
+                    self.adsb_aircraft_label(closest),
+                    number_or_none(closest.get("min_distance_km")),
+                )
+            reports.append(
+                self.report(
+                    timestamp,
+                    "warning" if emergency or low_nearby else "info",
+                    "adsb",
+                    "adsb_aircraft_population",
+                    "ADS-B local aircraft activity",
+                    summary + ".",
+                    {
+                        "findings": findings,
+                        "aircraft_count": len(aircraft),
+                        "positioned_count": positioned,
+                        "emergency_count": len(emergency),
+                        "low_nearby_count": len(low_nearby),
+                        "closest_aircraft": self.adsb_aircraft_label(closest) if closest else "",
+                        "closest_km": closest.get("min_distance_km") if closest else "",
+                        "last_seen": max(
+                            number_or_none(item.get("last_seen_epoch")) or 0
+                            for item in aircraft
+                        ),
+                    },
+                    82 if emergency else (68 if low_nearby else 35),
+                    "",
+                    report_scope="population",
+                )
+            )
+        for data in aircraft:
+            seen = self.to_int(data.get("seen_count")) or 0
+            if (
+                not data.get("emergency")
+                and not self.adsb_is_low_nearby(data)
+                and seen < int(self.config.get("adsb_report_min_seen", 3))
+            ):
+                continue
+            findings = []
+            if data.get("emergency"):
+                findings.append("Emergency squawk")
+            if self.adsb_is_low_nearby(data):
+                findings.append("Low nearby aircraft")
+            if seen:
+                findings.append("{} update(s)".format(seen))
+            path_span = number_or_none(data.get("path_span_km"))
+            if path_span and path_span >= 1:
+                findings.append("Moved through area")
+            reports.append(
+                self.report(
+                    timestamp,
+                    "warning"
+                    if data.get("emergency") or self.adsb_is_low_nearby(data)
+                    else "info",
+                    "adsb",
+                    "adsb_aircraft_profile",
+                    "ADS-B aircraft profile",
+                    self.adsb_aircraft_summary_text(data),
+                    {
+                        "icao": data.get("icao") or "",
+                        "callsign": data.get("callsign") or "",
+                        "airline_icao": data.get("airline_icao") or "",
+                        "squawk": data.get("squawk") or "",
+                        "air_ground": data.get("air_ground") or "",
+                        "cpr_type": data.get("cpr_type") or "",
+                        "position_source": data.get("position_source") or "",
+                        "altitude_ft": data.get("altitude_ft"),
+                        "altitude_baro_ft": data.get("altitude_baro_ft"),
+                        "altitude_geom_ft": data.get("altitude_geom_ft"),
+                        "min_altitude_ft": data.get("min_altitude_ft"),
+                        "distance_km": data.get("distance_km"),
+                        "min_distance_km": data.get("min_distance_km"),
+                        "speed_kt": data.get("ground_speed_kt"),
+                        "track_deg": data.get("track_deg"),
+                        "path_span_km": data.get("path_span_km"),
+                        "seen_count": seen,
+                        "position_count": data.get("position_count"),
+                        "observed": self.adsb_observed_text(data),
+                        "last_seen": data.get("last_seen_epoch"),
+                        "findings": findings,
+                    },
+                    90
+                    if data.get("emergency")
+                    else (70 if self.adsb_is_low_nearby(data) else 32),
+                    data.get("last_seen") or "",
+                    subject=self.adsb_aircraft_label(data),
+                )
+            )
+        return reports
+
+    def adsb_is_low_nearby(self, data):
+        """Return True when an aircraft is low and near the observer."""
+        altitude = number_or_none(data.get("min_altitude_ft") or data.get("altitude_ft"))
+        distance = number_or_none(data.get("min_distance_km") or data.get("distance_km"))
+        if altitude is None or distance is None:
+            return False
+        return (
+            altitude <= float(self.config.get("adsb_low_altitude_ft", 1500))
+            and distance <= float(self.config.get("adsb_nearby_radius_km", 10))
+        )
+
+    def adsb_aircraft_label(self, data):
+        """Return compact aircraft subject label."""
+        if not data:
+            return ""
+        return "{} {}".format(data.get("callsign") or "", data.get("icao") or "").strip() or "ADS-B aircraft"
+
+    def adsb_aircraft_summary_text(self, data):
+        """Return compact ADS-B subject report summary."""
+        parts = [self.adsb_aircraft_label(data)]
+        if data.get("squawk"):
+            parts.append("squawk {}".format(data.get("squawk")))
+        if data.get("altitude_ft") not in (None, ""):
+            parts.append("latest alt {} ft".format(data.get("altitude_ft")))
+        if data.get("min_altitude_ft") not in (None, ""):
+            parts.append("min alt {} ft".format(data.get("min_altitude_ft")))
+        if data.get("min_distance_km") not in (None, ""):
+            parts.append("closest {:.1f} km".format(number_or_none(data.get("min_distance_km"))))
+        if data.get("path_span_km") not in (None, ""):
+            parts.append("path span {:.1f} km".format(number_or_none(data.get("path_span_km"))))
+        if data.get("seen_count"):
+            parts.append("{} update(s)".format(data.get("seen_count")))
+        return "; ".join(parts) + "."
+
+    def adsb_observed_text(self, data):
+        """Return the retained first/latest ADS-B observation range."""
+        first = data.get("first_seen") or ""
+        last = data.get("last_seen") or ""
+        if first and last and first != last:
+            return "{} to {}".format(first, last)
+        return first or last
+
+    def rtl433_reports(self, events, timestamp):
+        """Return rtl_433 decoded-device Reports from Subject History."""
+        devices = [
+            clean_rtl433_data((event or {}).get("data") or {})
+            for event in events or []
+            if (event or {}).get("type") == "rtl433_subject_summary"
+        ]
+        reports = []
+        if devices:
+            by_category = Counter(item.get("category") or "device" for item in devices)
+            findings = ["RTL-433 decoded devices observed"]
+            for category in ("tpms", "security", "weather", "utility"):
+                if by_category.get(category):
+                    findings.append("{} {} subject(s)".format(by_category[category], category))
+            summary = "{} rtl_433 subject(s): {}".format(
+                len(devices),
+                ", ".join(
+                    "{} {}".format(count, category)
+                    for category, count in sorted(by_category.items())
+                ),
+            )
+            reports.append(
+                self.report(
+                    timestamp,
+                    "warning" if by_category.get("tpms") or by_category.get("security") else "info",
+                    "rtl433",
+                    "rtl433_device_population",
+                    "RTL-433 decoded device activity",
+                    summary + ".",
+                    {
+                        "findings": findings,
+                        "device_count": len(devices),
+                        "tpms_count": by_category.get("tpms", 0),
+                        "security_count": by_category.get("security", 0),
+                        "weather_count": by_category.get("weather", 0),
+                        "utility_count": by_category.get("utility", 0),
+                        "last_seen": max(
+                            number_or_none(item.get("last_seen_epoch")) or 0
+                            for item in devices
+                        ),
+                    },
+                    62 if by_category.get("tpms") or by_category.get("security") else 30,
+                    "",
+                    report_scope="population",
+                )
+            )
+        min_events = int(self.config.get("rtl433_report_min_events", 2))
+        for data in devices:
+            count = self.to_int(data.get("event_count")) or 0
+            category = data.get("category") or "device"
+            if count < min_events and category not in ("tpms", "security"):
+                continue
+            findings = [self.rtl433_category_label(category)]
+            if count:
+                findings.append("{} decode event(s)".format(count))
+            if self.to_int(data.get("burst_count")):
+                findings.append("Clustered transmissions")
+            reports.append(
+                self.report(
+                    timestamp,
+                    "warning" if category in ("tpms", "security") else "info",
+                    "rtl433",
+                    "rtl433_device_profile",
+                    "RTL-433 decoded device profile",
+                    self.rtl433_summary_text(data),
+                    {
+                        "subject_key": data.get("subject_key") or "",
+                        "model": data.get("model") or "",
+                        "id": data.get("id") or "",
+                        "channel": data.get("channel") or "",
+                        "protocol": data.get("protocol") or "",
+                        "category": category,
+                        "events": count,
+                        "bursts": data.get("burst_count") or 0,
+                        "frequencies_mhz": data.get("frequencies_mhz") or [],
+                        "latest_signal": self.rtl433_signal_text(data),
+                        "observed": self.observed_text(data),
+                        "sample_times": data.get("sample_times") or [],
+                        "latest_fields": data.get("latest_raw") or {},
+                        "findings": findings,
+                        "last_seen": data.get("last_seen_epoch"),
+                    },
+                    66 if category in ("tpms", "security") else 28,
+                    data.get("last_seen") or "",
+                    subject=self.rtl433_label(data),
+                )
+            )
+        return reports
+
+    def rtl433_label(self, data):
+        """Return compact rtl_433 report subject label."""
+        parts = [
+            data.get("model") or "",
+            data.get("id") or "",
+            data.get("channel") or "",
+        ]
+        return " ".join(part for part in parts if part).strip() or "RTL-433 device"
+
+    def rtl433_category_label(self, category):
+        """Return operator-facing rtl_433 category text."""
+        labels = {
+            "tpms": "TPMS-like signal",
+            "security": "Garage/security/remote-like signal",
+            "weather": "Weather/sensor signal",
+            "utility": "Utility/meter signal",
+        }
+        return labels.get(category, "Decoded ISM-band signal")
+
+    def rtl433_summary_text(self, data):
+        """Return conservative rtl_433 subject report summary."""
+        parts = [self.rtl433_label(data)]
+        category = data.get("category") or "device"
+        parts.append(self.rtl433_category_label(category))
+        if data.get("event_count"):
+            parts.append("{} event(s)".format(data.get("event_count")))
+        if data.get("burst_count"):
+            parts.append("{} clustered repeat(s)".format(data.get("burst_count")))
+        signal = self.rtl433_signal_text(data)
+        if signal:
+            parts.append(signal)
+        observed = self.observed_text(data)
+        if observed:
+            parts.append("observed {}".format(observed))
+        if category == "security":
+            parts.append("state not inferred unless decoded payload provides it")
+        return "; ".join(parts) + "."
+
+    def rtl433_signal_text(self, data):
+        """Return compact latest rtl_433 RF signal text."""
+        parts = []
+        if data.get("latest_frequency_mhz") not in (None, ""):
+            parts.append("{} MHz".format(data.get("latest_frequency_mhz")))
+        if data.get("latest_rssi_db") not in (None, ""):
+            parts.append("RSSI {}".format(data.get("latest_rssi_db")))
+        if data.get("latest_snr_db") not in (None, ""):
+            parts.append("SNR {}".format(data.get("latest_snr_db")))
+        return ", ".join(parts)
+
+    def observed_text(self, data):
+        """Return a retained first/latest observation range."""
+        first = data.get("first_seen") or ""
+        last = data.get("last_seen") or ""
+        if first and last and first != last:
+            return "{} to {}".format(first, last)
+        return first or last
+
     def lan_reports(self, events, timestamp):
         """Return LAN device and gateway report rows."""
         reports = []
@@ -3462,13 +3782,14 @@ class ReportsBuilder:
 
     def lan_gateway_subject(self, data):
         """Return LAN gateway report subject."""
-        return "LAN gateway {}".format(
+        original = "LAN gateway {}".format(
             data.get("mac")
             or data.get("gateway_ip")
             or ", ".join(data.get("gateway_ips") or [])
             or data.get("subject_key")
             or ""
         )
+        return self.annotated_subject(data, original)
 
     def lan_device_subject(self, data):
         """Return LAN device report subject."""
@@ -3479,7 +3800,7 @@ class ReportsBuilder:
             or data.get("subject_key")
             or "device"
         )
-        return "LAN {}".format(label)
+        return self.annotated_subject(data, "LAN {}".format(label))
 
     def privacy_reports(self, wifi, bluetooth, timestamp):
         """Return aggregate privacy-exposure rows inside Reports."""
@@ -3726,6 +4047,7 @@ class ReportsBuilder:
             "device": device,
             "mac": mac,
             "label": self.bluetooth_label(device, mac),
+            "identity_bucket": self.ble_private_identity_bucket(device, manufacturer),
             "sessions": sessions,
             "days": days,
             "hours": hours,
@@ -3801,7 +4123,7 @@ class ReportsBuilder:
     def ble_private_cluster_key(self, context):
         """Return a coarse BLE identity fingerprint for private-address churn."""
         device = context.get("device") or {}
-        manufacturer = context.get("manufacturer") or "Unknown"
+        bucket = context.get("identity_bucket") or ("manufacturer", "Unknown")
         names = tuple(
             sorted(
                 name.lower()
@@ -3816,15 +4138,22 @@ class ReportsBuilder:
                 if self.short_bluetooth_uuid(value)
             )[:4]
         )
-        return (manufacturer, names, services)
+        return (bucket, names, services)
+
+    def ble_private_identity_bucket(self, device, manufacturer):
+        """Classify low-identity BLE rows consistently across history/report views."""
+        if (device or {}).get("findmy_accessory"):
+            return ("findmy", "Apple Find My accessory")
+        return ("manufacturer", manufacturer or "Unknown")
 
     def ble_private_cluster_label(self, cluster_key):
         """Return a concise label for a BLE private-address fingerprint."""
-        manufacturer, names, services = cluster_key
-        parts = [manufacturer or "Unknown"]
+        bucket, names, services = cluster_key
+        bucket_kind, bucket_label = bucket
+        parts = [bucket_label or "Unknown"]
         if names:
             parts.append("/".join(names))
-        if services:
+        if services and bucket_kind != "findmy":
             parts.append("UUID {}".format(",".join(value.upper() for value in services)))
         return " | ".join(part for part in parts if part)
 
@@ -3858,12 +4187,12 @@ class ReportsBuilder:
         )
         if manufacturer:
             parts.append(manufacturer)
-        return " - ".join(parts)
+        return self.annotated_subject(device, " - ".join(parts))
 
-    def bluetooth_cluster_subject(self, manufacturer, count):
+    def bluetooth_cluster_subject(self, label, count):
         """Return the subject for a private/randomized BLE address cluster."""
-        if manufacturer:
-            return "{} - {} private/randomized addresses".format(manufacturer, count)
+        if label:
+            return "{} - {} private/randomized addresses".format(label, count)
         return "{} private/randomized addresses".format(count)
 
     def ble_private_address_group_report(self, timestamp, cluster_label, members):
@@ -4024,12 +4353,28 @@ class ReportsBuilder:
             security_text,
         )
 
+    def annotated_subject(self, record, original):
+        """Return annotation plus original identity without renaming the subject."""
+        custom = self.annotation_name(record)
+        original = str(original or "")
+        return "{} ({})".format(custom, original) if custom else original
+
+    def annotation_name(self, record):
+        """Return optional user annotation attached by Subject History."""
+        annotation = (record or {}).get("annotation") or {}
+        return str(
+            (record or {}).get("custom_name")
+            or annotation.get("custom_name")
+            or ""
+        ).strip()
+
     def wifi_ap_subject(self, ap):
         """Return identity for the Reports Subject column."""
         ssid = ap.get("ssid") or "blank SSID"
         bssid = ap.get("bssid") or ""
         vendor = ap.get("vendor_name") or ap.get("vendor_prefix") or ""
-        return " - ".join(part for part in (ssid, bssid, vendor) if part)
+        original = " - ".join(part for part in (ssid, bssid, vendor) if part)
+        return self.annotated_subject(ap, original)
 
     def wifi_ap_reports(self, aps, timestamp):
         """Summarize Wi-Fi as AP profiles plus SSID-level profiles."""
@@ -4398,6 +4743,7 @@ class ReportsBuilder:
                         evidence,
                         62,
                         client.get("last_seen"),
+                        subject=self.annotated_subject(client, mac),
                     )
                 )
             if int(client.get("deauth_count") or 0) or int(
@@ -4417,6 +4763,7 @@ class ReportsBuilder:
                         evidence,
                         80,
                         client.get("last_seen"),
+                        subject=self.annotated_subject(client, mac),
                     )
                 )
             if total_monitor and self.is_new_recent(client, timestamp):
@@ -4433,6 +4780,7 @@ class ReportsBuilder:
                         evidence,
                         55,
                         client.get("last_seen"),
+                        subject=self.annotated_subject(client, mac),
                     )
                 )
         return reports
@@ -4720,6 +5068,7 @@ class ReportsBuilder:
             or device.get("manufacturer")
             or device.get("vendor_name")
             or "",
+            "custom_name": self.annotation_name(device),
             "service_uuids": self.list_values(device.get("service_uuids")),
             "findmy_accessory": bool(device.get("findmy_accessory")),
             "findmy_label": device.get("findmy_label") or "",
@@ -4752,6 +5101,7 @@ class ReportsBuilder:
             "ssid": ap.get("ssid") or "",
             "bssid": ap.get("bssid") or "",
             "vendor": ap.get("vendor_name") or ap.get("vendor_prefix") or "",
+            "custom_name": self.annotation_name(ap),
             "first_seen": self.display_time(ap, "first_seen"),
             "first_seen_epoch": record_time_epoch(ap, "first_seen"),
             "last_seen": self.display_time(ap, "last_seen"),
@@ -4773,6 +5123,7 @@ class ReportsBuilder:
         return {
             "mac": client.get("mac") or "",
             "vendor": client.get("vendor_name") or client.get("vendor_prefix") or "",
+            "custom_name": self.annotation_name(client),
             "first_seen": self.display_time(client, "first_seen"),
             "first_seen_epoch": record_time_epoch(client, "first_seen"),
             "last_seen": self.display_time(client, "last_seen"),

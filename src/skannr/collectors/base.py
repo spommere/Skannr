@@ -29,6 +29,16 @@ class BaseCollector:
     name = ""
     tab_label = ""
     required_hardware = ""
+    subject_history_event_types = ()
+    subject_history_event_prefixes = ()
+
+    @classmethod
+    def supports_subject_history_event(cls, event_type):
+        """Return True when this collector event should feed Subject History."""
+        text = str(event_type or "")
+        return text in cls.subject_history_event_types or any(
+            text.startswith(prefix) for prefix in cls.subject_history_event_prefixes
+        )
 
     @classmethod
     def hardware_status(cls, config):

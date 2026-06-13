@@ -22,6 +22,14 @@ class RTLSDRCollector(BaseCollector):
     name = "RTL-SDR"
     tab_label = "RTL-SDR"
     required_hardware = "RTL-SDR USB dongle"
+    subject_history_event_types = (
+        "scanner_started",
+        "baseline_ready",
+        "signal_detected",
+        "signal_lost",
+        "collector_offline",
+        "collector_retrying",
+    )
 
     @classmethod
     def hardware_status(cls, config):
@@ -63,6 +71,8 @@ class RTLSDRCollector(BaseCollector):
     async def start(self):
         """Run rtl_power, build a baseline, then publish signal changes."""
         self._running = True
+        self._noise_floor = {}
+        self._active = {}
         if not self.detect():
             await self.emit(
                 "collector_offline", {"reason": self.warning}, "warning"

@@ -30,6 +30,7 @@ DEFAULT_ANALYSIS_CONFIG = {
     "ble_population_min_count": 10,
     "ble_population_min_strong_count": 3,
     "recent_activity_window_sec": 1800,
+    "rtl433_recent_min_events": 1,
     "wifi_short_lived_sec": 900,
     "sensitive_ssids": [],
 }
@@ -62,6 +63,9 @@ class HistoryAnalyzer:
         observations.extend(self.analyze_wifi_clients(clients, generated_at))
         observations.extend(self.analyze_ble_devices(ble_devices, generated_at))
         observations.extend(self.analyze_population(clients, generated_at))
+        observations.extend(
+            self.analyze_rtl433((history.get("rtl433") or []), generated_at)
+        )
 
         # Show the most urgent/recent-looking rows first while preserving the
         # raw score as the secondary ordering inside each severity.
@@ -808,6 +812,77 @@ class HistoryAnalyzer:
                 )
             )
         return observations
+
+    def analyze_rtl433(self, events, timestamp):
+        """Return tactical observations for decoded rtl_433 subjects."""
+        observations = []
+        min_events = int(self.config.get("rtl433_recent_min_events", 1))
+        for event in events or []:
+            if (event or {}).get("type") != "rtl433_subject_summary":
+                continue
+            data = (event or {}).get("data") or {}
+            event_count = self.to_int(data.get("event_count")) or 0
+            category = data.get("category") or "device"
+            if event_count < min_events and category not in ("tpms", "security"):
+                continue
+            title = "RTL-433 decoded device activity"
+            severity = "warning" if category in ("tpms", "security") else "info"
+            label = " ".join(
+                part
+                for part in (
+                    data.get("model") or "",
+                    data.get("id") or "",
+                    data.get("channel") or "",
+                )
+                if part
+            ).strip() or "RTL-433 device"
+            detail = "{}; {}; {} event(s)".format(
+                label,
+                self.rtl433_category_label(category),
+                event_count,
+            )
+            evidence = {
+                "model": data.get("model") or "",
+                "id": data.get("id") or "",
+                "channel": data.get("channel") or "",
+                "protocol": data.get("protocol") or "",
+                "category": category,
+                "event_count": event_count,
+                "burst_count": data.get("burst_count") or 0,
+                "frequency_mhz": data.get("latest_frequency_mhz") or "",
+                "rssi_db": data.get("latest_rssi_db") or "",
+                "snr_db": data.get("latest_snr_db") or "",
+                "first_seen": data.get("first_seen") or "",
+                "first_seen_epoch": data.get("first_seen_epoch"),
+                "last_seen": data.get("last_seen") or "",
+                "last_seen_epoch": data.get("last_seen_epoch"),
+            }
+            score = 62 if category in ("tpms", "security") else 25
+            if self.to_int(data.get("burst_count")):
+                score += 8
+            observations.append(
+                self.observation(
+                    timestamp,
+                    severity,
+                    "rtl433",
+                    "rtl433_decoded_subject",
+                    title,
+                    detail,
+                    evidence,
+                    score,
+                )
+            )
+        return observations
+
+    def rtl433_category_label(self, category):
+        """Return operator-facing rtl_433 category text."""
+        labels = {
+            "tpms": "TPMS-like",
+            "security": "garage/security/remote-like",
+            "weather": "weather/sensor",
+            "utility": "utility/meter",
+        }
+        return labels.get(category, "decoded ISM-band")
 
     def observation(
         self,

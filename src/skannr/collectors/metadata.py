@@ -71,6 +71,22 @@ FALLBACK_COLLECTOR_DEFINITIONS = [
         "has_subject_history": True,
     },
     {
+        "key": "rtl433",
+        "order": 53,
+        "label": "RTL-433",
+        "description": "Optional rtl_433 decoded ISM-band device feed",
+        "acquisition_mode": ACQUISITION_LISTEN,
+        "has_subject_history": True,
+    },
+    {
+        "key": "adsb",
+        "order": 55,
+        "label": "ADS-B",
+        "description": "Optional dump1090/readsb decoded aircraft feed",
+        "acquisition_mode": ACQUISITION_LISTEN,
+        "has_subject_history": True,
+    },
+    {
         "key": "rayhunter",
         "order": 60,
         "label": "Rayhunter",

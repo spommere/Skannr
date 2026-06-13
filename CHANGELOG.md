@@ -7,6 +7,64 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.2.7 - 2026-06-13
+
+- Reworked derived-data refresh and retained state so Subject History,
+  Insights, and Reports use compact collector state instead of repeatedly
+  replaying old raw logs. Disabled collectors keep their last materialized
+  rows, advance checkpoints safely, and no longer force expensive refresh work
+  until re-enabled.
+- Compacted noisy Wi-Fi and Bluetooth randomized-device history before it
+  reaches Subject History. Low-identity randomized MAC churn now folds into
+  aggregate rows, while stable, annotated, or report-linked devices remain
+  individual subjects.
+- Added durable Subject History annotations for Wi-Fi, Bluetooth, and LAN
+  subjects. Annotations survive refresh/log pruning, appear in Reports and
+  detail views, and never overwrite the underlying subject key.
+- Tightened RTL-433 and ADS-B refresh behavior, frequency/status wording,
+  Subject History rollup, and Reports evidence formatting. Small direct
+  collector batches now reach Subject History even when collectors are switched
+  or stopped before refresh.
+- Improved Reports and Subject History table layout so high-volume columns have
+  more usable width, sparse columns waste less space, timestamps stay readable,
+  and long evidence no longer stretches tables far beyond a normal laptop
+  viewport.
+- Added install-time collector precheck and post-install postcheck behavior.
+  Fresh installs seed collector `enabled` flags from required software, selected
+  hardware probes, and Python dependency availability. SDR-backed collectors
+  require visible RTL-SDR hardware before being enabled, while optional LAN
+  enrichment tools are reported without disabling the LAN collector.
+- Added rolling period retention caps for derived summaries: weekly summaries
+  keep the most recent 4 periods, monthly summaries keep the most recent 12
+  periods, and yearly summaries remain unbounded.
+
+## 0.2.6 - 2026-06-13
+
+- Added initial RTL-433 decoder support through `rtl_433`. RTL-433 now has a
+  live tab, frequency-plan overrides, Subject History, Insights, Reports,
+  detail links, RTL-SDR handoff with ADS-B/RTL-SDR power scanning, and
+  disabled-by-default configurable RTL-433 alerts.
+- Added initial ADS-B support through `dump1090`/`readsb`, including managed
+  decoder startup, live aircraft rows, Subject History, Insights, Reports,
+  detail links, low/nearby aircraft alerts, and richer altitude/motion fields.
+- Tightened derived-data consistency so Insights, Subject History, and Reports
+  all flow from materialized Subject History instead of rereading retained
+  finding logs as a separate source.
+- Reduced Wi-Fi Monitor noise and improved monitor-mode controls, including
+  band/fixed-channel/hopping options, deauth/disassociation alert gating, and
+  better report layout for monitor subjects.
+- Added install-time collector precheck and post-install postcheck scripts.
+  Fresh installs seed collector `enabled` flags from required local tool,
+  selected hardware, and Python dependency availability; SDR-backed collectors
+  require visible RTL-SDR hardware before being enabled on fresh config.
+  Optional LAN enrichment tools such as
+  `arp-scan` and `avahi-browse` are reported without disabling the LAN
+  collector. System
+  Status now distinguishes required, recommended, and optional LAN tool
+  availability.
+- Tightened collector/UI consistency checks and added a compact Rayhunter live
+  tab so standalone collectors have matching browser tab and panel coverage.
+
 ## 0.2.5 - 2026-06-09
 
 - Added longitudinal Reports rollups for PWS, APRS-IS weather stations, USGS,

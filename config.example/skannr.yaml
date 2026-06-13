@@ -38,6 +38,22 @@ findings:
   # default; Subject History still retains the raw BLE subjects.
   ble_live_identity_required: true
   ble_live_service_identity: false
+  # Wi-Fi Monitor can see thousands of randomized probe MACs. Keep those raw
+  # observations in Wi-Fi Monitor/Subject History/Reports, but avoid filling
+  # live Insights with per-random-client churn by default. Live monitor-mode
+  # Insights should focus on actual disruption frames and configured sensitive
+  # SSID probes unless these knobs are intentionally enabled.
+  wifi_monitor_emit_client_new: false
+  wifi_monitor_emit_client_returned: false
+  wifi_monitor_emit_client_lost: false
+  wifi_monitor_emit_blank_probe: false
+  wifi_monitor_emit_randomized_mac: false
+  wifi_monitor_emit_probe_burst: false
+  wifi_monitor_emit_strong_client: false
+  wifi_monitor_emit_ap_presence: false
+  wifi_monitor_emit_strong_ap: false
+  wifi_monitor_probe_burst_once: true
+  sensitive_ssids: []
   burst_window_sec: 30
   burst_count: 5
   cooldown_sec: 120
@@ -51,6 +67,9 @@ findings:
   pws_rain_1h_high_in: 0.25
   pws_wind_high_mph: 25
   pws_gust_high_mph: 35
+  adsb_low_altitude_ft: 1500
+  adsb_nearby_radius_km: 10
+  adsb_emit_new_aircraft: true
   noaa_upgrade_severities:
   - Severe
   - Extreme
@@ -129,6 +148,12 @@ alerts:
     level: critical
     window_sec: 60
     count: 5
+    # Alert only when deauth/disassociation frames look attack-like. Normal APs
+    # can send targeted cleanup deauths, so those remain visible in Wi-Fi
+    # Monitor/Reports but do not alert unless they are unusually broad or fast.
+    broadcast_count: 3
+    distinct_receiver_count: 3
+    single_receiver_count: 50
   wifi_open_sensitive:
     enabled: true
     level: critical
@@ -202,6 +227,24 @@ alerts:
     # default. The LAN tab, Subject History, and Reports still show them.
     enabled: false
     level: warning
+  adsb_aircraft:
+    enabled: true
+    level: warning
+    critical_level: critical
+    nearby_radius_km: 10
+    low_altitude_ft: 1500
+  rtl433_signal:
+    # RTL-433 decoded TPMS/security/remote/contact events can be useful but
+    # noisy until the local RF environment is understood, so alerts are off by
+    # default. Live feed, Subject History, Insights, and Reports still record
+    # decoded events when the collector is enabled.
+    enabled: false
+    level: warning
+    categories:
+    - tpms
+    - security
+    model_patterns: []
+    protocols: []
 history_analysis:
   new_device_window_sec: 3600
   strong_wifi_rssi: -50
@@ -221,8 +264,9 @@ history_analysis:
   ble_population_min_count: 10
   ble_population_min_strong_count: 3
   recent_activity_window_sec: 1800
-  insights_recent_hours: 6
+  insights_recent_minutes: 60
   wifi_short_lived_sec: 900
+  rtl433_recent_min_events: 1
   sensitive_ssids: []
 reports:
   ble_long_presence_sec: 3600
@@ -256,6 +300,10 @@ reports:
   swpc_report_solar_radiation_storm: S3
   swpc_report_geomagnetic_storm: G3
   swpc_report_kp: 7
+  adsb_low_altitude_ft: 1500
+  adsb_nearby_radius_km: 10
+  adsb_report_min_seen: 3
+  rtl433_report_min_events: 2
   lan_report_new_devices: true
   lan_report_gateway_changes: true
 ui:
@@ -269,7 +317,14 @@ ui:
   # Live NOAA/USGS/SWPC feed rows older than this event/update age are hidden.
   # Raw logs, Subject History, Reports, and Alerts are not deleted by this.
   poll_feed_live_ttl_sec: 86400
+  # Background cadence for compact Device History coalescing. Set 0 to disable.
+  device_history_update_interval_sec: 60
   derived_stale_after_min: 15
   derived_auto_refresh_min: 15
   derived_refresh_timeout_sec: 600
+  # Manual Refresh runs a real refresh by default whenever raw work is pending.
+  # Set this to a positive byte threshold to allow recent small device-history
+  # deltas to reuse cached derived views. Direct collector deltas always force
+  # a real refresh so new ADS-B/RTL-433/APRS/etc. subjects are not hidden.
+  # manual_refresh_small_delta_reuse_bytes: 0
   insights_recent_after_min: 30

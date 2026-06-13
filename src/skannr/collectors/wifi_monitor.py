@@ -1,10 +1,7 @@
-"""Monitor-mode Wi-Fi packet collector and channel hopper.
-
-The user is expected to prepare a separate monitor-mode interface. Skannr then
-sniffs management frames and retunes across supported channels on demand.
-"""
+"""Monitor-mode Wi-Fi packet collector and channel hopper."""
 
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -30,6 +27,30 @@ from .hardware import (
     wireless_interfaces,
 )
 from .wifi import WiFiCollector
+
+
+COMMAND_CANDIDATES = {
+    "ip": ("/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"),
+    "iw": ("/usr/sbin/iw", "/sbin/iw", "/usr/bin/iw", "/bin/iw"),
+    "nmcli": ("/usr/bin/nmcli", "/bin/nmcli", "/usr/sbin/nmcli", "/sbin/nmcli"),
+    "airmon-ng": (
+        "/usr/sbin/airmon-ng",
+        "/sbin/airmon-ng",
+        "/usr/bin/airmon-ng",
+        "/bin/airmon-ng",
+    ),
+}
+
+
+def command_path(name):
+    """Return a command path even when systemd PATH omits sbin directories."""
+    path = shutil.which(name)
+    if path:
+        return path
+    for candidate in COMMAND_CANDIDATES.get(name, ()):
+        if os.path.exists(candidate):
+            return candidate
+    return ""
 
 
 class WiFiMonitorCollector(WiFiCollector):
@@ -61,11 +82,12 @@ class WiFiMonitorCollector(WiFiCollector):
                 item for item in configured if item and item != "auto"
             ] or sort_wifi_interfaces(monitors, config)
         return {
-            "iw": bool(shutil.which("iw")),
-            "airmon_ng": bool(shutil.which("airmon-ng")),
+            "iw": bool(command_path("iw")),
+            "airmon_ng": bool(command_path("airmon-ng")),
             "scapy": package_available("scapy"),
             "auto_start": config.get("auto_start", False),
             "interface": interface,
+            "prepare_monitor_mode": bool(config.get("prepare_monitor_mode", False)),
             "wireless_interfaces": wireless,
             "monitor_interfaces": monitors,
             "interfaces": availability_records(
@@ -82,22 +104,29 @@ class WiFiMonitorCollector(WiFiCollector):
         self._current_channel = None
         self._channel_plan = []
         self._supported_channels = {}
+        self._monitor_setup_warning = ""
 
     def detect(self):
         """Report availability without starting sniffing or channel hopping."""
-        if not shutil.which("iw"):
+        self.log_monitor_setup_context("detect")
+        if not command_path("iw"):
             self.active_hardware = None
             self.state = STATE_OFFLINE
             self.warning = "iw was not found in PATH."
             return False
+        self.prepare_configured_monitor_interface()
         iface = self.select_monitor_interface()
         if not iface:
             self.active_hardware = None
             self.state = STATE_OFFLINE
+            setup = self._monitor_setup_warning
             self.warning = (
-                "No monitor-mode Wi-Fi interface found. Put a separate Wi-Fi "
-                "adapter into monitor mode, then click Start."
+                "No monitor-mode Wi-Fi interface found. Configure a dedicated "
+                "interface and enable prepare_monitor_mode, or put the adapter "
+                "into monitor mode before clicking Start."
             )
+            if setup:
+                self.warning = "{} Monitor setup: {}".format(self.warning, setup)
             return False
         self.active_hardware = iface
         self.state = STATE_STOPPED
@@ -107,13 +136,20 @@ class WiFiMonitorCollector(WiFiCollector):
     async def start(self):
         """Start monitor-mode sniffing only after the user clicks Start."""
         self._running = True
+        self.log_monitor_setup_context("start")
+        self.prepare_configured_monitor_interface()
         iface = self.select_monitor_interface()
         if not iface:
             self.state = STATE_OFFLINE
+            setup = self._monitor_setup_warning
             self.warning = (
-                "No monitor-mode Wi-Fi interface found. Put a separate Wi-Fi "
-                "adapter into monitor mode, then click Start."
+                "No monitor-mode Wi-Fi interface found. Configure a dedicated "
+                "interface and enable prepare_monitor_mode, or put the adapter "
+                "into monitor mode before clicking Start."
             )
+            if setup:
+                self.warning = "{} Monitor setup: {}".format(self.warning, setup)
+            logging.warning("Wi-Fi Monitor startup failed: %s", self.warning)
             await self.emit(
                 "collector_offline", {"reason": self.warning}, "warning"
             )
@@ -139,12 +175,21 @@ class WiFiMonitorCollector(WiFiCollector):
         self._channel_plan = self.build_channel_plan()
         if not self._channel_plan:
             self.state = STATE_OFFLINE
-            self.warning = (
-                "No supported 2.4 GHz or 5 GHz channels were discovered for "
-                "{}."
-            ).format(
-                iface,
-            )
+            if self.channel_mode() == "fixed":
+                self.warning = (
+                    "Fixed Wi-Fi Monitor channel {} is not configured, not in "
+                    "an enabled band, or not supported by {}."
+                ).format(
+                    self.config.get("fixed_channel"),
+                    iface,
+                )
+            else:
+                self.warning = (
+                    "No supported 2.4 GHz or 5 GHz channels were discovered "
+                    "for {}."
+                ).format(
+                    iface,
+                )
             await self.emit(
                 "collector_offline", {"reason": self.warning}, "warning"
             )
@@ -159,6 +204,14 @@ class WiFiMonitorCollector(WiFiCollector):
                 "channels": self._channel_plan,
                 "supported_bands": sorted(self._supported_channels.keys()),
                 "dwell_sec": self.dwell_seconds(),
+                "channel_mode": self.channel_mode(),
+                "fixed_channel": self.fixed_channel(),
+                "seen_channels_first": bool(
+                    self.config.get("seen_channels_first", False)
+                ),
+                "common_channel_fallback": bool(
+                    self.config.get("common_channel_fallback", True)
+                ),
             },
         )
 
@@ -283,6 +336,23 @@ class WiFiMonitorCollector(WiFiCollector):
     async def channel_hopper(self, iface):
         """Retune the monitor interface across the current channel plan."""
         dwell = self.dwell_seconds()
+        if self.channel_mode() == "fixed":
+            channel = self._channel_plan[0]
+            if self.set_channel(iface, channel):
+                self._current_channel = channel
+                await self.emit(
+                    "monitor_channel_changed",
+                    {
+                        "interface": iface,
+                        "channel": channel,
+                        "band": self.channel_band(channel),
+                        "mode": "fixed",
+                    },
+                )
+            while self._running:
+                await asyncio.sleep(dwell)
+            return
+
         while self._running:
             for channel in self._channel_plan:
                 if not self._running:
@@ -295,6 +365,7 @@ class WiFiMonitorCollector(WiFiCollector):
                             "interface": iface,
                             "channel": channel,
                             "band": self.channel_band(channel),
+                            "mode": "hop",
                         },
                     )
                 await asyncio.sleep(dwell)
@@ -311,7 +382,7 @@ class WiFiMonitorCollector(WiFiCollector):
         """Best-effort retune of the monitor interface."""
         try:
             result = subprocess.run(
-                ["iw", "dev", iface, "set", "channel", str(channel)],
+                [command_path("iw") or "iw", "dev", iface, "set", "channel", str(channel)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 check=False,
@@ -341,11 +412,127 @@ class WiFiMonitorCollector(WiFiCollector):
         ranked = sort_wifi_interfaces(discovered, self.config)
         return ranked[0] if ranked else None
 
+    def prepare_configured_monitor_interface(self):
+        """Optionally switch a specifically configured interface to monitor mode."""
+        if not bool(self.config.get("prepare_monitor_mode", False)):
+            logging.info("Wi-Fi Monitor monitor-mode setup disabled")
+            return
+        self._monitor_setup_warning = ""
+        candidates = self.configured_monitor_candidates()
+        logging.info("Wi-Fi Monitor monitor-mode setup candidates=%s", candidates)
+        if not candidates:
+            self._monitor_setup_warning = (
+                "prepare_monitor_mode is true, but no concrete interface is "
+                "configured; set interface: wlan1 or interfaces: [wlan1]"
+            )
+            logging.warning("Wi-Fi Monitor setup skipped: %s", self._monitor_setup_warning)
+            return
+        for iface in candidates:
+            if iface in self.monitor_interfaces():
+                logging.info("Wi-Fi Monitor interface already in monitor mode: %s", iface)
+                return
+            ok, detail = self.set_interface_monitor_mode(iface)
+            if ok:
+                self.active_hardware = iface
+                self.warning = None
+                return
+            self._monitor_setup_warning = detail
+            self.warning = detail
+
+    def log_monitor_setup_context(self, phase):
+        """Log enough config/discovery context to debug monitor setup failures."""
+        logging.info(
+            "Wi-Fi Monitor %s config prepare_monitor_mode=%s interface=%s "
+            "interfaces=%s iw=%s ip=%s nmcli=%s monitors=%s wireless=%s",
+            phase,
+            bool(self.config.get("prepare_monitor_mode", False)),
+            self.config.get("interface", "auto"),
+            self.config.get("interfaces") or [],
+            command_path("iw") or "missing",
+            command_path("ip") or "missing",
+            command_path("nmcli") or "missing",
+            self.monitor_interfaces(),
+            wireless_interfaces(),
+        )
+
+    def configured_monitor_candidates(self):
+        """Return explicit interfaces eligible for Skannr monitor-mode setup."""
+        candidates = configured_candidates(
+            self.config, "interfaces", extra_keys=("interface",)
+        )
+        return [
+            iface
+            for iface in candidates
+            if iface and iface != "auto" and self.interface_allowed(iface)
+        ]
+
+    def set_interface_monitor_mode(self, iface):
+        """Best-effort host-local monitor-mode setup for one configured interface."""
+        if not os.path.exists(os.path.join("/sys/class/net", iface)):
+            return False, "{} does not exist".format(iface)
+        if bool(self.config.get("set_networkmanager_unmanaged", True)):
+            self.run_setup_command(["nmcli", "dev", "set", iface, "managed", "no"])
+            self.run_setup_command(["nmcli", "dev", "disconnect", iface])
+        steps = [
+            ["ip", "link", "set", iface, "down"],
+            ["iw", "dev", iface, "set", "type", "monitor"],
+            ["ip", "link", "set", iface, "up"],
+        ]
+        for command in steps:
+            ok, output = self.run_setup_command(command)
+            if not ok:
+                return False, "{} failed: {}".format(" ".join(command), output)
+        if iface in self.monitor_interfaces():
+            return True, "{} is in monitor mode".format(iface)
+        return False, "{} is still not reported as monitor mode".format(iface)
+
+    def run_setup_command(self, command):
+        """Run one monitor setup command and return success plus compact output."""
+        original = list(command)
+        executable = command_path(command[0])
+        if not executable:
+            logging.warning(
+                "Wi-Fi Monitor setup command unavailable: %s", " ".join(original)
+            )
+            return False, "{} not found".format(command[0])
+        command = [executable] + list(command[1:])
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+                universal_newlines=True,
+                timeout=float(self.config.get("monitor_setup_timeout_sec", 10)),
+            )
+        except Exception as exc:
+            logging.warning(
+                "Wi-Fi Monitor setup command failed command=%s error=%s",
+                " ".join(command),
+                exc,
+            )
+            return False, str(exc)
+        output = " ".join((result.stdout or "").split())[:300]
+        if result.returncode == 0:
+            logging.info(
+                "Wi-Fi Monitor setup command passed command=%s output=%s",
+                " ".join(command),
+                output,
+            )
+        else:
+            logging.warning(
+                "Wi-Fi Monitor setup command failed command=%s exit=%s output=%s",
+                " ".join(command),
+                result.returncode,
+                output,
+            )
+        return result.returncode == 0, output or "exit {}".format(result.returncode)
+
     def monitor_interfaces(self):
         """Parse 'iw dev' and return interfaces whose type is monitor."""
         try:
             output = subprocess.check_output(
-                ["iw", "dev"],
+                [command_path("iw") or "iw", "dev"],
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
                 timeout=5,
@@ -400,7 +587,7 @@ class WiFiMonitorCollector(WiFiCollector):
         if phy:
             try:
                 return subprocess.check_output(
-                    ["iw", "phy", phy, "info"],
+                    [command_path("iw") or "iw", "phy", phy, "info"],
                     stderr=subprocess.STDOUT,
                     universal_newlines=True,
                     timeout=10,
@@ -409,7 +596,7 @@ class WiFiMonitorCollector(WiFiCollector):
                 pass
         try:
             return subprocess.check_output(
-                ["iw", "list"],
+                [command_path("iw") or "iw", "list"],
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
                 timeout=10,
@@ -423,7 +610,7 @@ class WiFiMonitorCollector(WiFiCollector):
             return None
         try:
             output = subprocess.check_output(
-                ["iw", "dev"],
+                [command_path("iw") or "iw", "dev"],
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
                 timeout=5,
@@ -440,13 +627,16 @@ class WiFiMonitorCollector(WiFiCollector):
         return None
 
     def build_channel_plan(self):
-        """Build a low-overhead channel plan from common channels.
+        """Build a low-overhead channel plan from configured controls.
 
         Reading old logs during Start made the on-demand monitor collector do
         more work than expected. By default Skannr starts with common channels
-        supported by the adapter. Users can opt in to appending previously seen
-        AP channels later through include_seen_channels.
+        supported by the adapter. Operators can choose a fixed channel, put
+        previously seen AP channels first, or disable common-channel fallback.
         """
+        if self.channel_mode() == "fixed":
+            return self.fixed_channel_plan()
+
         plan = []
         enabled_bands = self.enabled_bands()
         typical = {
@@ -460,22 +650,78 @@ class WiFiMonitorCollector(WiFiCollector):
             if self.config.get("include_seen_channels", False)
             else {}
         )
+        seen_first = bool(self.config.get("seen_channels_first", False))
+        fallback = bool(self.config.get("common_channel_fallback", True))
         for band in enabled_bands:
-            # Typical channels come first to avoid spending startup time reading
-            # old logs and to keep resource use predictable on small Pis.
             supported = set(self._supported_channels.get(band) or [])
             if not supported:
                 continue
-            for channel in list(typical.get(band) or []) + list(
-                seen.get(band) or []
-            ):
-                try:
-                    channel = int(channel)
-                except (TypeError, ValueError):
-                    continue
-                if channel in supported and channel not in plan:
-                    plan.append(channel)
+            seen_channels = self.supported_channel_list(
+                seen.get(band) or [], supported
+            )
+            typical_channels = self.supported_channel_list(
+                typical.get(band) or [], supported
+            )
+            if seen_first:
+                for channel in seen_channels:
+                    self.append_channel(plan, channel)
+                if fallback or not seen_channels:
+                    for channel in typical_channels:
+                        self.append_channel(plan, channel)
+            else:
+                if fallback or not seen_channels:
+                    for channel in typical_channels:
+                        self.append_channel(plan, channel)
+                for channel in seen_channels:
+                    self.append_channel(plan, channel)
         return plan
+
+    def channel_mode(self):
+        """Return normalized channel behavior: hop or fixed."""
+        mode = str(self.config.get("channel_mode") or "hop").lower().strip()
+        if mode in ("fixed", "single", "channel"):
+            return "fixed"
+        return "hop"
+
+    def fixed_channel(self):
+        """Return configured fixed channel as int, or None."""
+        value = self.config.get("fixed_channel")
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def fixed_channel_plan(self):
+        """Return a validated one-channel plan for fixed-channel mode."""
+        channel = self.fixed_channel()
+        if channel is None:
+            return []
+        band = self.channel_band(channel)
+        if band not in self.enabled_bands():
+            return []
+        if channel not in set(self._supported_channels.get(band) or []):
+            return []
+        return [channel]
+
+    def supported_channel_list(self, channels, supported):
+        """Return configured/seen channels filtered by adapter support."""
+        output = []
+        for channel in channels or []:
+            try:
+                channel = int(channel)
+            except (TypeError, ValueError):
+                continue
+            if channel in supported and channel not in output:
+                output.append(channel)
+        return output
+
+    @staticmethod
+    def append_channel(plan, channel):
+        """Append a channel once while preserving order."""
+        if channel not in plan:
+            plan.append(channel)
 
     def enabled_bands(self):
         """Return configured bands that are also supported by the adapter."""
@@ -529,15 +775,30 @@ class WiFiMonitorCollector(WiFiCollector):
         self, dot11, rssi, channel, timestamp, timestamp_epoch, iface
     ):
         """Build common client/AP event payload for management frames."""
+        receiver = dot11.addr1
+        transmitter = dot11.addr2
+        bssid = dot11.addr3
         return {
-            "client_mac": dot11.addr2,
-            "ap_mac": dot11.addr1 or dot11.addr3,
+            # Keep the older client/ap names for existing history/report code,
+            # but expose the real 802.11 address roles so deauth/disassoc
+            # analysis does not overstate which side initiated the frame.
+            "client_mac": transmitter,
+            "ap_mac": receiver or bssid,
+            "transmitter_mac": transmitter,
+            "receiver_mac": receiver,
+            "bssid": bssid,
+            "receiver_is_broadcast": self.is_broadcast_mac(receiver),
             "rssi": rssi,
             "channel": channel,
             "timestamp": timestamp,
             "timestamp_epoch": timestamp_epoch,
             "monitor_interface": iface,
         }
+
+    @staticmethod
+    def is_broadcast_mac(mac):
+        """Return True when a frame is addressed to the broadcast MAC."""
+        return str(mac or "").lower() == "ff:ff:ff:ff:ff:ff"
 
     def channel_band(self, channel):
         """Return 2.4 or 5 for common Wi-Fi channels."""

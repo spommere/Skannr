@@ -238,6 +238,14 @@ class LANCollector(BaseCollector):
     name = "LAN"
     tab_label = "LAN"
     required_hardware = "Local network stack"
+    subject_history_event_types = (
+        "lan_device_seen",
+        "lan_device_changed",
+        "lan_gateway_seen",
+        "lan_gateway_changed",
+        "collector_offline",
+        "collector_retrying",
+    )
     local_source_label = "Local OS neighbor/default-route state"
 
     @classmethod

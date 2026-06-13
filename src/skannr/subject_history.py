@@ -13,15 +13,18 @@ import os
 from collections import Counter, defaultdict
 
 from .bus import local_now
+from .collectors import subject_history_event_contract_by_key
 from .collectors.lan import clean_lan_data
 from .collectors.noaa import (
     clean_noaa_data,
     stable_noaa_event_key,
     tsunami_is_alertworthy,
 )
+from .collectors.adsb import clean_adsb_data, distance_km
 from .collectors.aprsis import aprsis_distance_km, aprsis_float, clean_aprs_data
 from .collectors.pws import clean_pws_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
+from .collectors.rtl433 import clean_rtl433_data
 from .collectors.swpc import (
     clean_swpc_data,
     number_or_none,
@@ -32,8 +35,19 @@ from .collectors.swpc import (
 )
 from .collectors.usgs import clean_usgs_data
 from .device_history import DeviceHistoryBuilder
+from .identity_policy import (
+    bluetooth_group_label,
+    bluetooth_grouping_candidate,
+    bluetooth_identity_bucket,
+    lan_group_label,
+    low_identity_bluetooth_record,
+    low_identity_lan_record,
+    low_identity_wifi_client,
+    wifi_client_group_label,
+)
 from .log_utils import (
     count_jsonl_files,
+    current_jsonl_checkpoint,
     empty_jsonl_checkpoint,
     event_in_window,
     event_time_epoch,
@@ -50,11 +64,15 @@ from .log_utils import (
 class SubjectHistoryBuilder:
     """Build one materialized subject-history summary for all collectors."""
 
+    DIRECT_OBSERVATION_VERSION = 3
+
     DEVICE_COLLECTORS = DeviceHistoryBuilder.COLLECTORS
     DIRECT_COLLECTORS = (
         "aprsis",
         "rayhunter",
         "rtlsdr",
+        "rtl433",
+        "adsb",
         "noaa",
         "usgs",
         "swpc",
@@ -69,7 +87,9 @@ class SubjectHistoryBuilder:
         log_dir,
         state_path=None,
         device_history_state_path=None,
+        direct_state_path=None,
         window_days=None,
+        enabled_collectors=None,
     ):
         self.log_dir = log_dir
         self.state_path = state_path or os.path.join(
@@ -78,7 +98,34 @@ class SubjectHistoryBuilder:
         self.device_history_state_path = device_history_state_path or os.path.join(
             log_dir, "device_history", "device_history.json"
         )
+        self.direct_state_path = direct_state_path or os.path.join(
+            log_dir, "device_history", "subject_history_direct_state.json"
+        )
         self.window_days = window_days
+        self.enabled_collectors = (
+            set(enabled_collectors) if enabled_collectors is not None else None
+        )
+        self.subject_history_event_contract = subject_history_event_contract_by_key()
+
+    def collector_enabled(self, collector):
+        """Return True when this collector should participate in this build."""
+        return self.enabled_collectors is None or collector in self.enabled_collectors
+
+    def active_device_collectors(self):
+        """Return enabled Device History collectors."""
+        return tuple(
+            collector for collector in self.DEVICE_COLLECTORS if self.collector_enabled(collector)
+        )
+
+    def active_direct_collectors(self):
+        """Return enabled direct Subject History collectors."""
+        return tuple(
+            collector for collector in self.DIRECT_COLLECTORS if self.collector_enabled(collector)
+        )
+
+    def active_collectors(self):
+        """Return enabled collectors covered by Subject History."""
+        return self.active_device_collectors() + self.active_direct_collectors()
 
     def build(self, device_history_summary=None, persist=True):
         """Return a display-ready Subject History summary."""
@@ -95,39 +142,93 @@ class SubjectHistoryBuilder:
         Rayhunter, and RTL-SDR are folded here so Reports no longer have separate
         raw-log readers for each collector.
         """
-        device_history_summary = copy.deepcopy(device_history_summary or {})
+        device_history_summary = device_history_summary or {}
+        previous_summary = self.load_persisted_summary() or {}
+        device_subject_summary = DeviceHistoryBuilder(
+            self.log_dir,
+            state_path=self.device_history_state_path,
+            window_days=self.window_days,
+        ).display_summary(device_history_summary, self.window_days)
         (
             direct_observations,
             direct_checkpoint,
             direct_records,
             direct_incremental_records,
+            direct_read_stats,
         ) = self.build_direct_observations()
-        aprsis_events, aprsis_records = self.build_aprsis_history(
-            direct_observations.get("aprsis") or [], None
-        )
-        rayhunter_events, rayhunter_records = self.build_rayhunter_history(
-            direct_observations.get("rayhunter") or [], None
-        )
-        rtlsdr_events, rtlsdr_records = self.build_rtlsdr_history(
-            direct_observations.get("rtlsdr") or [], None
-        )
-        noaa_events, noaa_records = self.build_noaa_history(
-            direct_observations.get("noaa") or [], None
-        )
-        usgs_events, usgs_records = self.build_usgs_history(
-            direct_observations.get("usgs") or [], None
-        )
-        swpc_events, swpc_records = self.build_swpc_history(
-            direct_observations.get("swpc") or [], None
-        )
-        pws_events, pws_records = self.build_pws_history(
-            direct_observations.get("pws") or [], None
-        )
-        lan_events, lan_records = self.build_lan_history(
-            (direct_observations.get("lan") or [])
-            + (direct_observations.get("lan_identify") or []),
+        aprsis_events, aprsis_records = self.build_or_keep_direct_history(
+            previous_summary,
+            "aprsis",
+            self.build_aprsis_history,
+            direct_observations.get("aprsis") or [],
             None,
         )
+        rayhunter_events, rayhunter_records = self.build_or_keep_direct_history(
+            previous_summary,
+            "rayhunter",
+            self.build_rayhunter_history,
+            direct_observations.get("rayhunter") or [],
+            None,
+        )
+        rtlsdr_events, rtlsdr_records = self.build_or_keep_direct_history(
+            previous_summary,
+            "rtlsdr",
+            self.build_rtlsdr_history,
+            direct_observations.get("rtlsdr") or [],
+            None,
+        )
+        rtl433_events, rtl433_records = self.build_or_keep_direct_history(
+            previous_summary,
+            "rtl433",
+            self.build_rtl433_history,
+            direct_observations.get("rtl433") or [],
+            None,
+        )
+        adsb_events, adsb_records = self.build_or_keep_direct_history(
+            previous_summary,
+            "adsb",
+            self.build_adsb_history,
+            direct_observations.get("adsb") or [],
+            None,
+        )
+        noaa_events, noaa_records = self.build_or_keep_direct_history(
+            previous_summary,
+            "noaa",
+            self.build_noaa_history,
+            direct_observations.get("noaa") or [],
+            None,
+        )
+        usgs_events, usgs_records = self.build_or_keep_direct_history(
+            previous_summary,
+            "usgs",
+            self.build_usgs_history,
+            direct_observations.get("usgs") or [],
+            None,
+        )
+        swpc_events, swpc_records = self.build_or_keep_direct_history(
+            previous_summary,
+            "swpc",
+            self.build_swpc_history,
+            direct_observations.get("swpc") or [],
+            None,
+        )
+        pws_events, pws_records = self.build_or_keep_direct_history(
+            previous_summary,
+            "pws",
+            self.build_pws_history,
+            direct_observations.get("pws") or [],
+            None,
+        )
+        lan_enabled = self.collector_enabled("lan") or self.collector_enabled("lan_identify")
+        if lan_enabled:
+            lan_events, lan_records = self.build_lan_history(
+                (direct_observations.get("lan") or [])
+                + (direct_observations.get("lan_identify") or []),
+                None,
+            )
+        else:
+            lan_events = copy.deepcopy((previous_summary or {}).get("lan") or [])
+            lan_records = 0
         generated_at_epoch = now_epoch()
         raw_records = self.raw_records_by_collector(
             device_history_summary,
@@ -135,6 +236,8 @@ class SubjectHistoryBuilder:
                 "aprsis": aprsis_records,
                 "rayhunter": rayhunter_records,
                 "rtlsdr": rtlsdr_records,
+                "rtl433": rtl433_records,
+                "adsb": adsb_records,
                 "noaa": noaa_records,
                 "usgs": usgs_records,
                 "swpc": swpc_records,
@@ -148,60 +251,189 @@ class SubjectHistoryBuilder:
         )
         summary = {
             "schema": "subject_history.v1",
+            "direct_observation_version": self.DIRECT_OBSERVATION_VERSION,
             "generated_at": local_now(generated_at_epoch),
             "generated_at_epoch": generated_at_epoch,
             "log_dir": self.log_dir,
             "state_path": self.state_path,
             "device_history_state_path": self.device_history_state_path,
+            "direct_state_path": self.direct_state_path,
             "window": window_metadata(None),
             "materialized_window": window_metadata(None),
             "files_read": sum(
                 count_jsonl_files(self.log_dir, collector)
-                for collector in self.COLLECTORS
+                for collector in self.active_collectors()
             ),
             "records_read": sum(raw_records.values()),
             "incremental_records_read": sum(incremental_records.values()),
             "raw_records_read": raw_records,
             "incremental_records_read_by_collector": incremental_records,
+            "incremental_jsonl_read_stats": self.merge_incremental_read_stats(
+                device_history_summary.get("incremental_jsonl_read_stats"),
+                direct_read_stats,
+            ),
             "raw_log_files": {
                 collector: count_jsonl_files(self.log_dir, collector)
-                for collector in self.COLLECTORS
+                for collector in self.active_collectors()
             },
             "checkpoint": self.merge_jsonl_checkpoints(
                 device_history_summary.get("checkpoint"), direct_checkpoint
             ),
-            "direct_observations": direct_observations,
-            "wifi": copy.deepcopy(
-                device_history_summary.get("wifi")
-                or {"access_points": [], "clients": []}
-            ),
-            "ble": copy.deepcopy(
-                device_history_summary.get("ble") or {"devices": []}
-            ),
-            "bluetooth": copy.deepcopy(
-                device_history_summary.get("bluetooth")
-                or device_history_summary.get("ble")
-                or {"devices": []}
-            ),
+            "direct_observation_state_path": self.direct_state_path,
+            "device_history_embedded": False,
             "aprsis": aprsis_events,
             "rayhunter": rayhunter_events,
             "rtlsdr": rtlsdr_events,
+            "rtl433": rtl433_events,
+            "adsb": adsb_events,
             "noaa": noaa_events,
             "usgs": usgs_events,
             "swpc": swpc_events,
             "pws": pws_events,
             "lan": lan_events,
         }
-        summary["subjects"] = self.build_subject_records(summary)
+        subject_input = dict(summary)
+        subject_input["wifi"] = device_subject_summary.get("wifi") or {
+            "access_points": [],
+            "clients": [],
+        }
+        subject_input["ble"] = device_subject_summary.get("ble") or {"devices": []}
+        subject_input["bluetooth"] = (
+            device_subject_summary.get("bluetooth") or subject_input["ble"]
+        )
+        summary["subjects"] = self.build_subject_records(subject_input)
         summary["subject_counts"] = self.count_subjects(summary["subjects"])
+        self.save_direct_observation_state(
+            {
+                "aprsis": aprsis_events,
+                "rayhunter": rayhunter_events,
+                "rtlsdr": rtlsdr_events,
+                "rtl433": rtl433_events,
+                "adsb": adsb_events,
+                "noaa": noaa_events,
+                "usgs": usgs_events,
+                "swpc": swpc_events,
+                "pws": pws_events,
+                "lan": lan_events,
+                "lan_identify": [],
+            },
+            direct_checkpoint,
+            direct_records,
+            direct_incremental_records,
+            direct_read_stats,
+            generated_at_epoch,
+        )
         return summary
+
+
+    def build_or_keep_direct_history(
+        self, previous_summary, collector, builder, observations, window_days
+    ):
+        """Merge new direct observations into the compact retained history."""
+        previous_events = copy.deepcopy((previous_summary or {}).get(collector) or [])
+        if not self.collector_enabled(collector) and not observations:
+            return previous_events, 0
+        new_events, records_read = builder(observations, window_days)
+        if not observations:
+            return previous_events, 0
+        return self.merge_direct_compact_history(
+            collector, previous_events, new_events
+        ), records_read
+
+    def merge_direct_compact_history(self, collector, previous_events, new_events):
+        """Merge compact direct summary rows without replaying old raw events."""
+        merged = {}
+        for event in (previous_events or []) + (new_events or []):
+            if not isinstance(event, dict):
+                continue
+            key = self.direct_compact_event_key(collector, event)
+            if not key:
+                continue
+            old = merged.get(key)
+            if old is None or (event_time_epoch(event) or 0) >= (event_time_epoch(old) or 0):
+                merged[key] = copy.deepcopy(event)
+        return sorted(
+            merged.values(),
+            key=lambda item: event_time_epoch(item) or 0,
+            reverse=True,
+        )
+
+    def direct_compact_event_key(self, collector, event):
+        """Return a stable key for one compact direct summary row."""
+        event_type = event.get("type") or ""
+        data = event.get("data") or {}
+        if collector == "aprsis":
+            return (
+                event_type,
+                data.get("callsign") or data.get("station") or data.get("feed_name") or "aprsis",
+                data.get("period_kind") or "",
+                data.get("period_key") or "",
+            )
+        if collector == "rayhunter":
+            return (event_type, clean_rayhunter_field(data.get("endpoint")) or "rayhunter")
+        if collector == "rtlsdr":
+            return (event_type, str(data.get("frequency_mhz") or data.get("collector_state") or "rtlsdr"))
+        if collector == "rtl433":
+            return (
+                event_type,
+                data.get("subject_key")
+                or "|".join(
+                    str(data.get(key) or "")
+                    for key in ("model", "id", "channel", "protocol")
+                )
+                or "rtl433",
+            )
+        if collector == "adsb":
+            return (
+                event_type,
+                data.get("icao")
+                or data.get("icao24")
+                or data.get("hex")
+                or data.get("address")
+                or data.get("flight")
+                or "adsb",
+            )
+        if collector == "noaa":
+            return (event_type, stable_noaa_event_key(data, event_type))
+        if collector == "usgs":
+            return (event_type, data.get("event_id") or "usgs")
+        if collector == "swpc":
+            return (
+                event_type,
+                data.get("event_id")
+                or data.get("event_key")
+                or data.get("message_id")
+                or data.get("product_id")
+                or data.get("event")
+                or data.get("summary")
+                or "swpc",
+                data.get("period_kind") or "",
+                data.get("period_key") or "",
+            )
+        if collector == "pws":
+            return (
+                event_type,
+                data.get("station_id") or data.get("station_name") or "pws",
+                data.get("period_kind") or "",
+                data.get("period_key") or "",
+            )
+        if collector == "lan":
+            return (
+                event_type,
+                data.get("subject_key")
+                or data.get("mac")
+                or data.get("gateway_ip")
+                or data.get("ip")
+                or "lan",
+            )
+        return (event_type, str(data.get("subject_key") or data.get("id") or collector))
 
     def raw_records_by_collector(self, device_history_summary, direct_records):
         """Return collector record counts using the best available source."""
         counts = {}
         source = (device_history_summary or {}).get("raw_records_read") or {}
         for collector in self.DEVICE_COLLECTORS:
-            counts[collector] = int(source.get(collector) or 0)
+            counts[collector] = int(source.get(collector) or 0) if self.collector_enabled(collector) else 0
         for collector, value in direct_records.items():
             counts[collector] = int(value or 0)
         return counts
@@ -216,10 +448,51 @@ class SubjectHistoryBuilder:
             or {}
         )
         for collector in self.DEVICE_COLLECTORS:
-            counts[collector] = int(source.get(collector) or 0)
+            counts[collector] = int(source.get(collector) or 0) if self.collector_enabled(collector) else 0
         for collector, value in direct_records.items():
             counts[collector] = int(value or 0)
         return counts
+
+    def merge_incremental_read_stats(self, *stats_items):
+        """Merge per-collector incremental JSONL reader stats."""
+        merged = {}
+        for stats in stats_items:
+            if not isinstance(stats, dict):
+                continue
+            for collector, values in stats.items():
+                if not isinstance(values, dict):
+                    continue
+                target = merged.setdefault(
+                    collector,
+                    {
+                        "pending_bytes": 0,
+                        "bytes_read": 0,
+                        "raw_lines": 0,
+                        "decoded_records": 0,
+                        "invalid_lines": 0,
+                        "files": 0,
+                        "max_line_bytes": 0,
+                        "event_types": {},
+                    },
+                )
+                for key in (
+                    "pending_bytes",
+                    "bytes_read",
+                    "raw_lines",
+                    "decoded_records",
+                    "invalid_lines",
+                    "files",
+                ):
+                    target[key] += int(values.get(key) or 0)
+                target["max_line_bytes"] = max(
+                    int(target.get("max_line_bytes") or 0),
+                    int(values.get("max_line_bytes") or 0),
+                )
+                event_types = target.setdefault("event_types", {})
+                for event_type, count in (values.get("event_types") or {}).items():
+                    event_types[event_type] = int(event_types.get(event_type) or 0) + int(count or 0)
+        return merged
+
 
     def merge_jsonl_checkpoints(self, *checkpoints):
         """Merge device and direct collector offsets into one Subject checkpoint."""
@@ -229,7 +502,7 @@ class SubjectHistoryBuilder:
                 continue
             for collector, files in (checkpoint.get("collectors") or {}).items():
                 merged["collectors"][collector] = copy.deepcopy(files or {})
-        for collector in self.COLLECTORS:
+        for collector in self.active_collectors():
             merged["collectors"].setdefault(collector, {})
         return merged
 
@@ -247,6 +520,8 @@ class SubjectHistoryBuilder:
                 "aprsis",
                 "rayhunter",
                 "rtlsdr",
+                "rtl433",
+                "adsb",
                 "noaa",
                 "usgs",
                 "swpc",
@@ -257,44 +532,31 @@ class SubjectHistoryBuilder:
                 "direct_observations",
             )
         }
+        device_summary = self.read_json_file(self.device_history_state_path) or {}
         device_display = DeviceHistoryBuilder(
             self.log_dir,
             state_path=self.device_history_state_path,
             window_days=window_days,
-        ).display_summary(summary, window_days)
+        ).display_summary(device_summary, window_days)
         output["wifi"] = device_display.get("wifi") or {
             "access_points": [],
             "clients": [],
         }
         output["ble"] = device_display.get("ble") or {"devices": []}
         output["bluetooth"] = device_display.get("bluetooth") or output["ble"]
-        direct_observations = summary.get("direct_observations") or {}
-        output["aprsis"], _ = self.build_aprsis_history(
-            direct_observations.get("aprsis") or [], window_days
-        )
-        output["rayhunter"], _ = self.build_rayhunter_history(
-            direct_observations.get("rayhunter") or [], window_days
-        )
-        output["rtlsdr"], _ = self.build_rtlsdr_history(
-            direct_observations.get("rtlsdr") or [], window_days
-        )
-        output["noaa"], _ = self.build_noaa_history(
-            direct_observations.get("noaa") or [], window_days
-        )
-        output["usgs"], _ = self.build_usgs_history(
-            direct_observations.get("usgs") or [], window_days
-        )
-        output["swpc"], _ = self.build_swpc_history(
-            direct_observations.get("swpc") or [], window_days
-        )
-        output["pws"], _ = self.build_pws_history(
-            direct_observations.get("pws") or [], window_days
-        )
-        output["lan"], _ = self.build_lan_history(
-            (direct_observations.get("lan") or [])
-            + (direct_observations.get("lan_identify") or []),
-            window_days,
-        )
+        for collector in (
+            "aprsis",
+            "rayhunter",
+            "rtlsdr",
+            "rtl433",
+            "adsb",
+            "noaa",
+            "usgs",
+            "swpc",
+            "pws",
+            "lan",
+        ):
+            output[collector] = copy.deepcopy((summary or {}).get(collector) or [])
         output["subjects"] = self.build_subject_records(output)
         output["subject_counts"] = self.count_subjects(output["subjects"])
         output["window"] = window_metadata(window_days)
@@ -308,6 +570,70 @@ class SubjectHistoryBuilder:
         """Persist the subject-history summary."""
         save_json_atomic(self.state_path, summary)
 
+    def save_direct_observation_state(
+        self,
+        histories,
+        checkpoint,
+        total_records,
+        incremental_records,
+        read_stats,
+        generated_at_epoch,
+    ):
+        """Persist compact direct histories as one file per collector."""
+        state_files = {}
+        for collector in self.DIRECT_COLLECTORS:
+            path = self.collector_direct_state_path(collector)
+            state_files[collector] = path
+            history = histories.get(collector) or []
+            collector_state = {
+                "schema": "subject_history_direct_collector_state.v2",
+                "collector": collector,
+                "direct_observation_version": self.DIRECT_OBSERVATION_VERSION,
+                "generated_at": local_now(generated_at_epoch),
+                "generated_at_epoch": generated_at_epoch,
+                "log_dir": self.log_dir,
+                "state_path": path,
+                "checkpoint": {
+                    "collectors": {
+                        collector: copy.deepcopy(
+                            ((checkpoint or {}).get("collectors") or {}).get(collector)
+                            or {}
+                        )
+                    }
+                },
+                "history": history,
+                "history_records": len(history),
+                "records_read": int((total_records or {}).get(collector) or 0),
+                "incremental_records_read": int(
+                    (incremental_records or {}).get(collector) or 0
+                ),
+                "incremental_jsonl_read_stats": (read_stats or {}).get(collector)
+                or {},
+            }
+            save_json_atomic(path, collector_state)
+        state = {
+            "schema": "subject_history_direct_state.v3",
+            "direct_observation_version": self.DIRECT_OBSERVATION_VERSION,
+            "generated_at": local_now(generated_at_epoch),
+            "generated_at_epoch": generated_at_epoch,
+            "log_dir": self.log_dir,
+            "state_path": self.direct_state_path,
+            "checkpoint": checkpoint,
+            "state_files": state_files,
+            "records_read": total_records,
+            "incremental_records_read_by_collector": incremental_records,
+            "incremental_jsonl_read_stats": read_stats,
+            "retains_compact_history": True,
+        }
+        save_json_atomic(self.direct_state_path, state)
+
+    def collector_direct_state_path(self, collector):
+        """Return the per-collector retained direct state path."""
+        directory = os.path.dirname(self.direct_state_path)
+        return os.path.join(
+            directory, "subject_history_direct_{}.json".format(collector)
+        )
+
     def load_persisted_summary(self):
         """Load persisted subject history if present."""
         try:
@@ -319,37 +645,50 @@ class SubjectHistoryBuilder:
             return None
 
     def build_direct_observations(self):
-        """Fold direct collectors incrementally into compact retained events."""
-        previous = self.load_persisted_summary()
-        previous_observations = (
-            previous.get("direct_observations")
-            if isinstance(previous, dict)
-            else None
-        )
+        """Read only new direct raw events since the compact-state checkpoint."""
+        previous = self.load_direct_observation_state()
         use_previous = (
-            isinstance(previous_observations, dict)
-            and has_jsonl_checkpoint(previous)
+            isinstance(previous, dict)
+            and previous.get("direct_observation_version")
+            == self.DIRECT_OBSERVATION_VERSION
         )
-        observations = self.normalized_direct_observations(
-            previous_observations if use_previous else {}
-        )
+        observations = {collector: [] for collector in self.DIRECT_COLLECTORS}
         checkpoint = (
             copy.deepcopy(previous.get("checkpoint") or empty_jsonl_checkpoint())
             if use_previous
             else empty_jsonl_checkpoint()
         )
+        previous_records = (previous.get("records_read") or {}) if use_previous else {}
+        previous_direct_state = previous if use_previous else {}
+        self.recover_empty_enabled_direct_checkpoints(
+            checkpoint, previous_records, previous_direct_state
+        )
+        self.recover_newer_direct_events_after_advanced_checkpoint(
+            checkpoint, previous_direct_state
+        )
+        disabled_with_pending = self.disabled_direct_collectors_with_pending_events(
+            checkpoint
+        )
         incremental_records = defaultdict(int)
-        for collector in self.DIRECT_COLLECTORS:
+        read_stats = {}
+        collectors_to_read = tuple(
+            dict.fromkeys(self.active_direct_collectors() + tuple(disabled_with_pending))
+        )
+        for collector in collectors_to_read:
             for event in read_incremental_jsonl_events(
-                self.log_dir, collector, checkpoint
+                self.log_dir, collector, checkpoint, read_stats=read_stats
             ):
                 observation = self.direct_observation_from_event(collector, event)
                 if observation is None:
                     continue
                 observations[collector].append(observation)
                 incremental_records[collector] += 1
+        self.advance_disabled_direct_checkpoints(
+            checkpoint, preserve_collectors=disabled_with_pending
+        )
         total_records = {
-            collector: len(observations.get(collector) or [])
+            collector: int((previous_records or {}).get(collector) or 0)
+            + int(incremental_records.get(collector) or 0)
             for collector in self.DIRECT_COLLECTORS
         }
         return (
@@ -360,7 +699,189 @@ class SubjectHistoryBuilder:
                 collector: int(incremental_records.get(collector) or 0)
                 for collector in self.DIRECT_COLLECTORS
             },
+            read_stats,
         )
+
+
+    def advance_disabled_direct_checkpoints(self, checkpoint, preserve_collectors=None):
+        """Advance disabled direct collectors without replaying old raw logs."""
+        if self.enabled_collectors is None:
+            return
+        preserve_collectors = set(preserve_collectors or ())
+        current = current_jsonl_checkpoint(self.log_dir, self.DIRECT_COLLECTORS)
+        current_collectors = current.get("collectors") or {}
+        checkpoint.setdefault("collectors", {})
+        for collector in self.DIRECT_COLLECTORS:
+            if self.collector_enabled(collector) or collector in preserve_collectors:
+                continue
+            checkpoint["collectors"][collector] = copy.deepcopy(
+                current_collectors.get(collector) or {}
+            )
+
+    def disabled_direct_collectors_with_pending_events(self, checkpoint):
+        """Return disabled direct collectors with new durable events pending."""
+        if self.enabled_collectors is None:
+            return set()
+        pending = set()
+        for collector in self.DIRECT_COLLECTORS:
+            if self.collector_enabled(collector):
+                continue
+            if self.direct_collector_has_pending_supported_event(collector, checkpoint):
+                pending.add(collector)
+        return pending
+
+    def direct_collector_has_pending_supported_event(self, collector, checkpoint):
+        """Return True when checkpoint-pending bytes contain durable events."""
+        probe_checkpoint = copy.deepcopy(checkpoint or empty_jsonl_checkpoint())
+        for event in read_incremental_jsonl_events(
+            self.log_dir, collector, probe_checkpoint
+        ):
+            if self.direct_observation_from_event(collector, event) is not None:
+                return True
+        return False
+
+    def recover_empty_enabled_direct_checkpoints(self, checkpoint, previous_records, previous):
+        """Re-read today's raw file when an enabled direct collector has no retained state.
+
+        Disabled direct collectors intentionally advance checkpoints so old logs are
+        not replayed when the collector is enabled later. If a collector writes raw
+        events while its retained state still says zero records, keep recovery
+        bounded to the newest daily file so today's observations are not lost.
+        """
+        if self.enabled_collectors is None:
+            return
+        checkpoint.setdefault("collectors", {})
+        for collector in self.active_direct_collectors():
+            if int((previous_records or {}).get(collector) or 0) > 0:
+                continue
+            if (previous or {}).get(collector):
+                continue
+            files = checkpoint["collectors"].get(collector) or {}
+            if not files:
+                continue
+            latest = sorted(files)[-1]
+            state = files.get(latest) or {}
+            if int(state.get("offset") or 0) <= 0:
+                continue
+            path = os.path.join(self.log_dir, collector, latest)
+            if not self.direct_log_file_has_supported_event(collector, path):
+                continue
+            repaired = dict(state)
+            repaired["offset"] = 0
+            files[latest] = repaired
+            checkpoint["collectors"][collector] = files
+
+    def direct_log_file_has_supported_event(self, collector, path):
+        """Return True when one JSONL file contains durable direct events."""
+        try:
+            import json
+
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if self.direct_observation_from_event(collector, event) is not None:
+                        return True
+        except OSError:
+            return False
+        return False
+
+    def recover_newer_direct_events_after_advanced_checkpoint(self, checkpoint, previous):
+        """Re-read the newest file when retained rows lag already-checkpointed data."""
+        if not isinstance(previous, dict):
+            return
+        checkpoint.setdefault("collectors", {})
+        for collector in self.DIRECT_COLLECTORS:
+            previous_events = previous.get(collector) or []
+            if not previous_events:
+                continue
+            files = checkpoint["collectors"].get(collector) or {}
+            if not files:
+                continue
+            latest = sorted(files)[-1]
+            state = files.get(latest) or {}
+            if int(state.get("offset") or 0) <= 0:
+                continue
+            path = os.path.join(self.log_dir, collector, latest)
+            try:
+                if os.path.getsize(path) > int(state.get("offset") or 0):
+                    continue
+            except OSError:
+                continue
+            latest_epoch = self.latest_supported_direct_event_epoch(collector, path)
+            previous_epoch = max(
+                (event_time_epoch(event) or 0) for event in previous_events
+            )
+            if latest_epoch is None or latest_epoch <= previous_epoch:
+                continue
+            repaired = dict(state)
+            repaired["offset"] = 0
+            files[latest] = repaired
+            checkpoint["collectors"][collector] = files
+
+    def latest_supported_direct_event_epoch(self, collector, path):
+        """Return the newest durable direct-event epoch in one JSONL file."""
+        latest = None
+        try:
+            import json
+
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    observation = self.direct_observation_from_event(collector, event)
+                    if observation is None:
+                        continue
+                    epoch = event_time_epoch(observation)
+                    if epoch is None:
+                        continue
+                    latest = epoch if latest is None else max(latest, epoch)
+        except OSError:
+            return None
+        return latest
+
+    def load_direct_observation_state(self):
+        """Load direct-state metadata, migrating old retained-observation files."""
+        state = self.read_json_file(self.direct_state_path)
+        if isinstance(state, dict):
+            state = copy.deepcopy(state)
+            records = dict(state.get("records_read") or {})
+            for collector in self.DIRECT_COLLECTORS:
+                collector_state = self.read_json_file(
+                    self.collector_direct_state_path(collector)
+                )
+                if not isinstance(collector_state, dict):
+                    continue
+                if collector not in records:
+                    records[collector] = int(collector_state.get("records_read") or 0)
+            state["records_read"] = records
+            return state
+        previous = self.load_persisted_summary()
+        if isinstance(previous, dict) and previous.get("checkpoint"):
+            return {
+                "direct_observation_version": previous.get("direct_observation_version"),
+                "checkpoint": previous.get("checkpoint"),
+                "records_read": previous.get("raw_records_read") or {},
+            }
+        return None
+
+    def read_json_file(self, path):
+        """Read one JSON object, returning None when absent or invalid."""
+        try:
+            import json
+
+            with open(path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
 
     def normalized_direct_observations(self, source):
         """Return durable direct observations in the current event shape."""
@@ -368,6 +889,11 @@ class SubjectHistoryBuilder:
         if not isinstance(source, dict):
             return observations
         for collector in self.DIRECT_COLLECTORS:
+            if collector == "adsb":
+                observations[collector] = self.compact_adsb_observations(
+                    source.get(collector) or []
+                )
+                continue
             for event in source.get(collector) or []:
                 observation = self.direct_observation_from_event(collector, event)
                 if observation is not None:
@@ -399,66 +925,11 @@ class SubjectHistoryBuilder:
 
     def supported_direct_event_type(self, collector, event_type):
         """Return True for direct collector events that feed Subject History."""
-        if collector == "aprsis":
-            return event_type in (
-                "collector_online",
-                "collector_offline",
-                "collector_retrying",
-            ) or event_type.startswith("aprs_")
-        if collector == "rayhunter":
-            return event_type in (
-                "rayhunter_status",
-                "collector_offline",
-                "collector_retrying",
-            )
-        if collector == "rtlsdr":
-            return event_type in (
-                "scanner_started",
-                "baseline_ready",
-                "signal_detected",
-                "signal_lost",
-                "collector_offline",
-                "collector_retrying",
-            )
-        if collector == "noaa":
-            return event_type in (
-                "noaa_weather_alert",
-                "noaa_tropical_advisory",
-                "noaa_forecast_summary",
-                "noaa_tsunami_alert",
-                "collector_offline",
-                "collector_retrying",
-            )
-        if collector == "usgs":
-            return event_type in (
-                "usgs_earthquake",
-                "collector_offline",
-                "collector_retrying",
-            )
-        if collector == "swpc":
-            return event_type in (
-                "swpc_event",
-                "collector_offline",
-                "collector_retrying",
-            )
-        if collector == "pws":
-            return event_type in (
-                "pws_weather",
-                "collector_offline",
-                "collector_retrying",
-            )
-        if collector == "lan":
-            return event_type in (
-                "lan_device_seen",
-                "lan_device_changed",
-                "lan_gateway_seen",
-                "lan_gateway_changed",
-                "collector_offline",
-                "collector_retrying",
-            )
-        if collector == "lan_identify":
-            return event_type in ("identify_result",)
-        return False
+        contract = self.subject_history_event_contract.get(collector) or {}
+        text = str(event_type or "")
+        return text in (contract.get("types") or ()) or any(
+            text.startswith(prefix) for prefix in (contract.get("prefixes") or ())
+        )
 
     def clean_direct_data(self, collector, data):
         """Scrub direct collector payloads before they become durable history."""
@@ -468,6 +939,10 @@ class SubjectHistoryBuilder:
             return clean_rayhunter_data(data)
         if collector == "rtlsdr":
             return self.clean_rtlsdr_data(data)
+        if collector == "rtl433":
+            return clean_rtl433_data(data)
+        if collector == "adsb":
+            return clean_adsb_data(data)
         if collector == "noaa":
             return clean_noaa_data(data)
         if collector == "usgs":
@@ -1049,6 +1524,26 @@ class SubjectHistoryBuilder:
         self.update_pws_rain_episode_totals(record, data.get("rain_1h_in"), epoch)
         self.update_max_numeric(record, "luminosity_max_w_m2", data.get("luminosity_w_m2"))
 
+    def limit_period_summaries(self, records, weekly=4, monthly=12):
+        """Limit rolling period summaries while keeping all yearly rows."""
+        grouped = defaultdict(list)
+        for record in records or []:
+            grouped[record.get("period_kind") or ""].append(record)
+        output = []
+        for kind, items in grouped.items():
+            sorted_items = sorted(
+                items,
+                key=lambda item: item.get("period_start_epoch") or 0,
+                reverse=True,
+            )
+            if kind == "weekly":
+                output.extend(sorted_items[:weekly])
+            elif kind == "monthly":
+                output.extend(sorted_items[:monthly])
+            else:
+                output.extend(sorted_items)
+        return output
+
     def build_aprsis_weather_period_summaries(self, daily_records):
         """Roll APRS daily weather summaries into weekly/monthly/yearly rows."""
         periods = {}
@@ -1066,7 +1561,9 @@ class SubjectHistoryBuilder:
                     ),
                 )
                 self.update_aprsis_weather_period_from_day(record, day)
-        return [self.finalize_pws_period_record(record) for record in periods.values()]
+        return self.limit_period_summaries(
+            [self.finalize_pws_period_record(record) for record in periods.values()]
+        )
 
     def update_aprsis_weather_period_from_day(self, record, day):
         """Fold one APRS weather daily aggregate into a longer period."""
@@ -1271,6 +1768,337 @@ class SubjectHistoryBuilder:
             )
         return output, records_read
 
+    def build_rtl433_history(self, observations, window_days):
+        """Return compact per-device rtl_433 decoded-subject summaries."""
+        subjects = {}
+        latest_health = None
+        latest_health_epoch = None
+        records_read = 0
+        for event in observations or []:
+            if not event_in_window(event, window_days):
+                continue
+            event_type = event.get("type") or ""
+            epoch = event_time_epoch(event)
+            if epoch is None:
+                continue
+            records_read += 1
+            data = clean_rtl433_data(event.get("data") or {})
+            if event_type in ("collector_online", "collector_offline", "collector_retrying", "scanner_started"):
+                latest_health = {
+                    "collector_state": "ONLINE"
+                    if event_type in ("collector_online", "scanner_started")
+                    else ("OFFLINE" if event_type == "collector_offline" else "RETRYING"),
+                    "frequency_plan": data.get("frequency_plan") or "",
+                    "frequency_summary": data.get("frequency_summary") or "",
+                    "reason": data.get("reason") or "",
+                    "last_seen": local_now(epoch),
+                    "last_seen_epoch": epoch,
+                }
+                latest_health_epoch = epoch
+                if event_type != "rtl433_event":
+                    continue
+            if event_type != "rtl433_event":
+                continue
+            key = data.get("subject_key") or data.get("model") or data.get("id") or "unknown"
+            record = subjects.setdefault(
+                key,
+                {
+                    "subject_key": key,
+                    "model": data.get("model") or "",
+                    "id": data.get("id") or "",
+                    "channel": data.get("channel") or "",
+                    "protocol": data.get("protocol"),
+                    "category": data.get("category") or "device",
+                    "first_seen": local_now(epoch),
+                    "first_seen_epoch": epoch,
+                    "last_seen": local_now(epoch),
+                    "last_seen_epoch": epoch,
+                    "event_count": 0,
+                    "burst_count": 0,
+                    "sample_times": [],
+                    "sample_fields": [],
+                    "frequencies_mhz": [],
+                },
+            )
+            record["event_count"] += 1
+            if epoch < record.get("first_seen_epoch", epoch):
+                record["first_seen_epoch"] = epoch
+                record["first_seen"] = local_now(epoch)
+            previous_last = record.get("last_seen_epoch") or 0
+            if previous_last and epoch - previous_last <= 120:
+                record["burst_count"] = int(record.get("burst_count") or 0) + 1
+            if epoch >= previous_last:
+                record["last_seen_epoch"] = epoch
+                record["last_seen"] = local_now(epoch)
+                for field in ("model", "id", "channel", "category"):
+                    if data.get(field):
+                        record[field] = data.get(field)
+                record["protocol"] = data.get("protocol", record.get("protocol"))
+                record["latest_raw"] = data.get("raw") or {}
+                record["latest_frequency_mhz"] = data.get("frequency_mhz")
+                record["latest_tuned_frequency_mhz"] = data.get("tuned_frequency_mhz") or data.get("frequency_mhz")
+                record["latest_rssi_db"] = data.get("rssi_db")
+                record["latest_snr_db"] = data.get("snr_db")
+                record["latest_noise_db"] = data.get("noise_db")
+            self.sample_direct_value(record, "sample_times", local_now(epoch), 12)
+            frequency = data.get("frequency_mhz")
+            if frequency not in (None, ""):
+                self.sample_direct_value(record, "frequencies_mhz", frequency, 12)
+            raw = data.get("raw") or {}
+            if raw:
+                self.sample_direct_value(record, "sample_fields", raw, 6)
+        output = [
+            {
+                "collector": "rtl433",
+                "type": "rtl433_subject_summary",
+                "timestamp": record.get("last_seen"),
+                "timestamp_epoch": record.get("last_seen_epoch"),
+                "severity": "warning"
+                if record.get("category") in ("tpms", "security")
+                else "info",
+                "data": record,
+            }
+            for record in sorted(
+                subjects.values(),
+                key=lambda item: item.get("last_seen_epoch") or 0,
+                reverse=True,
+            )
+        ]
+        if latest_health and not output:
+            output.append(
+                {
+                    "collector": "rtl433",
+                    "type": "rtl433_collector_summary",
+                    "timestamp": local_now(latest_health_epoch),
+                    "timestamp_epoch": latest_health_epoch,
+                    "severity": "warning"
+                    if latest_health.get("collector_state") != "ONLINE"
+                    else "info",
+                    "data": latest_health,
+                }
+            )
+        return output, records_read
+
+    def compact_adsb_observations(self, observations):
+        """Fold retained ADS-B observations into one summary per aircraft."""
+        aircraft = {}
+        latest_health = None
+        latest_health_epoch = None
+        for event in observations or []:
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("type") or ""
+            epoch = event_time_epoch(event)
+            if epoch is None:
+                continue
+            data = clean_adsb_data(event.get("data") or {})
+            if event_type == "adsb_aircraft_summary":
+                icao = data.get("icao")
+                if not icao:
+                    continue
+                record = aircraft.setdefault(icao, {})
+                record.update(data)
+                record.setdefault("icao", icao)
+                continue
+            if event_type == "adsb_collector_summary":
+                if latest_health_epoch is None or epoch >= latest_health_epoch:
+                    latest_health = copy.deepcopy(event)
+                    latest_health_epoch = epoch
+                continue
+            if event_type in ("collector_online", "collector_offline", "collector_retrying"):
+                if latest_health_epoch is None or epoch >= latest_health_epoch:
+                    latest_health = {
+                        "collector": "adsb",
+                        "type": "adsb_collector_summary",
+                        "timestamp": local_now(epoch),
+                        "timestamp_epoch": epoch,
+                        "severity": "warning"
+                        if event_type != "collector_online"
+                        else "info",
+                        "data": {
+                            "collector_state": "ONLINE"
+                            if event_type == "collector_online"
+                            else (
+                                "OFFLINE"
+                                if event_type == "collector_offline"
+                                else "RETRYING"
+                            ),
+                            "source": data.get("source") or "",
+                            "reason": data.get("reason") or "",
+                            "last_seen": local_now(epoch),
+                            "last_seen_epoch": epoch,
+                        },
+                    }
+                    latest_health_epoch = epoch
+                continue
+            if event_type != "adsb_aircraft":
+                continue
+            icao = data.get("icao")
+            if not icao:
+                continue
+            record = aircraft.setdefault(
+                icao,
+                {
+                    "icao": icao,
+                    "first_seen": local_now(epoch),
+                    "first_seen_epoch": epoch,
+                    "last_seen": local_now(epoch),
+                    "last_seen_epoch": epoch,
+                    "seen_count": 0,
+                    "position_count": 0,
+                    "sample_callsigns": [],
+                    "sample_squawks": [],
+                    "emergency": False,
+                },
+            )
+            self.update_adsb_summary(record, data, epoch)
+        output = [
+            {
+                "collector": "adsb",
+                "type": "adsb_aircraft_summary",
+                "timestamp": record.get("last_seen"),
+                "timestamp_epoch": record.get("last_seen_epoch"),
+                "severity": "warning" if record.get("emergency") else "info",
+                "data": clean_adsb_data(record),
+            }
+            for record in sorted(
+                aircraft.values(),
+                key=lambda item: item.get("last_seen_epoch") or 0,
+                reverse=True,
+            )
+        ]
+        if latest_health and not output:
+            output.append(latest_health)
+        return output
+
+    def update_adsb_summary(self, record, data, epoch):
+        """Fold one ADS-B aircraft event into a compact aircraft summary."""
+        if epoch < record.get("first_seen_epoch", epoch):
+            record["first_seen_epoch"] = epoch
+            record["first_seen"] = local_now(epoch)
+        if epoch >= record.get("last_seen_epoch", 0):
+            record["last_seen_epoch"] = epoch
+            record["last_seen"] = local_now(epoch)
+            for key in (
+                "callsign",
+                "airline_icao",
+                "category",
+                "position_source",
+                "air_ground",
+                "cpr_type",
+                "squawk",
+                "lat",
+                "lon",
+                "altitude_ft",
+                "altitude_baro_ft",
+                "altitude_geom_ft",
+                "ground_speed_kt",
+                "track_deg",
+                "vertical_rate_fpm",
+                "distance_km",
+                "rssi_dbfs",
+                "source",
+            ):
+                if data.get(key) not in (None, ""):
+                    record[key] = data.get(key)
+        record["seen_count"] = int(record.get("seen_count") or 0) + 1
+        if data.get("lat") is not None and data.get("lon") is not None:
+            record["position_count"] = int(record.get("position_count") or 0) + 1
+            self.update_adsb_path(record, data.get("lat"), data.get("lon"))
+        self.update_min_max_numeric(
+            record, "min_altitude_ft", "max_altitude_ft", data.get("altitude_ft")
+        )
+        self.update_max_numeric(record, "max_ground_speed_kt", data.get("ground_speed_kt"))
+        self.update_min_numeric(record, "min_distance_km", data.get("distance_km"))
+        self.aprsis_sample(record, "sample_callsigns", data.get("callsign"), limit=6)
+        self.aprsis_sample(record, "sample_squawks", data.get("squawk"), limit=6)
+        if data.get("emergency"):
+            record["emergency"] = True
+
+    def build_adsb_history(self, observations, window_days):
+        """Return compact per-aircraft ADS-B summaries for this view window."""
+        aircraft = {}
+        latest_health = None
+        latest_health_epoch = None
+        records_read = 0
+        for event in self.compact_adsb_observations(observations or []):
+            if not event_in_window(event, window_days):
+                continue
+            event_type = event.get("type") or ""
+            epoch = event_time_epoch(event)
+            if epoch is None:
+                continue
+            records_read += 1
+            data = clean_adsb_data(event.get("data") or {})
+            if event_type == "adsb_collector_summary":
+                latest_health = data
+                latest_health_epoch = epoch
+                continue
+            if event_type != "adsb_aircraft_summary":
+                continue
+            icao = data.get("icao")
+            if not icao:
+                continue
+            aircraft[icao] = data
+        output = [
+            {
+                "collector": "adsb",
+                "type": "adsb_aircraft_summary",
+                "timestamp": record.get("last_seen"),
+                "timestamp_epoch": record.get("last_seen_epoch"),
+                "severity": "warning" if record.get("emergency") else "info",
+                "data": clean_adsb_data(record),
+            }
+            for record in sorted(
+                aircraft.values(),
+                key=lambda item: item.get("last_seen_epoch") or 0,
+                reverse=True,
+            )
+        ]
+        if latest_health and not output:
+            output.append(
+                {
+                    "collector": "adsb",
+                    "type": "adsb_collector_summary",
+                    "timestamp": local_now(latest_health_epoch),
+                    "timestamp_epoch": latest_health_epoch,
+                    "severity": "warning"
+                    if latest_health.get("collector_state") != "ONLINE"
+                    else "info",
+                    "data": latest_health,
+                }
+            )
+        return output, records_read
+
+    def update_adsb_path(self, record, lat, lon):
+        """Update first/latest position and path span for an aircraft."""
+        latitude = self.safe_float(lat)
+        longitude = self.safe_float(lon)
+        if latitude is None or longitude is None:
+            return
+        if record.get("_first_position") is None:
+            record["_first_position"] = [latitude, longitude]
+            record["first_lat"] = latitude
+            record["first_lon"] = longitude
+        previous = record.get("_latest_position")
+        record["_latest_position"] = [latitude, longitude]
+        record["lat"] = latitude
+        record["lon"] = longitude
+        first = record.get("_first_position")
+        if first:
+            span = distance_km(first[0], first[1], latitude, longitude)
+            if span is not None:
+                record["path_span_km"] = span
+
+    def update_min_numeric(self, record, key, value):
+        """Update a minimum numeric field when a collector reports a number."""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return
+        old = record.get(key)
+        record[key] = number if old is None else min(float(old), number)
+
     def build_noaa_history(self, observations, window_days):
         """Return compact per-alert NOAA summaries for this view window."""
         alerts = {}
@@ -1387,8 +2215,10 @@ class SubjectHistoryBuilder:
                 "data": clean_noaa_data(record),
             }
             for record in sorted(
-                self.add_noaa_period_comparisons(
-                    self.build_noaa_period_summaries(alerts.values())
+                self.limit_period_summaries(
+                    self.add_noaa_period_comparisons(
+                        self.build_noaa_period_summaries(alerts.values())
+                    )
                 ),
                 key=lambda item: (
                     {"monthly": 0, "yearly": 1}.get(item.get("period_kind"), 9),
@@ -1613,7 +2443,9 @@ class SubjectHistoryBuilder:
                 "data": clean_usgs_data(record),
             }
             for record in sorted(
-                self.build_usgs_period_summaries(earthquakes.values()),
+                self.limit_period_summaries(
+                    self.build_usgs_period_summaries(earthquakes.values())
+                ),
                 key=lambda item: (
                     {"weekly": 0, "monthly": 1, "yearly": 2}.get(
                         item.get("period_kind"), 9
@@ -1790,7 +2622,9 @@ class SubjectHistoryBuilder:
                 "data": clean_swpc_data(record),
             }
             for record in sorted(
-                self.build_swpc_period_summaries(events.values()),
+                self.limit_period_summaries(
+                    self.build_swpc_period_summaries(events.values())
+                ),
                 key=lambda item: (
                     {"weekly": 0, "monthly": 1, "yearly": 2}.get(
                         item.get("period_kind"), 9
@@ -1990,7 +2824,9 @@ class SubjectHistoryBuilder:
                 item.get("period_start_epoch") or 0,
             ),
         )
-        period_records = self.build_pws_period_summaries(daily_records)
+        period_records = self.limit_period_summaries(
+            self.build_pws_period_summaries(daily_records)
+        )
         output = [
             {
                 "collector": "pws",
@@ -2818,6 +3654,8 @@ class SubjectHistoryBuilder:
         self.add_aprsis_subjects(subjects, (summary or {}).get("aprsis") or [])
         self.add_rayhunter_subjects(subjects, (summary or {}).get("rayhunter") or [])
         self.add_rtlsdr_subjects(subjects, (summary or {}).get("rtlsdr") or [])
+        self.add_rtl433_subjects(subjects, (summary or {}).get("rtl433") or [])
+        self.add_adsb_subjects(subjects, (summary or {}).get("adsb") or [])
         self.add_noaa_subjects(subjects, (summary or {}).get("noaa") or [])
         self.add_usgs_subjects(subjects, (summary or {}).get("usgs") or [])
         self.add_swpc_subjects(subjects, (summary or {}).get("swpc") or [])
@@ -2832,6 +3670,82 @@ class SubjectHistoryBuilder:
             reverse=True,
         )
         return subjects
+
+    def grouped_subject_time_source(self, records):
+        """Return first/last fields spanning a grouped low-identity subject."""
+        first = min(
+            records,
+            key=lambda item: record_time_epoch(item, "first_seen") or float("inf"),
+            default={},
+        )
+        last = max(
+            records,
+            key=lambda item: record_time_epoch(item, "last_seen") or 0,
+            default={},
+        )
+        return {
+            "first_seen": first.get("first_seen"),
+            "first_seen_epoch": record_time_epoch(first, "first_seen"),
+            "last_seen": last.get("last_seen"),
+            "last_seen_epoch": record_time_epoch(last, "last_seen"),
+        }
+
+    def grouped_sample_macs(self, records, limit=12):
+        """Return a bounded MAC sample from aggregate or individual records."""
+        sample = []
+        for record in records or []:
+            values = record.get("sample_macs") or [record.get("mac")]
+            if not isinstance(values, list):
+                values = [values]
+            for mac in values:
+                if mac and mac not in sample:
+                    sample.append(mac)
+                if len(sample) >= limit:
+                    return sample
+        return sample
+
+    def grouped_record_count(self, records):
+        """Return represented identity count for grouped/individual records."""
+        total = 0
+        for record in records or []:
+            try:
+                total += max(1, int(record.get("randomized_group_count") or record.get("device_count") or 1))
+            except (TypeError, ValueError):
+                total += 1
+        return total
+
+    def grouped_list_values(self, records, key, limit=32):
+        """Merge list/scalar evidence from grouped records."""
+        values = []
+        for record in records or []:
+            source = record.get(key)
+            if not isinstance(source, list):
+                source = [source]
+            for value in source:
+                if value in (None, "", [], {}):
+                    continue
+                if value not in values:
+                    values.append(value)
+                if len(values) >= limit:
+                    return values
+        return values
+
+    def grouped_sum(self, records, *keys):
+        """Return the sum of integer counters across grouped records."""
+        total = 0
+        for record in records or []:
+            for key in keys:
+                total += int(record.get(key) or 0)
+        return total
+
+    def grouped_signal_value(self, records, key, reducer):
+        """Return a grouped signal min/max value."""
+        values = [
+            record.get(key)
+            for record in records or []
+            if isinstance(record.get(key), (int, float))
+        ]
+        return reducer(values) if values else None
 
     def add_wifi_subjects(self, subjects, wifi):
         """Add SSID, BSSID, and client MAC subjects."""
@@ -2891,7 +3805,32 @@ class SubjectHistoryBuilder:
                     },
                 )
             )
+        randomized_clients = [client for client in clients if low_identity_wifi_client(client)]
+        if randomized_clients:
+            subjects.append(
+                self.subject_record(
+                    "wifi",
+                    "wifi_client_group",
+                    "randomized:wifi_clients",
+                    "{} found".format(wifi_client_group_label()),
+                    self.grouped_subject_time_source(randomized_clients),
+                    {
+                        "grouped_randomized": True,
+                        "randomized_group_count": self.grouped_record_count(randomized_clients),
+                        "sample_macs": self.grouped_sample_macs(randomized_clients),
+                        "ssids": self.grouped_list_values(randomized_clients, "ssids", 50),
+                        "probe_count": self.grouped_sum(randomized_clients, "probe_count"),
+                        "association_count": self.grouped_sum(randomized_clients, "association_count"),
+                        "deauth_count": self.grouped_sum(randomized_clients, "deauth_count"),
+                        "disassoc_count": self.grouped_sum(randomized_clients, "disassoc_count"),
+                        "signal_min": self.grouped_signal_value(randomized_clients, "signal_min", min),
+                        "signal_max": self.grouped_signal_value(randomized_clients, "signal_max", max),
+                    },
+                )
+            )
         for client in clients:
+            if low_identity_wifi_client(client):
+                continue
             subjects.append(
                 self.subject_record(
                     "wifi",
@@ -2910,9 +3849,24 @@ class SubjectHistoryBuilder:
 
     def add_bluetooth_subjects(self, subjects, bluetooth):
         """Add Bluetooth identity subjects keyed by MAC."""
+        grouped = defaultdict(list)
+        individual_devices = []
         for device in (bluetooth or {}).get("devices") or []:
             if not isinstance(device, dict):
                 continue
+            if device.get("grouped_randomized") or bluetooth_grouping_candidate(device):
+                grouped[bluetooth_identity_bucket(device)].append(device)
+            else:
+                individual_devices.append(device)
+        for devices in list(grouped.values()):
+            if self.grouped_record_count(devices) <= 1:
+                individual_devices.extend(devices)
+        grouped = {
+            bucket: devices
+            for bucket, devices in grouped.items()
+            if self.grouped_record_count(devices) > 1
+        }
+        for device in individual_devices:
             mac = device.get("mac") or "unknown"
             names = [
                 str(name).strip()
@@ -2933,6 +3887,33 @@ class SubjectHistoryBuilder:
                         "seen_count": device.get("seen_count") or 0,
                         "transports": device.get("transports") or [],
                         "signal_max": device.get("signal_max"),
+                    },
+                )
+            )
+        for bucket, devices in sorted(grouped.items(), key=lambda item: item[0]):
+            exemplar = devices[0] if devices else {}
+            label = bluetooth_group_label(exemplar)
+            subject_id = "randomized:{}:{}".format(bucket[0], bucket[1].lower())
+            subjects.append(
+                self.subject_record(
+                    "bluetooth",
+                    "bluetooth_device_group",
+                    subject_id,
+                    "{} found".format(label),
+                    self.grouped_subject_time_source(devices),
+                    {
+                        "grouped_randomized": True,
+                        "randomized_group_count": self.grouped_record_count(devices),
+                        "identity_bucket": bucket[0],
+                        "identity_label": bucket[1],
+                        "sample_macs": self.grouped_sample_macs(devices),
+                        "service_uuids": self.grouped_list_values(devices, "service_uuids", 32),
+                        "seen_count": self.grouped_sum(devices, "seen_count"),
+                        "update_count": self.grouped_sum(devices, "update_count"),
+                        "lost_count": self.grouped_sum(devices, "lost_count"),
+                        "session_count": self.grouped_sum(devices, "session_count"),
+                        "signal_min": self.grouped_signal_value(devices, "signal_min", min),
+                        "signal_max": self.grouped_signal_value(devices, "signal_max", max),
                     },
                 )
             )
@@ -3125,6 +4106,75 @@ class SubjectHistoryBuilder:
                         "signal_count": data.get("signal_count") or 0,
                         "active": bool(data.get("active")),
                     },
+                )
+            )
+
+    def add_rtl433_subjects(self, subjects, events):
+        """Add rtl_433 decoded device subjects."""
+        for event in events:
+            data = clean_rtl433_data((event or {}).get("data") or {})
+            if (event or {}).get("type") == "rtl433_collector_summary":
+                subject_id = "rtl433"
+                subject = "RTL-433 collector"
+                subject_type = "rtl433_collector"
+            else:
+                subject_id = data.get("subject_key") or data.get("model") or "unknown"
+                label = " ".join(
+                    part
+                    for part in (
+                        data.get("model") or "",
+                        data.get("id") or "",
+                        data.get("channel") or "",
+                    )
+                    if part not in (None, "")
+                ).strip()
+                subject = label or subject_id
+                subject_type = "rtl433_device"
+            subjects.append(
+                self.subject_record(
+                    "rtl433",
+                    subject_type,
+                    str(subject_id),
+                    subject,
+                    {
+                        "first_seen": data.get("first_seen") or event.get("timestamp"),
+                        "first_seen_epoch": data.get("first_seen_epoch")
+                        or event.get("timestamp_epoch"),
+                        "last_seen": data.get("last_seen") or event.get("timestamp"),
+                        "last_seen_epoch": data.get("last_seen_epoch")
+                        or event.get("timestamp_epoch"),
+                    },
+                    data,
+                )
+            )
+
+    def add_adsb_subjects(self, subjects, events):
+        """Add ADS-B aircraft subjects."""
+        for event in events:
+            data = clean_adsb_data((event or {}).get("data") or {})
+            if (event or {}).get("type") == "adsb_collector_summary":
+                subject_id = "adsb"
+                subject = "ADS-B collector"
+                subject_type = "adsb_collector"
+            else:
+                subject_id = data.get("icao") or "unknown"
+                subject = "{} {}".format(data.get("callsign") or "", subject_id).strip()
+                subject_type = "adsb_aircraft"
+            subjects.append(
+                self.subject_record(
+                    "adsb",
+                    subject_type,
+                    subject_id,
+                    subject,
+                    {
+                        "first_seen": data.get("first_seen") or event.get("timestamp"),
+                        "first_seen_epoch": data.get("first_seen_epoch")
+                        or event.get("timestamp_epoch"),
+                        "last_seen": data.get("last_seen") or event.get("timestamp"),
+                        "last_seen_epoch": data.get("last_seen_epoch")
+                        or event.get("timestamp_epoch"),
+                    },
+                    data,
                 )
             )
 
@@ -3493,9 +4543,18 @@ class SubjectHistoryBuilder:
 
     def add_lan_subjects(self, subjects, events):
         """Add LAN device and gateway subjects."""
+        grouped_lan = []
         for event in events:
             data = clean_lan_data((event or {}).get("data") or {})
             event_type = (event or {}).get("type") or ""
+            if event_type in ("lan_device_summary", "lan_device_seen", "lan_device_changed") and low_identity_lan_record(data):
+                grouped = dict(data)
+                grouped.setdefault("first_seen", data.get("first_seen") or event.get("timestamp"))
+                grouped.setdefault("first_seen_epoch", data.get("first_seen_epoch") or event.get("timestamp_epoch"))
+                grouped.setdefault("last_seen", data.get("last_seen") or event.get("timestamp"))
+                grouped.setdefault("last_seen_epoch", data.get("last_seen_epoch") or event.get("timestamp_epoch"))
+                grouped_lan.append(grouped)
+                continue
             if event_type == "lan_collector_summary":
                 subject_id = "lan"
                 subject = "LAN collector"
@@ -3571,10 +4630,36 @@ class SubjectHistoryBuilder:
                     },
                 )
             )
+        if grouped_lan:
+            subjects.append(
+                self.subject_record(
+                    "lan",
+                    "lan_device_group",
+                    "randomized:lan_private_macs",
+                    "{} found".format(lan_group_label()),
+                    self.grouped_subject_time_source(grouped_lan),
+                    {
+                        "grouped_randomized": True,
+                        "randomized_group_count": len(grouped_lan),
+                        "sample_macs": self.grouped_sample_macs(grouped_lan),
+                        "ips": self.grouped_list_values(grouped_lan, "ips", 32),
+                        "sources": self.grouped_list_values(grouped_lan, "sources", 16),
+                        "interfaces": self.grouped_list_values(grouped_lan, "interfaces", 16),
+                        "observation_count": self.grouped_sum(grouped_lan, "observation_count"),
+                        "identify_count": self.grouped_sum(grouped_lan, "identify_count"),
+                        "change_count": self.grouped_sum(grouped_lan, "change_count"),
+                    },
+                )
+            )
 
     def subject_record(self, collector, subject_type, subject_id, subject, time_source, data):
         """Return one normalized subject-history row."""
-        return {
+        clean_data = {
+            key: value
+            for key, value in (data or {}).items()
+            if value not in (None, "", [], {})
+        }
+        record = {
             "collector": collector,
             "subject_type": subject_type,
             "subject_id": str(subject_id or ""),
@@ -3585,12 +4670,17 @@ class SubjectHistoryBuilder:
             "last_seen": (time_source or {}).get("last_seen"),
             "last_seen_epoch": record_time_epoch(time_source or {}, "last_seen")
             or timestamp_epoch((time_source or {}).get("last_seen_epoch")),
-            "data": {
-                key: value
-                for key, value in (data or {}).items()
-                if value not in (None, "", [], {})
-            },
+            "data": clean_data,
         }
+        annotation = clean_data.get("annotation") or (time_source or {}).get("annotation")
+        custom_name = clean_data.get("custom_name") or (time_source or {}).get("custom_name")
+        if isinstance(annotation, dict) and annotation.get("custom_name"):
+            record["annotation"] = annotation
+            record["custom_name"] = annotation.get("custom_name")
+        elif custom_name:
+            record["annotation"] = {"custom_name": custom_name}
+            record["custom_name"] = custom_name
+        return record
 
     def count_subjects(self, subjects):
         """Return compact subject counts by collector and type."""

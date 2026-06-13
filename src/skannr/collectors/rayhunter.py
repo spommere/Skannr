@@ -116,6 +116,7 @@ class RayhunterCollector(BaseCollector):
     name = "Rayhunter"
     tab_label = "Rayhunter"
     required_hardware = "Rayhunter HTTP endpoint"
+    subject_history_event_types = ("rayhunter_status", "collector_offline", "collector_retrying")
 
     @classmethod
     def hardware_status(cls, config):

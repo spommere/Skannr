@@ -27,6 +27,14 @@ from .log_utils import (
     timestamp_epoch,
     window_metadata,
 )
+from .identity_policy import (
+    bluetooth_group_label,
+    bluetooth_identity_bucket,
+    bluetooth_manufacturer_label,
+    bluetooth_grouping_candidate,
+    low_identity_bluetooth_record,
+    low_identity_wifi_client,
+)
 from .oui_lookup import normalize_oui, vendor_name, vendor_prefix
 
 
@@ -36,6 +44,8 @@ class DeviceHistoryBuilder:
     COLLECTORS = ("wifi", "wifi_monitor", "ble", "ble_identify", "bt_classic")
     WIFI_AP_SESSION_GAP_SEC = 300
     BLE_STALE_SINGLE_SEEN_PRUNE_SEC = 3600
+    GROUP_SAMPLE_MAC_LIMIT = 12
+    GROUP_SAMPLE_VALUE_LIMIT = 50
 
     def __init__(self, log_dir, state_path=None, window_days=None):
         self.log_dir = log_dir
@@ -144,18 +154,23 @@ class DeviceHistoryBuilder:
             "raw_records_read": dict(records_by_collector),
             "wifi": {
                 "access_points": self.sorted_records(wifi_aps.values()),
-                "clients": self.sorted_records(wifi_clients.values()),
+                "clients": self.compact_wifi_clients_for_storage(
+                    self.sorted_records(wifi_clients.values())
+                ),
             },
             "ble": {
-                "devices": self.sorted_records(ble_devices.values()),
+                "devices": self.compact_bluetooth_devices_for_storage(
+                    self.sorted_records(ble_devices.values())
+                ),
             },
             "bluetooth": {
-                "devices": self.sorted_records(ble_devices.values()),
+                "devices": [],
             },
             "checkpoint": current_jsonl_checkpoint(
                 self.log_dir, self.COLLECTORS
             ),
         }
+        summary["bluetooth"] = {"devices": summary["ble"]["devices"]}
         return summary
 
     def incremental_update(self, previous):
@@ -186,41 +201,47 @@ class DeviceHistoryBuilder:
         )
         records_by_collector = defaultdict(int)
         records_read = 0
+        read_stats = {}
         checkpoint = summary.get("checkpoint") or current_jsonl_checkpoint(
             self.log_dir, ()
         )
 
         for event in read_incremental_jsonl_events(
-            self.log_dir, "wifi", checkpoint
+            self.log_dir, "wifi", checkpoint, read_stats=read_stats
         ):
             records_read += 1
             records_by_collector["wifi"] += 1
             self.apply_wifi_event(event, wifi_aps, wifi_clients)
         for event in read_incremental_jsonl_events(
-            self.log_dir, "wifi_monitor", checkpoint
+            self.log_dir, "wifi_monitor", checkpoint, read_stats=read_stats
         ):
             records_read += 1
             records_by_collector["wifi_monitor"] += 1
             self.apply_wifi_event(event, wifi_aps, wifi_clients)
         for event in read_incremental_jsonl_events(
-            self.log_dir, "ble", checkpoint
+            self.log_dir, "ble", checkpoint, read_stats=read_stats
         ):
             records_read += 1
             records_by_collector["ble"] += 1
             self.apply_ble_event(event, ble_devices)
         for event in read_incremental_jsonl_events(
-            self.log_dir, "ble_identify", checkpoint
+            self.log_dir, "ble_identify", checkpoint, read_stats=read_stats
         ):
             records_read += 1
             records_by_collector["ble_identify"] += 1
             self.apply_ble_identify_event(event, ble_devices)
         for event in read_incremental_jsonl_events(
-            self.log_dir, "bt_classic", checkpoint
+            self.log_dir, "bt_classic", checkpoint, read_stats=read_stats
         ):
             records_read += 1
             records_by_collector["bt_classic"] += 1
             self.apply_bt_classic_event(event, ble_devices)
-        bluetooth_devices = self.sorted_records(ble_devices.values())
+        bluetooth_devices = self.compact_bluetooth_devices_for_storage(
+            self.sorted_records(ble_devices.values())
+        )
+        wifi_clients_compact = self.compact_wifi_clients_for_storage(
+            self.sorted_records(wifi_clients.values())
+        )
         files_by_collector = {
             collector: count_jsonl_files(self.log_dir, collector)
             for collector in self.COLLECTORS
@@ -242,11 +263,12 @@ class DeviceHistoryBuilder:
                 "incremental_records_read_by_collector": dict(
                     records_by_collector
                 ),
+                "incremental_jsonl_read_stats": read_stats,
                 "checkpoint": checkpoint,
                 "cached": False,
                 "wifi": {
                     "access_points": self.sorted_records(wifi_aps.values()),
-                    "clients": self.sorted_records(wifi_clients.values()),
+                    "clients": wifi_clients_compact,
                 },
                 "ble": {
                     "devices": bluetooth_devices,
@@ -678,6 +700,254 @@ class DeviceHistoryBuilder:
             (self.serialize_value(item) for item in values),
             key=lambda item: (type(item).__name__, str(item)),
         )
+
+    def compact_wifi_clients_for_storage(self, records):
+        """Fold low-identity randomized Wi-Fi clients before persistence."""
+        kept = []
+        group = None
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            if self.keep_individual_wifi_client(record):
+                kept.append(record)
+                continue
+            group = self.update_wifi_client_storage_group(group, record)
+        if group:
+            kept.append(group)
+        return sorted(
+            kept,
+            key=lambda item: record_time_epoch(item, "last_seen") or 0,
+            reverse=True,
+        )
+
+    def keep_individual_wifi_client(self, record):
+        """Return True when a Wi-Fi client should stay as a durable row."""
+        if not low_identity_wifi_client(record):
+            return True
+        if int(record.get("finding_count") or 0) > 0:
+            return True
+        return False
+
+    def update_wifi_client_storage_group(self, group, record):
+        """Fold one randomized Wi-Fi client record into the persisted group."""
+        if group is None:
+            group = {
+                "mac": "randomized:wifi_clients",
+                "grouped_randomized": True,
+                "randomized_mac": True,
+                "identity_bucket": "randomized",
+                "identity_label": "Wi-Fi client MAC",
+                "randomized_group_count": 0,
+                "device_count": 0,
+                "sample_macs": [],
+                "ssids": [],
+                "sources": [],
+                "first_seen": record.get("first_seen"),
+                "first_seen_epoch": record.get("first_seen_epoch"),
+                "last_seen": record.get("last_seen"),
+                "last_seen_epoch": record.get("last_seen_epoch"),
+                "signal_latest": record.get("signal_latest"),
+                "signal_min": record.get("signal_min"),
+                "signal_max": record.get("signal_max"),
+                "probe_count": 0,
+                "blank_ssid_count": 0,
+                "association_count": 0,
+                "deauth_count": 0,
+                "disassoc_count": 0,
+                "finding_count": 0,
+            }
+        count = self.group_record_count(record)
+        group["randomized_group_count"] = int(group.get("randomized_group_count") or 0) + count
+        group["device_count"] = int(group.get("device_count") or 0) + count
+        self.merge_group_samples(group, record, "sample_macs", record.get("sample_macs") or [record.get("mac")], self.GROUP_SAMPLE_MAC_LIMIT)
+        self.merge_group_samples(group, record, "ssids", record.get("ssids") or [], self.GROUP_SAMPLE_VALUE_LIMIT)
+        self.merge_group_samples(group, record, "sources", record.get("sources") or [], 12)
+        self.increment_group_counts(
+            group,
+            record,
+            (
+                "probe_count",
+                "blank_ssid_count",
+                "association_count",
+                "deauth_count",
+                "disassoc_count",
+                "finding_count",
+            ),
+        )
+        self.update_storage_group_time_bounds(group, record)
+        self.update_storage_group_signal_bounds(group, record)
+        return group
+
+    def compact_bluetooth_devices_for_storage(self, records):
+        """Fold multi-MAC low-identity BLE privacy churn before persistence."""
+        kept = []
+        candidates = defaultdict(list)
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            if self.keep_individual_bluetooth_device(record):
+                kept.append(record)
+                continue
+            if bluetooth_grouping_candidate(record):
+                bucket = bluetooth_identity_bucket(record)
+                if bucket[0] == "name" and not record.get("grouped_randomized"):
+                    kept.append(record)
+                else:
+                    candidates[self.bluetooth_storage_group_key(record)].append(record)
+            else:
+                kept.append(record)
+        for candidate_records in candidates.values():
+            represented = sum(self.group_record_count(record) for record in candidate_records)
+            if represented <= 1:
+                kept.extend(candidate_records)
+                continue
+            group = None
+            for record in candidate_records:
+                group = self.update_bluetooth_storage_group(group, record)
+            kept.append(group)
+        return sorted(
+            kept,
+            key=lambda item: record_time_epoch(item, "last_seen") or 0,
+            reverse=True,
+        )
+
+    def keep_individual_bluetooth_device(self, record):
+        """Return True when a Bluetooth row has enough identity to keep."""
+        if record.get("grouped_randomized"):
+            return False
+        if int(record.get("finding_count") or 0) > 0:
+            return True
+        return not low_identity_bluetooth_record(record)
+
+    def bluetooth_storage_group_key(self, record):
+        """Return the persisted low-identity Bluetooth aggregate key."""
+        bucket = bluetooth_identity_bucket(record)
+        return "{}:{}".format(bucket[0], bucket[1].lower())
+
+    def update_bluetooth_storage_group(self, group, record):
+        """Fold one low-identity Bluetooth record into a persisted group."""
+        bucket = bluetooth_identity_bucket(record)
+        if group is None:
+            group = {
+                "mac": "randomized:{}:{}".format(bucket[0], bucket[1].lower()),
+                "grouped_randomized": True,
+                "randomized_mac": True,
+                "identity_bucket": bucket[0],
+                "identity_label": bucket[1],
+                "name": bluetooth_group_label(record),
+                "manufacturer": bluetooth_manufacturer_label(record),
+                "findmy_accessory": bool(record.get("findmy_accessory")),
+                "transports": [],
+                "sample_macs": [],
+                "service_uuids": [],
+                "names": [],
+                "first_seen": record.get("first_seen"),
+                "first_seen_epoch": record.get("first_seen_epoch"),
+                "last_seen": record.get("last_seen"),
+                "last_seen_epoch": record.get("last_seen_epoch"),
+                "signal_latest": record.get("signal_latest"),
+                "signal_min": record.get("signal_min"),
+                "signal_max": record.get("signal_max"),
+                "seen_count": 0,
+                "update_count": 0,
+                "lost_count": 0,
+                "identify_count": 0,
+                "classic_seen_count": 0,
+                "classic_update_count": 0,
+                "classic_lost_count": 0,
+                "finding_count": 0,
+                "session_count": 0,
+                "active_session": False,
+                "randomized_group_count": 0,
+                "device_count": 0,
+            }
+        count = self.group_record_count(record)
+        group["randomized_group_count"] = int(group.get("randomized_group_count") or 0) + count
+        group["device_count"] = int(group.get("device_count") or 0) + count
+        self.increment_group_counts(
+            group,
+            record,
+            (
+                "seen_count",
+                "update_count",
+                "lost_count",
+                "identify_count",
+                "classic_seen_count",
+                "classic_update_count",
+                "classic_lost_count",
+                "finding_count",
+            ),
+        )
+        group["session_count"] = int(group.get("session_count") or 0) + self.record_session_count(record)
+        group["active_session"] = bool(group.get("active_session")) or bool(record.get("active_session"))
+        self.merge_group_samples(group, record, "sample_macs", record.get("sample_macs") or [record.get("mac")], self.GROUP_SAMPLE_MAC_LIMIT)
+        self.merge_group_samples(group, record, "service_uuids", record.get("service_uuids") or [], 32)
+        self.merge_group_samples(group, record, "names", record.get("names") or [], 12)
+        self.merge_group_samples(group, record, "transports", record.get("transports") or [], 8)
+        if record.get("findmy_accessory"):
+            group["findmy_accessory"] = True
+        if record.get("manufacturer") and not group.get("manufacturer"):
+            group["manufacturer"] = record.get("manufacturer")
+        self.update_storage_group_time_bounds(group, record)
+        self.update_storage_group_signal_bounds(group, record)
+        return group
+
+    def group_record_count(self, record):
+        """Return represented identity count for an individual or aggregate row."""
+        try:
+            return max(1, int(record.get("randomized_group_count") or record.get("device_count") or 1))
+        except (TypeError, ValueError):
+            return 1
+
+    def record_session_count(self, record):
+        """Return compact session count without retaining session bodies."""
+        if record.get("session_count") is not None:
+            try:
+                return int(record.get("session_count") or 0)
+            except (TypeError, ValueError):
+                return 0
+        sessions = record.get("sessions")
+        return len(sessions) if isinstance(sessions, list) else 0
+
+    def increment_group_counts(self, group, record, fields):
+        """Add numeric counters from one record to an aggregate row."""
+        for field in fields:
+            group[field] = int(group.get(field) or 0) + int(record.get(field) or 0)
+
+    def merge_group_samples(self, group, record, field, values, limit):
+        """Merge bounded sample evidence into an aggregate row."""
+        sample = group.setdefault(field, [])
+        source = values if isinstance(values, (list, tuple, set)) else [values]
+        for value in source:
+            if value in (None, "", [], {}):
+                continue
+            if value not in sample and len(sample) < limit:
+                sample.append(value)
+
+    def update_storage_group_time_bounds(self, group, record):
+        """Expand aggregate first/last timestamps from one folded record."""
+        first_epoch = record_time_epoch(record, "first_seen")
+        last_epoch = record_time_epoch(record, "last_seen")
+        group_first = record_time_epoch(group, "first_seen")
+        group_last = record_time_epoch(group, "last_seen")
+        if first_epoch and (not group_first or first_epoch < group_first):
+            group["first_seen_epoch"] = first_epoch
+            group["first_seen"] = record.get("first_seen")
+        if last_epoch and (not group_last or last_epoch >= group_last):
+            group["last_seen_epoch"] = last_epoch
+            group["last_seen"] = record.get("last_seen")
+            group["signal_latest"] = record.get("signal_latest")
+
+    def update_storage_group_signal_bounds(self, group, record):
+        """Expand aggregate signal range from one folded record."""
+        for field, reducer in (("signal_min", min), ("signal_max", max)):
+            values = [
+                value
+                for value in (group.get(field), record.get(field))
+                if isinstance(value, (int, float))
+            ]
+            if values:
+                group[field] = reducer(values)
 
     def load_persisted_summary(self):
         """Load the durable device-history file if it exists."""

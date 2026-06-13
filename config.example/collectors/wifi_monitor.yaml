@@ -11,9 +11,24 @@ validation_timeout_sec: 10
 interface: auto
 interfaces: []
 interface_regex: wlan|^mon
+# Leave false when monitor mode is managed by NetworkManager/systemd/manual host
+# setup. Set true only with a specific interface such as wlan1 when Skannr should
+# run nmcli/ip/iw setup before starting packet capture.
+#
+# prepare_monitor_mode does not convert interface: auto into a managed adapter.
+# auto only discovers adapters that are already in monitor mode. For Skannr to
+# prepare the adapter, set interface: wlan1 or interfaces: [wlan1].
+prepare_monitor_mode: false
+set_networkmanager_unmanaged: true
+monitor_setup_timeout_sec: 10
 bands:
 - '2.4'
 - '5'
+# channel_mode:
+# - hop: retune across the channel plan below
+# - fixed: stay on fixed_channel only
+channel_mode: hop
+fixed_channel:
 typical_channels_24:
 - 1
 - 6
@@ -29,6 +44,8 @@ typical_channels_5:
 - 161
 - 165
 include_seen_channels: false
+seen_channels_first: false
+common_channel_fallback: true
 dwell_sec: 1
 retry_interval_sec: 5
 retry_timeout_sec: 30

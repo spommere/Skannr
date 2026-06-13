@@ -31,6 +31,9 @@
     <button class="tab" data-tab="wifi_monitor">Wi-Fi Monitor <span class="tab-row-count" data-tab-count="wifi_monitor"></span><span class="tab-status-dots" data-status-tab="wifi_monitor"></span></button>
     <button class="tab" data-tab="bluetooth">Bluetooth <span class="tab-row-count" data-tab-count="bluetooth"></span><span class="tab-status-dots" data-status-tab="bluetooth"></span></button>
     <button class="tab" data-tab="rtlsdr">RTL-SDR <span class="tab-row-count" data-tab-count="rtlsdr"></span><span class="tab-status-dots" data-status-tab="rtlsdr"></span></button>
+    <button class="tab" data-tab="rtl433">RTL-433 <span class="tab-row-count" data-tab-count="rtl433"></span><span class="tab-status-dots" data-status-tab="rtl433"></span></button>
+    <button class="tab" data-tab="adsb">ADS-B <span class="tab-row-count" data-tab-count="adsb"></span><span class="tab-status-dots" data-status-tab="adsb"></span></button>
+    <button class="tab" data-tab="rayhunter">Rayhunter <span class="tab-row-count" data-tab-count="rayhunter"></span><span class="tab-status-dots" data-status-tab="rayhunter"></span></button>
     <button class="tab" data-tab="aprsis">APRS-IS <span class="tab-row-count" data-tab-count="aprsis"></span><span class="tab-status-dots" data-status-tab="aprsis"></span></button>
     <button class="tab" data-tab="noaa">NOAA <span class="tab-row-count" data-tab-count="noaa"></span><span class="tab-status-dots" data-status-tab="noaa"></span></button>
     <button class="tab" data-tab="usgs">USGS <span class="tab-row-count" data-tab-count="usgs"></span><span class="tab-status-dots" data-status-tab="usgs"></span></button>
@@ -123,7 +126,7 @@
       <div id="history-wifi-panel" class="subpanel history-source-panel" data-source="wifi">
         <h3>Wi-Fi Access Points</h3>
         <table>
-          <thead><tr><th>SSID</th><th>BSSID</th><th>Vendor</th><th>First Seen</th><th>Last Seen</th><th>Channels / Freq</th><th>Encryption</th><th>Signal</th><th>Seen</th><th>Insights</th></tr></thead>
+          <thead><tr><th>Subject</th><th>Identity</th><th>Vendor</th><th>First Seen</th><th>Last Seen</th><th>Channels / Freq</th><th>Encryption</th><th>Signal</th><th>Seen</th><th>Action</th></tr></thead>
           <tbody id="history-wifi-aps"></tbody>
         </table>
       </div>
@@ -133,14 +136,14 @@
         <div id="history-wifi-monitor-empty" class="status-strip muted"></div>
         <h3>Wi-Fi Clients</h3>
         <table>
-          <thead><tr><th>Client MAC</th><th>Vendor</th><th>Probed SSIDs</th><th>First Seen</th><th>Last Seen</th><th>Signal</th><th>Probes</th><th>Assoc</th><th>Deauth</th><th>Disassoc</th><th>Insights</th></tr></thead>
+          <thead><tr><th>Client MAC</th><th>Vendor</th><th>SSIDs</th><th>First Seen</th><th>Last Seen</th><th>Signal</th><th>Probe</th><th>Assoc</th><th>Deauth</th><th>Disassoc</th><th>Action</th></tr></thead>
           <tbody id="history-wifi-clients"></tbody>
         </table>
       </div>
       <div id="history-bluetooth-panel" class="subpanel history-source-panel" data-source="bluetooth">
         <h3>Bluetooth Devices</h3>
         <table>
-          <thead><tr><th>MAC</th><th>Transport</th><th>Identity</th><th>Services / UUIDs</th><th>Model</th><th>Serial</th><th>Firmware</th><th>PnP ID</th><th>First Seen</th><th>Last Seen</th><th>Signal</th><th>BLE Seen</th><th>BLE Updates</th><th>BLE Lost</th><th>Classic Seen</th><th>Sessions</th><th>Insights</th></tr></thead>
+          <thead><tr><th>MAC</th><th>Identity</th><th>Services / UUIDs</th><th>Model</th><th>Serial</th><th>Firmware</th><th>PnP ID</th><th>First Seen</th><th>Last Seen</th><th>Signal</th><th>BLE Seen</th><th>BLE Updates</th><th>BLE Lost</th><th>Classic Seen</th><th>Sessions</th><th>Action</th></tr></thead>
           <tbody id="history-bluetooth-devices"></tbody>
         </table>
       </div>
@@ -149,6 +152,20 @@
         <table>
           <thead><tr><th>Subject</th><th>Type</th><th>First Seen</th><th>Last Seen</th><th>Activity</th><th>Signal</th></tr></thead>
           <tbody id="history-rtlsdr-subjects"></tbody>
+        </table>
+      </div>
+      <div id="history-rtl433-panel" class="subpanel history-source-panel" data-source="rtl433">
+        <h3>RTL-433 Subjects</h3>
+        <table>
+          <thead><tr><th>Subject</th><th>Category</th><th>First Seen</th><th>Last Seen</th><th>Events</th><th>Frequency / Signal</th><th>Latest Fields</th></tr></thead>
+          <tbody id="history-rtl433-subjects"></tbody>
+        </table>
+      </div>
+      <div id="history-adsb-panel" class="subpanel history-source-panel" data-source="adsb">
+        <h3>ADS-B Subjects</h3>
+        <table>
+          <thead><tr><th>Aircraft</th><th>First Seen</th><th>Last Seen</th><th>Position</th><th>Altitude</th><th>Closest</th><th>Speed / Track</th><th>Updates</th></tr></thead>
+          <tbody id="history-adsb-subjects"></tbody>
         </table>
       </div>
       <div id="history-aprsis-panel" class="subpanel history-source-panel" data-source="aprsis">
@@ -196,7 +213,7 @@
       <div id="history-lan-panel" class="subpanel history-source-panel" data-source="lan">
         <h3>LAN Subjects</h3>
         <table>
-          <thead><tr><th>Subject</th><th>Type</th><th>First Seen</th><th>Last Seen</th><th>IP / MAC</th><th>Identity</th><th>Interface / State</th><th>Activity</th></tr></thead>
+          <thead><tr><th>Subject</th><th>Type</th><th>First Seen</th><th>Last Seen</th><th>IP / MAC</th><th>Identity</th><th>Interface / State</th><th>Activity</th><th>Action</th></tr></thead>
           <tbody id="history-lan-subjects"></tbody>
         </table>
       </div>
@@ -291,8 +308,8 @@
       </div>
       <div id="rtlsdr-banner" class="status-strip muted">Waiting for collector status</div>
       <div class="control-bar">
-        <label>Start MHz <input id="rtlsdr-start" type="number"></label>
-        <label>End MHz <input id="rtlsdr-end" type="number"></label>
+        <label>Start MHz <input id="rtlsdr-start" type="number" step="any"></label>
+        <label>End MHz <input id="rtlsdr-end" type="number" step="any"></label>
         <label>Step kHz <input id="rtlsdr-step" type="number"></label>
         <label>Gain <input id="rtlsdr-gain" type="text"></label>
         <label>Threshold dB <input id="rtlsdr-threshold" type="number"></label>
@@ -305,6 +322,67 @@
       </table>
       <h3>Signal Event Log</h3>
       <ul id="rtlsdr-events" class="event-list"></ul>
+    </section>
+
+    <section id="tab-adsb" class="panel">
+      <div class="panel-head">
+        <h2>ADS-B</h2>
+        <div id="adsb-status" class="badge">Waiting</div>
+      </div>
+      <div id="adsb-banner" class="status-strip muted">Waiting for collector status</div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="adsb-search" type="search" placeholder="ICAO, callsign, squawk">
+        </label>
+      </div>
+      <h3>Live ADS-B Aircraft</h3>
+      <table class="adsb-events-table">
+        <thead><tr><th>Last Seen</th><th>Aircraft</th><th>Squawk</th><th>Position</th><th>Altitude</th><th>State / Motion</th><th>Distance</th><th>Messages</th></tr></thead>
+        <tbody id="adsb-events"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-rtl433" class="panel">
+      <div class="panel-head">
+        <h2>RTL-433</h2>
+        <div id="rtl433-status" class="badge">Waiting</div>
+      </div>
+      <div id="rtl433-banner" class="status-strip muted">Waiting for collector status</div>
+      <div id="rtl433-frequency-state" class="status-strip muted">Waiting for current RTL-433 frequency</div>
+      <div class="control-bar">
+        <label>Frequency Plan (MHz)
+          <input id="rtl433-plan" type="text" placeholder="433.92:30,315:30,915-916:50:10">
+        </label>
+        <button id="rtl433-submit" class="action-button">Submit</button>
+      </div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="rtl433-search" type="search" placeholder="Model, ID, category, raw field">
+        </label>
+      </div>
+      <h3>Live RTL-433 Events</h3>
+      <table class="rtl433-events-table">
+        <thead><tr><th>Last Seen</th><th>Subject</th><th>Category</th><th>Events</th><th>Frequency / Signal</th><th>Details</th></tr></thead>
+        <tbody id="rtl433-events"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-rayhunter" class="panel">
+      <div class="panel-head">
+        <h2>Rayhunter</h2>
+        <div id="rayhunter-status" class="badge">Waiting</div>
+      </div>
+      <div id="rayhunter-banner" class="status-strip muted">Waiting for collector status</div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="rayhunter-search" type="search" placeholder="Endpoint, warning, recording">
+        </label>
+      </div>
+      <h3>Live Rayhunter Status</h3>
+      <table class="rayhunter-events-table">
+        <thead><tr><th>Last Seen</th><th>Endpoint</th><th>Warnings</th><th>Recording</th><th>Device</th><th>Summary</th></tr></thead>
+        <tbody id="rayhunter-events"></tbody>
+      </table>
     </section>
 
     <section id="tab-aprsis" class="panel">

@@ -509,6 +509,8 @@ class APRSISCollector(BaseCollector):
     name = "APRS-IS"
     tab_label = "APRS-IS"
     required_hardware = "Internet APRS-IS TCP feed"
+    subject_history_event_types = ("collector_online", "collector_offline", "collector_retrying")
+    subject_history_event_prefixes = ("aprs_",)
 
     @classmethod
     def hardware_status(cls, config):

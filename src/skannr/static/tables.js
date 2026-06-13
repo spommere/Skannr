@@ -89,6 +89,32 @@ const TABLE_SCHEMAS = {
     (item) => pwsPressureText(item),
     (item) => pwsSolarText(item)
   ],
+  adsbEvents: [
+    (item) => displayTimestamp(item, "last_seen"),
+    (item) => adsbSubjectLink(item),
+    (item) => item.squawk || "",
+    (item) => adsbPositionText(item),
+    (item) => adsbAltitudeText(item),
+    (item) => adsbStateMotionText(item),
+    (item) => adsbDistanceText(item),
+    (item) => item.messages || ""
+  ],
+  rtl433Events: [
+    (item) => displayTimestamp(item, "last_seen"),
+    (item) => rtl433SubjectLink(item),
+    (item) => rtl433CategoryText(item),
+    (item) => rtl433LiveActivityText(item),
+    (item) => rtl433SignalText(item),
+    (item) => rtl433DetailsText(item)
+  ],
+  rayhunterEvents: [
+    (item) => displayTimestamp(item, "last_seen"),
+    (item) => rayhunterSubjectLink(item),
+    (item) => rayhunterWarningText(item),
+    (item) => rayhunterRecordingText(item),
+    (item) => rayhunterDeviceText(item),
+    (item) => rayhunterSummaryText(item)
+  ],
   lanEvents: [
     (item) => item.last_seen || "",
     (item) => item.event_type || "",

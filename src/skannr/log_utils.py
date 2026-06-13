@@ -315,12 +315,27 @@ def current_jsonl_checkpoint(log_dir, collectors):
     return checkpoint
 
 
-def read_incremental_jsonl_events(log_dir, collector, checkpoint):
+def read_incremental_jsonl_events(log_dir, collector, checkpoint, read_stats=None):
     """Yield JSONL events added after the stored byte offsets."""
     directory = os.path.join(log_dir, collector)
     collector_state = checkpoint.setdefault("collectors", {}).setdefault(
         collector, {}
     )
+    stats = None
+    if read_stats is not None:
+        stats = read_stats.setdefault(
+            collector,
+            {
+                "pending_bytes": 0,
+                "bytes_read": 0,
+                "raw_lines": 0,
+                "decoded_records": 0,
+                "invalid_lines": 0,
+                "files": 0,
+                "max_line_bytes": 0,
+                "event_types": {},
+            },
+        )
     if not os.path.isdir(directory):
         return
     for filename in sorted(os.listdir(directory)):
@@ -337,16 +352,34 @@ def read_incremental_jsonl_events(log_dir, collector, checkpoint):
             # Log rotation or manual truncation can make a saved offset point
             # past EOF. Restart this file from byte 0 in that case.
             offset = 0
+        if stats is not None and size > offset:
+            stats["pending_bytes"] += size - offset
+            stats["files"] += 1
         try:
             with open(path, "rb") as fh:
                 fh.seek(offset)
                 for raw_line in fh:
+                    raw_size = len(raw_line)
+                    if stats is not None:
+                        stats["bytes_read"] += raw_size
+                        stats["raw_lines"] += 1
+                        stats["max_line_bytes"] = max(
+                            int(stats.get("max_line_bytes") or 0), raw_size
+                        )
                     try:
-                        yield json.loads(raw_line.decode("utf-8"))
+                        event = json.loads(raw_line.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
+                        if stats is not None:
+                            stats["invalid_lines"] += 1
                         # Keep moving if one raw line is corrupt or partially
                         # written. The next refresh will continue after EOF.
                         continue
+                    if stats is not None:
+                        stats["decoded_records"] += 1
+                        event_type = str(event.get("type") or event.get("event_type") or "unknown")
+                        event_types = stats.setdefault("event_types", {})
+                        event_types[event_type] = int(event_types.get(event_type) or 0) + 1
+                    yield event
                 offset = fh.tell()
         except OSError:
             continue

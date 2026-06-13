@@ -4,11 +4,13 @@ Each collector owns its hardware/tool behavior. This module only maps
 collector keys from YAML metadata to concrete Python classes.
 """
 
+from .adsb import ADSBCollector
 from .aprsis import APRSISCollector
 from .lan import LANCollector
 from .lan_identify import LANIdentifyCollector
 from .noaa import NOAACollector
 from .pws import PWSCollector
+from .rtl433 import RTL433Collector
 from .rtlsdr import RTLSDRCollector
 from .rayhunter import RayhunterCollector
 from .swpc import SWPCCollector
@@ -30,6 +32,8 @@ COLLECTOR_CLASS_BY_KEY = {
     "ble": BLECollector,
     "bt_classic": BluetoothClassicCollector,
     "rtlsdr": RTLSDRCollector,
+    "rtl433": RTL433Collector,
+    "adsb": ADSBCollector,
     "rayhunter": RayhunterCollector,
     "aprsis": APRSISCollector,
     "noaa": NOAACollector,
@@ -43,6 +47,29 @@ ACTION_CLASS_BY_KEY = {
     "ble_identify": BLEIdentifyCollector,
     "lan_identify": LANIdentifyCollector,
 }
+
+
+def subject_history_event_contract_by_key(include_actions=True):
+    """Return collector-owned Subject History event contracts by key."""
+    class_map = dict(COLLECTOR_CLASS_BY_KEY)
+    if include_actions:
+        class_map.update(ACTION_CLASS_BY_KEY)
+    contracts = {}
+    for key, cls in class_map.items():
+        event_types = tuple(getattr(cls, "subject_history_event_types", ()) or ())
+        event_prefixes = tuple(getattr(cls, "subject_history_event_prefixes", ()) or ())
+        if event_types or event_prefixes:
+            contracts[key] = {"types": event_types, "prefixes": event_prefixes}
+    return contracts
+
+
+def collector_supports_subject_history_event(key, event_type, include_actions=True):
+    """Return True when a registered collector owns this durable event type."""
+    class_map = dict(COLLECTOR_CLASS_BY_KEY)
+    if include_actions:
+        class_map.update(ACTION_CLASS_BY_KEY)
+    cls = class_map.get(key)
+    return bool(cls and cls.supports_subject_history_event(event_type))
 
 
 def load_collectors(config, bus):

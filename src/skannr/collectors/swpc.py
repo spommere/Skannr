@@ -119,6 +119,7 @@ class SWPCCollector(BaseCollector):
     name = "SWPC"
     tab_label = "SWPC"
     required_hardware = "Internet access"
+    subject_history_event_types = ("swpc_event", "collector_offline", "collector_retrying")
 
     @classmethod
     def hardware_status(cls, config):

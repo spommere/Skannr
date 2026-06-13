@@ -10,6 +10,9 @@ const rows = {
   usgs: [],
   swpc: [],
   pws: [],
+  adsb: [],
+  rtl433: [],
+  rayhunter: [],
   lan: [],
   lanIdentify: [],
   aps: new Map(),
@@ -24,6 +27,8 @@ let COLLECTOR_SUBTABS = [
   {value: "wifi_monitor", label: "Wi-Fi Monitor"},
   {value: "bluetooth", label: "Bluetooth"},
   {value: "rtlsdr", label: "RTL-SDR"},
+  {value: "rtl433", label: "RTL-433"},
+  {value: "adsb", label: "ADS-B"},
   {value: "rayhunter", label: "Rayhunter"},
   {value: "aprsis", label: "APRS-IS"},
   {value: "noaa", label: "NOAA"},
@@ -48,8 +53,10 @@ let activeSubtabs = {
 };
 let latestHistoryAnalysis = null;
 let latestReports = null;
+let activeReportColumnOptions = {showReasons: true};
 let activeWindow = "default";
 let findingsHistoryLoaded = false;
+let rtl433ScannerState = {};
 const DERIVED_OPERATION = {
   IDLE: "idle",
   LOADING: "loading",
@@ -341,6 +348,22 @@ const pwsSearch = document.getElementById("pws-search");
 if (pwsSearch) {
   pwsSearch.addEventListener("input", renderPwsTable);
 }
+const adsbSearch = document.getElementById("adsb-search");
+if (adsbSearch) {
+  adsbSearch.addEventListener("input", renderAdsbTable);
+}
+const rtl433Search = document.getElementById("rtl433-search");
+if (rtl433Search) {
+  rtl433Search.addEventListener("input", renderRtl433Table);
+}
+const rayhunterSearch = document.getElementById("rayhunter-search");
+if (rayhunterSearch) {
+  rayhunterSearch.addEventListener("input", renderRayhunterTable);
+}
+const rtl433SubmitButton = document.getElementById("rtl433-submit");
+if (rtl433SubmitButton) {
+  rtl433SubmitButton.addEventListener("click", () => controlCollector("rtl433", "start"));
+}
 const lanSearch = document.getElementById("lan-search");
 if (lanSearch) {
   lanSearch.addEventListener("input", renderLanTable);
@@ -353,6 +376,14 @@ const alertsAckAllButton = document.getElementById("alerts-ack-all");
 if (alertsAckAllButton) {
   alertsAckAllButton.addEventListener("click", ackAllAlerts);
 }
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button || button.disabled) return;
+  button.classList.remove("button-clicked");
+  void button.offsetWidth;
+  button.classList.add("button-clicked");
+  window.setTimeout(() => button.classList.remove("button-clicked"), 220);
+});
 const btClassicStartButton = document.getElementById("bt-classic-start");
 if (btClassicStartButton) {
   btClassicStartButton.addEventListener("click", () => controlCollector("bt_classic", "start"));
@@ -539,6 +570,9 @@ function handleEvent(event) {
   if (event.collector === "usgs") renderUsgsEvent(event);
   if (event.collector === "swpc") renderSwpcEvent(event);
   if (event.collector === "pws") renderPwsEvent(event);
+  if (event.collector === "adsb") renderAdsbEvent(event);
+  if (event.collector === "rtl433") renderRtl433Event(event);
+  if (event.collector === "rayhunter") renderRayhunterEvent(event);
   if (event.collector === "lan") renderLanEvent(event);
   if (event.collector === "lan_identify") renderLanIdentifyEvent(event);
   if (event.collector === "system" && event.type === "system_status") renderSystemStatus(event.data);
@@ -923,7 +957,6 @@ function renderReports(reportBundle) {
     latestReports = {};
   }
   rows.reports = sortReports(latestReports.reports || []);
-  renderReportsHeader();
   const maxRendered = uiNumber("max_rendered_findings");
   const needle = reportSearchNeedle();
   const visibleReports = [];
@@ -934,6 +967,14 @@ function renderReports(reportBundle) {
       if (!reportRowMatchesSearch(tr, needle)) return;
       visibleReports.push(report);
     });
+  activeReportColumnOptions = {
+    showReasons: !visibleReports.every((report) =>
+      String((report || {}).source || "").toLowerCase() === "wifi_monitor"
+    ) && visibleReports.some((report) =>
+      compactList((report || {}).reason_tags || [], 6)
+    )
+  };
+  renderReportsHeader();
   const patternReports = visibleReports.filter(reportIsCrossSubjectReport);
   const subjectReports = visibleReports.filter((report) => !reportIsCrossSubjectReport(report));
   const rendered = renderReportSection("pattern", patternReports, maxRendered, 0);
@@ -983,10 +1024,10 @@ function buildReportRow(report) {
     td.className = `report-col-${column.key}`;
     if (column.key === "evidence") {
       renderReportEvidenceCell(td, reportEvidenceItems(report));
+    } else if (column.key === "report") {
+      renderReportTitleCell(td, report);
     } else if (column.key === "subject") {
-      appendTableCellValue(td, reportSubjectCell(report, column.value));
-    } else if (column.key === "summary") {
-      appendMapLinkedText(td, column.value);
+      renderReportSubjectSummaryCell(td, report);
     } else {
       td.textContent = column.value;
     }
@@ -1037,17 +1078,48 @@ function reportColumns(report) {
   const columns = [
     {key: "score", label: "Score", value: report.score || 0}
   ];
-  if (showReportsSourceColumn()) columns.push({key: "source", label: "Source", value: sourceLabel(report.source)});
+  const reasonValue = compactList(report.reason_tags || [], 6);
   columns.push(
-    {key: "confidence", label: "Confidence", value: report.confidence || ""},
-    {key: "reasons", label: "Reasons", value: compactList(report.reason_tags || [], 6)},
+    {key: "confidence", label: "Confidence", value: report.confidence || ""}
+  );
+  if (activeReportColumnOptions.showReasons) {
+    columns.push({key: "reasons", label: "Reasons", value: reasonValue});
+  }
+  columns.push(
     {key: "report", label: "Report", value: report.title || ""},
     {key: "subject", label: "Subject", value: report.subject || ""},
-    {key: "summary", label: "Summary", value: reportSummaryText(report)},
     {key: "evidence", label: "Evidence", value: reportEvidenceText(report)},
     {key: "last-seen", label: "Last Seen", value: report.last_seen || ""}
   );
   return columns;
+}
+
+function renderReportTitleCell(cell, report) {
+  const source = sourceLabel((report || {}).source);
+  if (source) {
+    const sourceLine = document.createElement("div");
+    sourceLine.className = "report-source-line";
+    sourceLine.textContent = source;
+    cell.appendChild(sourceLine);
+  }
+  const titleLine = document.createElement("div");
+  titleLine.className = "report-title-line";
+  titleLine.textContent = (report || {}).title || "";
+  cell.appendChild(titleLine);
+}
+
+function renderReportSubjectSummaryCell(cell, report) {
+  const subjectLine = document.createElement("div");
+  subjectLine.className = "report-subject-line";
+  appendTableCellValue(subjectLine, reportSubjectCell(report, (report || {}).subject || ""));
+  cell.appendChild(subjectLine);
+  const summary = reportSummaryText(report);
+  if (summary) {
+    const summaryLine = document.createElement("div");
+    summaryLine.className = "report-summary-line";
+    appendMapLinkedText(summaryLine, summary);
+    cell.appendChild(summaryLine);
+  }
 }
 
 function reportSummaryText(report) {
@@ -1096,6 +1168,9 @@ function detailTargetForReport(report) {
   if ((source === "wifi" || type.includes("ssid")) && evidence.ssid) {
     return {type: "wifi-ssid", key: evidence.ssid};
   }
+  if (source === "wifi_monitor" && evidence.mac) {
+    return {type: "wifi-client", key: evidence.mac};
+  }
   if (source === "aprsis" || type.startsWith("aprsis")) {
     if (populationScope) return null;
     const key = evidence.callsign || String((report || {}).subject || "").replace(/^APRS\s+/i, "");
@@ -1119,6 +1194,11 @@ function detailTargetForReport(report) {
     if (populationScope) return null;
     const key = evidence.event_id || String((report || {}).subject || "").replace(/^SWPC\s+/i, "");
     return key ? {type: "swpc-subject", key} : null;
+  }
+  if (source === "rtl433" || type.startsWith("rtl433")) {
+    if (populationScope) return null;
+    const key = evidence.subject_key || String((report || {}).subject || "").replace(/^RTL-433\s+/i, "");
+    return key ? {type: "rtl433-subject", key} : null;
   }
   if (source === "pws" || type.startsWith("pws")) {
     if (populationScope) return null;
@@ -1218,9 +1298,8 @@ function loadDerivedViews() {
         return null;
       }
       if (status && status.in_progress) {
-        uiDebug("derived_load_joined_refresh", status);
+        uiDebug("derived_load_fetching_during_refresh", status);
         continuePollingActiveDerivedRefresh("Backend refresh", status);
-        return null;
       }
       uiDebug("derived_fetch_start", {window: requestWindow});
       return fetchDerivedBundle(
@@ -1555,8 +1634,8 @@ function renderDerivedViews(bundle) {
   clearStaleDerivedRefreshState();
   const errors = [];
   const displayHistory = subjectHistoryDisplayBundle(bundle);
-  safelyRenderDerivedSection("Findings History", errors, () =>
-    renderFindingsHistory(bundle.findings || {})
+  safelyRenderDerivedSection("Insights compatibility", errors, () =>
+    renderFindingsHistory({})
   );
   safelyRenderDerivedSection("Subject History", errors, () =>
     renderDeviceHistory(displayHistory)
@@ -1856,7 +1935,7 @@ function derivedHistoryHasRows() {
   const bluetooth = history.bluetooth || history.ble || {};
   const directSubjects = Array.isArray(history.subjects)
     ? history.subjects.filter((item) =>
-      ["aprsis", "rayhunter", "rtlsdr", "noaa", "usgs", "swpc", "pws", "lan"].includes(String(item.collector || ""))
+      ["aprsis", "rayhunter", "rtlsdr", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"].includes(String(item.collector || ""))
     )
     : [];
   return Boolean(
@@ -1877,6 +1956,7 @@ function liveScanRowsSeen() {
     rows.usgs.length ||
     rows.swpc.length ||
     rows.pws.length ||
+    rows.adsb.length ||
     rows.lan.length ||
     rows.lanIdentify.length ||
     collectorSubjectEventsSeen()
@@ -1902,6 +1982,7 @@ function subjectCollectorKeys() {
     "ble",
     "bt_classic",
     "rtlsdr",
+    "adsb",
     "rayhunter",
     "aprsis",
     "noaa",
@@ -2373,6 +2454,8 @@ function sourceLabel(source) {
   if (key === "noaa") return "NOAA";
   if (key === "usgs") return "USGS";
   if (key === "swpc") return "SWPC";
+  if (key === "adsb") return "ADS-B";
+  if (key === "rtl433") return "RTL-433";
   if (key === "lan") return "LAN";
   const match = collectorEntryForSource(key);
   return match ? match.label : (source || "");
@@ -2425,10 +2508,6 @@ function reportMatchesSearch(report) {
 function reportSearchNeedle() {
   if (!reportsSearch) return "";
   return String(reportsSearch.value || "").trim().toLowerCase();
-}
-
-function showReportsSourceColumn() {
-  return (activeSubtabs.reports || "all") === "all";
 }
 
 function updateReportsSummary(visible) {
@@ -2534,6 +2613,9 @@ function updateTabCounts() {
   setTabCount("wifi_monitor", rows.monitorEvents.length);
   setTabCount("bluetooth", bluetoothTabRowCount());
   setTabCount("rtlsdr", rows.signals.size);
+  setTabCount("rtl433", rows.rtl433.length);
+  setTabCount("adsb", rows.adsb.length);
+  setTabCount("rayhunter", rows.rayhunter.length);
   setTabCount("aprsis", rows.aprsis.length);
   setTabCount("noaa", rows.noaa.length);
   setTabCount("usgs", rows.usgs.length);
@@ -2577,14 +2659,15 @@ function subjectHistoryRowCount(source) {
   const bluetooth = history.bluetooth || history.ble || {};
   const sourceKey = String(source || "all").toLowerCase();
   const countForDirectSource = (collector) => historySubjectsFor(history, collector).length;
-  if (sourceKey === "wifi") return (wifi.access_points || []).length;
-  if (sourceKey === "wifi_monitor") return (wifi.clients || []).length;
-  if (sourceKey === "bluetooth") return (bluetooth.devices || []).length;
+  const displayAps = (wifi.access_points || []).length;
+  const displayClients = (wifi.clients || []).length;
+  const displayBluetooth = (bluetooth.devices || []).length;
+  if (sourceKey === "wifi") return displayAps;
+  if (sourceKey === "wifi_monitor") return displayClients;
+  if (sourceKey === "bluetooth") return displayBluetooth;
   if (sourceKey && sourceKey !== "all") return countForDirectSource(sourceKey);
-  return (wifi.access_points || []).length +
-    (wifi.clients || []).length +
-    (bluetooth.devices || []).length +
-    ["aprsis", "rayhunter", "rtlsdr", "noaa", "usgs", "swpc", "pws", "lan"]
+  return displayAps + displayClients + displayBluetooth +
+    ["aprsis", "rayhunter", "rtlsdr", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"]
       .reduce((total, collector) => total + countForDirectSource(collector), 0);
 }
 
@@ -2746,8 +2829,90 @@ function loadCollectorMetadata() {
 }
 
 function controlCollector(key, action) {
-  setCollectorBanner(key, action === "start" ? "STARTING" : "STOPPING", `${action} requested`);
-  socket.emit("collector_control", {key, action});
+  const payload = collectorControlPayload(key, action);
+  const detail = key === "rtl433" && action === "start"
+    ? rtl433StartRequestedDetail(payload.overrides || {})
+    : `${action} requested`;
+  setCollectorBanner(key, action === "start" ? "STARTING" : "STOPPING", detail);
+  if (key === "rtl433" && action === "start" && payload.overrides && payload.overrides.frequency_plan) {
+    updateRtl433FrequencyState({
+      clear_frequency_state: true,
+      frequency_summary: payload.overrides.frequency_plan,
+      planned_frequency_mhz: rtl433FixedPlanFrequency(payload.overrides.frequency_plan),
+      submitted_plan: payload.overrides.frequency_plan,
+      tune_pending: true
+    });
+  }
+  socket.emit("collector_control", payload);
+}
+
+function rtl433StartRequestedDetail(overrides) {
+  return overrides.frequency_plan
+    ? `start requested | plan ${overrides.frequency_plan}`
+    : "start requested";
+}
+
+function collectorControlPayload(key, action) {
+  const payload = {key, action};
+  if (key === "rtlsdr" && action === "start") {
+    const overrides = rtlsdrOverridesFromInputs();
+    if (Object.keys(overrides).length) payload.overrides = overrides;
+  }
+  if (key === "rtl433" && action === "start") {
+    const overrides = rtl433OverridesFromInputs();
+    if (Object.keys(overrides).length) payload.overrides = overrides;
+  }
+  return payload;
+}
+
+function rtl433OverridesFromInputs() {
+  const input = document.getElementById("rtl433-plan");
+  const value = input ? String(input.value || "").trim() : "";
+  return value ? {frequency_plan: value} : {};
+}
+
+function rtl433FixedPlanFrequency(plan) {
+  const text = String(plan || "").trim();
+  if (!text || text.includes(",")) return undefined;
+  const fields = text.split(":").map((field) => field.trim());
+  if (fields.length !== 2 || fields[0].includes("-")) return undefined;
+  const dwell = Number(fields[1]);
+  if (!Number.isFinite(dwell) || dwell > 0) return undefined;
+  return rtl433FrequencyTextToMhz(fields[0]);
+}
+
+function rtl433FrequencyTextToMhz(value) {
+  const match = String(value || "").trim().toLowerCase().match(/^([0-9]+(?:\.[0-9]+)?)(hz|khz|mhz|m|ghz|g)?$/);
+  if (!match) return undefined;
+  let number = Number(match[1]);
+  if (!Number.isFinite(number)) return undefined;
+  const unit = match[2] || "mhz";
+  if (unit === "hz") number /= 1000000;
+  else if (unit === "khz") number /= 1000;
+  else if (unit === "ghz" || unit === "g") number *= 1000;
+  return Number(number.toFixed(6));
+}
+
+function rtlsdrOverridesFromInputs() {
+  const mapping = [
+    ["rtlsdr-start", "scan_start_mhz"],
+    ["rtlsdr-end", "scan_end_mhz"],
+    ["rtlsdr-step", "step_khz"],
+    ["rtlsdr-threshold", "threshold_db"]
+  ];
+  const overrides = {};
+  mapping.forEach(([id, key]) => {
+    const input = document.getElementById(id);
+    if (!input) return;
+    const value = String(input.value || "").trim();
+    if (value === "") return;
+    const number = Number(value);
+    if (Number.isFinite(number)) overrides[key] = number;
+  });
+  const gain = document.getElementById("rtlsdr-gain");
+  const gainValue = gain ? String(gain.value || "").trim() : "";
+  if (gainValue !== "") overrides.gain = gainValue;
+  return overrides;
 }
 
 function showBluetoothSubtab(name) {
@@ -2794,6 +2959,7 @@ function applyDashboardMetadata(metadata) {
   };
   configureAutoDerivedRefresh();
   applyRtlsdrDefaults((metadata.collectors || {}).rtlsdr || {});
+  applyRtl433Defaults((metadata.collectors || {}).rtl433 || {});
 }
 
 function applyAppVersion(version) {
@@ -2808,6 +2974,18 @@ function applyRtlsdrDefaults(config) {
   setInputValue("rtlsdr-step", config.step_khz);
   setInputValue("rtlsdr-gain", config.gain);
   setInputValue("rtlsdr-threshold", config.threshold_db);
+}
+
+function applyRtl433Defaults(config) {
+  setInputValue("rtl433-plan", config.frequency_plan);
+  const fixedFrequency = rtl433FixedPlanFrequency(config.frequency_plan);
+  if (fixedFrequency !== undefined) {
+    updateRtl433FrequencyState({
+      frequency_summary: config.frequency_plan,
+      planned_frequency_mhz: fixedFrequency,
+      source: "configured plan"
+    });
+  }
 }
 
 function setInputValue(id, value) {
@@ -2937,8 +3115,14 @@ function bleDeviceMatchesSearch(item) {
   ], bleSearch);
 }
 
+function valueList(value) {
+  if (Array.isArray(value)) return value.filter((item) => item !== "" && item !== null && item !== undefined);
+  if (value === "" || value === null || value === undefined) return [];
+  return [value];
+}
+
 function bluetoothServiceList(uuids) {
-  return (uuids || []).map(bluetoothServiceLabel).join(", ");
+  return valueList(uuids).map(bluetoothServiceLabel).join(", ");
 }
 
 function bluetoothServiceLabel(uuid) {
@@ -3202,12 +3386,18 @@ function renderWifiMonitorEvent(event) {
   document.getElementById("wifi_monitor-status").textContent = event.type;
   if (event.type === "monitor_started") {
     const data = event.data || {};
-    setCollectorBanner("wifi_monitor", "ONLINE", `${data.interface} available, active: ${data.interface} | channels ${formatChannelList(data.channels)} | dwell ${data.dwell_sec}s`);
-    setWifiMonitorPlan(`Bands ${formatChannelList(data.supported_bands)} | channels ${formatChannelList(data.channels)}`, "ok");
+    const mode = data.channel_mode === "fixed"
+      ? `fixed channel ${data.fixed_channel || formatChannelList(data.channels)}`
+      : `hop ${formatChannelList(data.channels)}`;
+    const seen = data.seen_channels_first ? "seen first" : "common first";
+    const fallback = data.common_channel_fallback ? "fallback common" : "no common fallback";
+    setCollectorBanner("wifi_monitor", "ONLINE", `${data.interface} available, active: ${data.interface} | ${mode} | dwell ${data.dwell_sec}s`);
+    setWifiMonitorPlan(`Bands ${formatChannelList(data.supported_bands)} | ${mode} | ${seen} | ${fallback}`, "ok");
   }
   if (event.type === "monitor_channel_changed") {
     const data = event.data || {};
-    setWifiMonitorPlan(`${data.interface} listening on channel ${data.channel} (${data.band} GHz)`, "ok");
+    const mode = data.mode === "fixed" ? "fixed" : "hopping";
+    setWifiMonitorPlan(`${data.interface} ${mode} on channel ${data.channel} (${data.band} GHz)`, "ok");
   }
   if (event.type === "collector_retrying" || event.type === "collector_offline") {
     setCollectorBanner("wifi_monitor", event.type, (event.data || {}).reason || "");
@@ -4156,6 +4346,428 @@ function pwsElevationText(item) {
   return "";
 }
 
+function renderAdsbEvent(event) {
+  const status = document.getElementById("adsb-status");
+  if (status) status.textContent = event.type;
+  const data = event.data || {};
+  if (event.type === "collector_online") {
+    setCollectorBanner("adsb", "ONLINE", adsbStatusDetail(data));
+  }
+  if (event.type === "collector_offline" || event.type === "collector_retrying") {
+    setCollectorBanner("adsb", event.type, data.reason || "");
+  }
+  if (event.type !== "adsb_aircraft") return;
+  const row = {
+    ...data,
+    last_seen: event.timestamp,
+    last_seen_epoch: event.timestamp_epoch
+  };
+  upsertAdsbEventRow(row);
+  scheduleLiveRender("adsb", renderAdsbTable);
+  maybeRefreshMissingSubject("ADS-B feed", () => findAdsbHistorySubject(adsbLiveEventKey(row)));
+}
+
+function upsertAdsbEventRow(row) {
+  const key = adsbLiveEventKey(row);
+  if (!key) return;
+  for (let index = rows.adsb.length - 1; index >= 0; index -= 1) {
+    if (adsbLiveEventKey(rows.adsb[index]) === key) rows.adsb.splice(index, 1);
+  }
+  rows.adsb.unshift(row);
+  rows.adsb = rows.adsb.slice(0, uiNumber("max_live_rows"));
+}
+
+function adsbLiveEventKey(item) {
+  return String((item || {}).icao || "").toUpperCase();
+}
+
+function renderAdsbTable() {
+  const events = rows.adsb
+    .filter(adsbEventMatchesSearch)
+    .sort((a, b) => (Number(b.last_seen_epoch || 0) - Number(a.last_seen_epoch || 0)));
+  renderSchemaTable("adsb-events", events, "adsbEvents", {preserveOrder: true});
+  updateTabCounts();
+}
+
+function adsbEventMatchesSearch(item) {
+  return rowMatchesSearch([
+    item.icao,
+    item.callsign,
+    item.airline_icao,
+    item.squawk,
+    adsbPositionText(item),
+    adsbAltitudeText(item),
+    adsbStateMotionText(item),
+    adsbDistanceText(item)
+  ], adsbSearch);
+}
+
+function adsbSubjectLink(item) {
+  const key = adsbLiveEventKey(item);
+  const airline = item.airline_icao ? `(${item.airline_icao})` : "";
+  const label = [item.callsign, airline, item.icao].filter(Boolean).join(" ") || key;
+  return key ? detailLink(label, "adsb-subject", key) : label;
+}
+
+function adsbPositionText(item) {
+  if (item.lat === undefined || item.lon === undefined) return "";
+  return `${item.lat}, ${item.lon}`;
+}
+
+function adsbAltitudeText(item) {
+  const parts = [];
+  if (item.altitude_ft !== undefined) parts.push(`${item.altitude_ft} ft`);
+  if (item.altitude_baro_ft !== undefined && item.altitude_baro_ft !== item.altitude_ft) {
+    parts.push(`baro ${item.altitude_baro_ft}`);
+  }
+  if (item.altitude_geom_ft !== undefined && item.altitude_geom_ft !== item.altitude_ft) {
+    parts.push(`geom ${item.altitude_geom_ft}`);
+  }
+  return parts.join("; ");
+}
+
+function adsbAirGroundText(item) {
+  return item.air_ground || "";
+}
+
+function adsbCprText(item) {
+  return item.cpr_type || "";
+}
+
+function adsbSpeedTrackText(item) {
+  const parts = [];
+  if (item.ground_speed_kt !== undefined) parts.push(`${item.ground_speed_kt} kt`);
+  if (item.track_deg !== undefined) parts.push(`heading ${item.track_deg} deg`);
+  if (item.vertical_rate_fpm !== undefined) parts.push(`vr ${item.vertical_rate_fpm} fpm`);
+  return parts.join("; ");
+}
+
+function adsbStateMotionText(item) {
+  const parts = [];
+  if (item.air_ground) parts.push(item.air_ground);
+  if (item.cpr_type) parts.push(`CPR ${item.cpr_type}`);
+  if (item.position_source) parts.push(item.position_source);
+  const motion = adsbSpeedTrackText(item);
+  if (motion) parts.push(motion);
+  return parts.join("; ");
+}
+
+function adsbDistanceText(item) {
+  const value = item.min_distance_km !== undefined ? item.min_distance_km : item.distance_km;
+  return value !== undefined ? `${value} km` : "";
+}
+
+function adsbStatusDetail(data) {
+  return ["1090 MHz", data.decoder || "", data.poll_interval_sec ? `poll ${data.poll_interval_sec}s` : ""]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function renderRtl433Event(event) {
+  const status = document.getElementById("rtl433-status");
+  if (status) status.textContent = event.type;
+  const data = event.data || {};
+  if (event.type === "scanner_started") {
+    setCollectorBanner("rtl433", "ONLINE", rtl433StatusDetail(data));
+    updateRtl433FrequencyState(data);
+    return;
+  }
+  if (event.type === "scanner_frequency") {
+    updateRtl433FrequencyState(data);
+    return;
+  }
+  if (event.type === "collector_online") {
+    setCollectorBanner("rtl433", "ONLINE", rtl433StatusDetail(data));
+    return;
+  }
+  if (event.type === "collector_offline" || event.type === "collector_retrying") {
+    setCollectorBanner("rtl433", event.type, data.reason || "");
+    return;
+  }
+  if (event.type !== "rtl433_event") return;
+  const row = {
+    ...data,
+    last_seen: event.timestamp,
+    last_seen_epoch: event.timestamp_epoch
+  };
+  upsertRtl433EventRow(row);
+  scheduleLiveRender("rtl433", renderRtl433Table);
+  maybeRefreshMissingSubject("RTL-433 feed", () => findRtl433HistorySubject(rtl433LiveEventKey(row)));
+}
+
+function upsertRtl433EventRow(row) {
+  const key = rtl433LiveEventKey(row);
+  if (!key) return;
+  let eventCount = Number(row.event_count || row.seen_count || 1);
+  let burstCount = Number(row.burst_count || 0);
+  for (let index = rows.rtl433.length - 1; index >= 0; index -= 1) {
+    if (rtl433LiveEventKey(rows.rtl433[index]) !== key) continue;
+    const previous = rows.rtl433[index];
+    eventCount = Math.max(eventCount, Number(previous.event_count || previous.seen_count || 1) + 1);
+    const previousEpoch = Number(previous.last_seen_epoch || 0);
+    const currentEpoch = Number(row.last_seen_epoch || 0);
+    if (previousEpoch && currentEpoch && currentEpoch - previousEpoch <= 120) {
+      burstCount = Number(previous.burst_count || 0) + 1;
+    }
+    rows.rtl433.splice(index, 1);
+  }
+  row.event_count = eventCount;
+  if (burstCount) row.burst_count = burstCount;
+  rows.rtl433.unshift(row);
+  rows.rtl433 = rows.rtl433.slice(0, uiNumber("max_live_rows"));
+}
+
+function rtl433LiveEventKey(item) {
+  return String((item || {}).subject_key || [
+    (item || {}).model,
+    (item || {}).id,
+    (item || {}).channel,
+    (item || {}).protocol
+  ].filter(Boolean).join("|")).toLowerCase();
+}
+
+function renderRtl433Table() {
+  const events = rows.rtl433
+    .filter(rtl433EventMatchesSearch)
+    .sort((a, b) => Number(b.last_seen_epoch || 0) - Number(a.last_seen_epoch || 0));
+  renderSchemaTable("rtl433-events", events, "rtl433Events", {preserveOrder: true});
+  updateTabCounts();
+}
+
+function rtl433EventMatchesSearch(item) {
+  return rowMatchesSearch([
+    item.model,
+    item.id,
+    item.channel,
+    item.protocol,
+    item.category,
+    rtl433DetailsText(item),
+    rtl433SignalText(item)
+  ], rtl433Search);
+}
+
+function rtl433SubjectLink(item) {
+  const key = rtl433LiveEventKey(item);
+  const label = rtl433SubjectLabel(item);
+  return key ? detailLink(label, "rtl433-subject", key) : label;
+}
+
+function rtl433SubjectLabel(item) {
+  const parts = [item.model, item.id ? `id ${item.id}` : "", item.channel ? `ch ${item.channel}` : ""];
+  return parts.filter(Boolean).join(" ") || item.subject || item.subject_key || "RTL-433 subject";
+}
+
+function rtl433CategoryText(item) {
+  return String((item || {}).category || "").replace(/_/g, " ");
+}
+
+function rtl433LiveActivityText(item) {
+  const parts = [];
+  const events = Number((item || {}).event_count || (item || {}).seen_count || 0);
+  const bursts = Number((item || {}).burst_count || 0);
+  if (events) parts.push(`${events} event${events === 1 ? "" : "s"}`);
+  if (bursts) parts.push(`${bursts} burst${bursts === 1 ? "" : "s"}`);
+  return parts.join("; ");
+}
+
+function rtl433SignalText(item) {
+  item = item || {};
+  const parts = [];
+  const frequency = firstPresentValue(
+    item.tuned_frequency_mhz,
+    item.current_frequency_mhz,
+    item.latest_tuned_frequency_mhz,
+    item.frequency_mhz,
+    item.latest_frequency_mhz
+  );
+  const rssi = firstPresentValue(item.rssi_db, item.latest_rssi_db, item.rssi);
+  const snr = firstPresentValue(item.snr_db, item.latest_snr_db, item.snr);
+  const noise = firstPresentValue(item.noise_db, item.latest_noise_db, item.noise);
+  if (frequency !== undefined) parts.push(`${frequency} MHz`);
+  if (rssi !== undefined) parts.push(`RSSI ${rssi} dB`);
+  if (snr !== undefined) parts.push(`SNR ${snr} dB`);
+  if (noise !== undefined) parts.push(`noise ${noise} dB`);
+  return parts.join("; ");
+}
+
+function updateRtl433FrequencyState(data) {
+  const incoming = {...(data || {})};
+  if (incoming.clear_frequency_state) {
+    rtl433ScannerState = {};
+    delete incoming.clear_frequency_state;
+  }
+  if (incoming.source === "configured plan") {
+    incoming.planned_frequency_mhz = firstPresentValue(
+      incoming.planned_frequency_mhz,
+      incoming.frequency_mhz
+    );
+    delete incoming.frequency_mhz;
+    delete incoming.current_frequency_mhz;
+  }
+  if (String(incoming.source || "").startsWith("rtl_433")) {
+    incoming.tune_pending = false;
+  }
+  rtl433ScannerState = {...rtl433ScannerState, ...incoming};
+  const node = document.getElementById("rtl433-frequency-state");
+  if (!node) return;
+  const reportedFrequency = firstPresentValue(
+    rtl433ScannerState.frequency_mhz,
+    rtl433ScannerState.current_frequency_mhz
+  );
+  const plannedFrequency = rtl433ScannerState.planned_frequency_mhz;
+  const processStarted = Boolean(rtl433ScannerState.process_started);
+  const parts = [
+    rtl433ScannerState.tune_pending ? "waiting for rtl_433 frequency confirmation" : "",
+    reportedFrequency !== undefined ? `rtl_433 reports ${reportedFrequency} MHz` : "",
+    reportedFrequency === undefined && processStarted ? "rtl_433 process started" : "",
+    plannedFrequency !== undefined ? `planned ${plannedFrequency} MHz` : "",
+    reportedFrequency === undefined && plannedFrequency !== undefined ? "not frequency-confirmed" : "",
+    rtl433ScannerState.device_index !== undefined ? `RTL-SDR ${rtl433ScannerState.device_index}` : "",
+    rtl433ScannerState.hop_index && rtl433ScannerState.hop_count ? `hop ${rtl433ScannerState.hop_index}/${rtl433ScannerState.hop_count}` : "",
+    rtl433ScannerState.dwell_sec ? `dwell ${rtl433ScannerState.dwell_sec}s` : "",
+    rtl433ScannerState.source ? `source ${rtl433ScannerState.source}` : "",
+    rtl433ScannerState.frequency_summary && reportedFrequency === undefined && plannedFrequency === undefined ? rtl433ScannerState.frequency_summary : ""
+  ].filter(Boolean);
+  node.textContent = parts.length ? parts.join(" | ") : "Waiting for current RTL-433 frequency";
+  node.className = `status-strip ${reportedFrequency !== undefined ? "ok" : (plannedFrequency !== undefined || processStarted ? "warning" : "muted")}`;
+}
+
+function firstPresentValue(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return undefined;
+}
+
+function rtl433DetailsText(item) {
+  const raw = (item || {}).raw || (item || {}).latest_raw || (item || {}).sample_fields || {};
+  const ignore = new Set(["time", "model", "type", "id", "channel", "protocol", "freq", "frequency", "frequency_mhz", "rssi", "rssi_db", "snr", "noise"]);
+  const details = [];
+  Object.keys(raw || {}).sort().forEach((key) => {
+    if (ignore.has(String(key).toLowerCase())) return;
+    const value = raw[key];
+    if (value === undefined || value === null || value === "") return;
+    details.push(`${key}: ${rtl433ValueText(value)}`);
+  });
+  return compactList(details, 8);
+}
+
+function rtl433ValueText(value) {
+  if (Array.isArray(value)) return compactList(value, 4);
+  if (value && typeof value === "object") {
+    return compactList(Object.keys(value).sort().map((key) => `${key}=${value[key]}`), 4);
+  }
+  return String(value);
+}
+
+function rtl433StatusDetail(data) {
+  return [
+    data.frequency_summary || data.frequency_plan || "",
+    data.decoder || "rtl_433",
+    data.gain ? `gain ${data.gain}` : "",
+    data.sample_rate ? `sample ${data.sample_rate}` : ""
+  ].filter(Boolean).join(" | ");
+}
+
+function renderRayhunterEvent(event) {
+  const status = document.getElementById("rayhunter-status");
+  if (status) status.textContent = event.type;
+  const data = event.data || {};
+  if (event.type === "collector_online") {
+    setCollectorBanner("rayhunter", "ONLINE", data.endpoint || "");
+    return;
+  }
+  if (event.type === "collector_offline" || event.type === "collector_retrying") {
+    setCollectorBanner("rayhunter", event.type, data.reason || "");
+    return;
+  }
+  if (event.type !== "rayhunter_status") return;
+  const row = {
+    ...data,
+    last_seen: event.timestamp,
+    last_seen_epoch: event.timestamp_epoch
+  };
+  upsertRayhunterEventRow(row);
+  setCollectorBanner("rayhunter", "ONLINE", rayhunterSummaryText(row) || rayhunterWarningText(row) || row.endpoint || "");
+  scheduleLiveRender("rayhunter", renderRayhunterTable);
+  maybeRefreshMissingSubject("Rayhunter feed", () => findRayhunterHistorySubject(row.endpoint));
+}
+
+function upsertRayhunterEventRow(row) {
+  const key = rayhunterLiveEventKey(row);
+  if (!key) return;
+  for (let index = rows.rayhunter.length - 1; index >= 0; index -= 1) {
+    if (rayhunterLiveEventKey(rows.rayhunter[index]) === key) rows.rayhunter.splice(index, 1);
+  }
+  rows.rayhunter.unshift(row);
+  rows.rayhunter = rows.rayhunter.slice(0, uiNumber("max_live_rows"));
+}
+
+function rayhunterLiveEventKey(item) {
+  return String((item || {}).endpoint || "").toLowerCase();
+}
+
+function renderRayhunterTable() {
+  const events = rows.rayhunter
+    .filter(rayhunterEventMatchesSearch)
+    .sort((a, b) => Number(b.last_seen_epoch || 0) - Number(a.last_seen_epoch || 0));
+  renderSchemaTable("rayhunter-events", events, "rayhunterEvents", {preserveOrder: true});
+  updateTabCounts();
+}
+
+function rayhunterEventMatchesSearch(item) {
+  return rowMatchesSearch([
+    item.endpoint,
+    rayhunterWarningText(item),
+    rayhunterRecordingText(item),
+    rayhunterDeviceText(item),
+    rayhunterSummaryText(item)
+  ], rayhunterSearch);
+}
+
+function rayhunterSubjectLink(item) {
+  const endpoint = (item || {}).endpoint || "";
+  return endpoint ? detailLink(endpoint, "rayhunter-subject", endpoint) : "";
+}
+
+function rayhunterWarningText(item) {
+  const count = Number((item || {}).warning_count || 0);
+  const parts = [];
+  parts.push(count ? `${count} warning(s)` : "none");
+  if (item.warning) parts.push(item.warning);
+  if (item.reason) parts.push(item.reason);
+  return parts.filter(Boolean).join("; ");
+}
+
+function rayhunterRecordingText(item) {
+  const artifacts = compactList((item || {}).recording_artifacts || [], 4);
+  return [
+    item.recording_id || "",
+    item.recording_size || "",
+    artifacts
+  ].filter(Boolean).join("; ");
+}
+
+function rayhunterDeviceText(item) {
+  return [
+    item.rayhunter_version ? `version ${item.rayhunter_version}` : "",
+    item.device_os || "",
+    item.gps_mode ? `GPS ${item.gps_mode}` : "",
+    item.storage || "",
+    item.memory || "",
+    item.battery || ""
+  ].filter(Boolean).join("; ");
+}
+
+function rayhunterSummaryText(item) {
+  return [
+    item.summary || "",
+    item.latest_event || "",
+    item.warning_events_in_window ? `${item.warning_events_in_window} warning event(s)` : "",
+    item.events_in_window ? `${item.events_in_window} event(s)` : ""
+  ].filter(Boolean).join("; ");
+}
+
 function renderLanEvent(event) {
   const status = document.getElementById("lan-status");
   if (status) status.textContent = event.type;
@@ -4398,6 +5010,94 @@ function renderWifiTables() {
   updateTabCounts();
 }
 
+function annotationText(item) {
+  return String(((item || {}).annotation || {}).custom_name || (item || {}).custom_name || "").trim();
+}
+
+function annotatedLabel(item, subject) {
+  const original = String(subject || "");
+  const custom = annotationText(item);
+  return custom ? `${custom} (${original})` : original;
+}
+
+function annotatedDetailLink(item, subject, type, key) {
+  return detailLink(annotatedLabel(item, subject), type, key);
+}
+
+function annotatedWifiClientHistoryLabel(item) {
+  if (item && item.grouped_randomized) return wifiClientHistoryLabel(item);
+  const key = (item || {}).mac || "";
+  return detailLink(annotatedLabel(item, key), "wifi-client", key);
+}
+
+function subjectAnnotationButton(subject) {
+  if (!subject || !subject.collector || !subject.subject_type || !subject.subject_id) return "";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = annotationText(subject) ? "Edit" : "Name";
+  button.title = "Edit subject annotation";
+  button.addEventListener("click", () => editSubjectAnnotation(subject));
+  return {node: button, text: button.textContent};
+}
+
+function editSubjectAnnotation(subject) {
+  const original = String(subject.subject || subject.subject_id || "subject");
+  const current = annotationText(subject);
+  const value = window.prompt(`Annotation for ${original}`, current);
+  if (value === null) return;
+  saveSubjectAnnotation(subject, value.trim());
+}
+
+function saveSubjectAnnotation(subject, customName) {
+  setHistoryStatus("Saving subject annotation", "warning");
+  return fetchJson("/subject_annotations", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      collector: subject.collector,
+      subject_type: subject.subject_type,
+      subject_id: subject.subject_id,
+      custom_name: customName || ""
+    })
+  })
+    .then(() => {
+      setHistoryStatus(customName ? "Subject annotation saved" : "Subject annotation cleared", "ok");
+      return loadDerivedViews();
+    })
+    .catch((error) => setHistoryStatus(`Subject annotation failed: ${error}`, "alert"));
+}
+
+function wifiClientHistoryLabel(item) {
+  if (item && item.grouped_randomized) {
+    const count = Number(item.randomized_group_count || 0);
+    return `${count} randomized client MAC${count === 1 ? "" : "s"}`;
+  }
+  return detailLink((item || {}).mac || "", "wifi-client", (item || {}).mac || "");
+}
+
+function wifiMonitorHistorySummaryText(wifi, clients) {
+  const totalClients = Number((wifi || {}).total_clients || (clients || []).length);
+  if (!(clients || []).length) {
+    return "No Wi-Fi client/probe history in this view. Wi-Fi Monitor must be running in monitor mode to collect clients, probes, deauth, and association frames.";
+  }
+  const randomized = (clients || []).reduce((total, item) => {
+    if (!item || !item.randomized_mac) return total;
+    return total + Number(item.randomized_group_count || 1);
+  }, 0);
+  const known = Math.max(0, totalClients - randomized);
+  const parts = [];
+  if ((clients || []).length < totalClients) {
+    parts.push(`${(clients || []).length} of ${totalClients} Wi-Fi client/probe histories loaded for display`);
+  } else {
+    parts.push(`${totalClients} Wi-Fi client/probe histories in this view`);
+  }
+  if (randomized || known) {
+    parts.push(`${known} stable/vendor MACs`);
+    parts.push(`${randomized} randomized MACs`);
+  }
+  return parts.join(" | ");
+}
+
 function compareWifiAccessPoints(left, right) {
   const leftMs = recordTimestampMs(left, "last_seen");
   const rightMs = recordTimestampMs(right, "last_seen");
@@ -4418,9 +5118,14 @@ function renderDeviceHistory(history) {
   const aps = wifi.access_points || [];
   const clients = wifi.clients || [];
   const devices = ble.devices || [];
+  const wifiSubjects = historySubjectsFor(history, "wifi");
+  const wifiApSubjects = wifiSubjects.filter((item) => ["wifi_ssid", "wifi_bssid"].includes(String(item.subject_type || "")));
+  const wifiClientSubjects = wifiSubjects.filter((item) => ["wifi_client", "wifi_client_group"].includes(String(item.subject_type || "")));
   const aprsisSubjects = historySubjectsFor(history, "aprsis");
   const rayhunterSubjects = historySubjectsFor(history, "rayhunter");
   const rtlsdrSubjects = historySubjectsFor(history, "rtlsdr");
+  const rtl433Subjects = historySubjectsFor(history, "rtl433");
+  const adsbSubjects = historySubjectsFor(history, "adsb");
   const noaaSubjects = historySubjectsFor(history, "noaa");
   const usgsSubjects = historySubjectsFor(history, "usgs");
   const swpcSubjects = historySubjectsFor(history, "swpc");
@@ -4428,40 +5133,14 @@ function renderDeviceHistory(history) {
   const lanSubjects = historySubjectsFor(history, "lan");
   const monitorEmpty = document.getElementById("history-wifi-monitor-empty");
   if (monitorEmpty) {
-    monitorEmpty.textContent = clients.length
-      ? `${clients.length} Wi-Fi client/probe histories in this view`
-      : "No Wi-Fi client/probe history in this view. Wi-Fi Monitor must be running in monitor mode to collect clients, probes, deauth, and association frames.";
+    monitorEmpty.textContent = wifiMonitorHistorySummaryText(wifi, clients);
   }
-  renderHistoryTable("history-wifi-aps", aps, (item) => [
-    detailLink(item.ssid || "(blank)", "wifi-ssid", item.ssid || "(blank)"),
-    detailLink(item.bssid || "", "wifi-bssid", item.bssid || ""),
-    vendorLabel(item),
-    item.first_seen || "",
-    item.last_seen || "",
-    channelFreqList(item.channels),
-    (item.encryption || []).join(", "),
-    signalRange(item),
-    item.observations || 0,
-    item.finding_count || 0
-  ], historySearch);
-  renderHistoryTable("history-wifi-clients", clients, (item) => [
-    item.mac || "",
-    vendorLabel(item),
-    ssidList(item.ssids, item.randomized_mac),
-    item.first_seen || "",
-    item.last_seen || "",
-    signalRange(item),
-    item.probe_count || 0,
-    item.association_count || 0,
-    item.deauth_count || 0,
-    item.disassoc_count || 0,
-    item.finding_count || 0
-  ], historySearch);
+  renderHistoryTable("history-wifi-aps", wifiApSubjects, (item) => wifiApSubjectHistoryCells(item), historySearch);
+  renderHistoryTable("history-wifi-clients", wifiClientSubjects, (item) => wifiClientSubjectHistoryCells(item), historySearch);
   renderHistoryTable("history-bluetooth-devices", devices, (item) => [
     item.grouped_randomized
-      ? `${item.randomized_group_count || 0} randomized`
-      : detailLink(item.mac || "", "bluetooth-device", item.mac || ""),
-    (item.transports || []).join(", "),
+      ? `${item.randomized_group_count || 0} ${item.name || "randomized devices found"}`
+      : annotatedDetailLink(item, item.mac || "", "bluetooth-device", item.mac || ""),
     bleDeviceIdentity(item),
     bluetoothServiceList(item.service_uuids),
     item.model_number || "",
@@ -4476,7 +5155,13 @@ function renderDeviceHistory(history) {
     item.lost_count || 0,
     item.classic_seen_count || 0,
     sessionCount(item),
-    item.finding_count || 0
+    item.grouped_randomized ? "" : subjectAnnotationButton({
+      collector: "bluetooth",
+      subject_type: "bluetooth_device",
+      subject_id: item.mac || "",
+      subject: item.mac || "Bluetooth device",
+      annotation: item.annotation
+    })
   ], historySearch);
   renderHistoryTable("history-aprsis-subjects", aprsisSubjects, (item) => [
     detailLink(item.subject || "", "aprsis-subject", item.subject || ""),
@@ -4503,6 +5188,25 @@ function renderDeviceHistory(history) {
     item.last_seen || "",
     rtlsdrSubjectActivity(item),
     rtlsdrSubjectSignal(item)
+  ], historySearch);
+  renderHistoryTable("history-rtl433-subjects", rtl433Subjects, (item) => [
+    detailLink(item.subject || "", "rtl433-subject", subjectData(item).subject_key || item.subject_id || ""),
+    rtl433CategoryText(subjectData(item)),
+    item.first_seen || "",
+    item.last_seen || "",
+    rtl433SubjectActivity(item),
+    rtl433SignalText(subjectData(item)),
+    rtl433DetailsText(subjectData(item))
+  ], historySearch);
+  renderHistoryTable("history-adsb-subjects", adsbSubjects, (item) => [
+    detailLink(item.subject || "", "adsb-subject", subjectData(item).icao || item.subject_id || ""),
+    item.first_seen || "",
+    item.last_seen || "",
+    adsbPositionText(subjectData(item)),
+    adsbAltitudeText(subjectData(item)),
+    adsbDistanceText(subjectData(item)),
+    adsbSpeedTrackText(subjectData(item)),
+    subjectData(item).seen_count || 0
   ], historySearch);
   renderHistoryTable("history-noaa-subjects", noaaSubjects, (item) => [
     detailLink(item.subject || "", "noaa-subject", subjectData(item).event_id || item.subject_id || ""),
@@ -4545,16 +5249,77 @@ function renderDeviceHistory(history) {
     pwsSubjectSource(item)
   ], historySearch);
   renderHistoryTable("history-lan-subjects", lanSubjects, (item) => [
-    detailLink(item.subject || "", "lan-subject", subjectData(item).subject_key || item.subject_id || ""),
+    annotatedDetailLink(item, item.subject || "", "lan-subject", subjectData(item).subject_key || item.subject_id || ""),
     subjectTypeLabel(item),
     item.first_seen || "",
     item.last_seen || "",
     lanSubjectIpMac(item),
     lanSubjectIdentity(item),
     lanSubjectInterfaceState(item),
-    lanSubjectActivity(item)
+    lanSubjectActivity(item),
+    subjectAnnotationButton({
+      collector: "lan",
+      subject_type: item.subject_type || "",
+      subject_id: item.subject_id || "",
+      subject: item.subject || item.subject_id || "LAN subject",
+      annotation: item.annotation
+    })
   ], historySearch);
   updateTabCounts();
+}
+
+
+function wifiApSubjectHistoryCells(item) {
+  const data = subjectData(item);
+  const isSsid = item.subject_type === "wifi_ssid";
+  const ssid = data.ssid || item.subject || "(blank)";
+  const bssid = data.bssid || item.subject_id || "";
+  const identity = isSsid
+    ? `${data.bssid_count || (data.bssids || []).length || 0} BSSID${Number(data.bssid_count || (data.bssids || []).length || 0) === 1 ? "" : "s"}`
+    : detailLink(bssid, "wifi-bssid", bssid);
+  return [
+    annotatedDetailLink(item, item.subject || ssid, "wifi-ssid", ssid),
+    identity,
+    vendorLabel(data),
+    item.first_seen || "",
+    item.last_seen || "",
+    channelFreqList(data.channels),
+    (data.encryption || []).join(", "),
+    signalRange(data),
+    data.observations || 0,
+    isSsid ? "" : subjectAnnotationButton({
+      collector: "wifi",
+      subject_type: item.subject_type || "wifi_bssid",
+      subject_id: item.subject_id || bssid,
+      subject: item.subject || ssid || bssid || "Wi-Fi AP",
+      annotation: item.annotation
+    })
+  ];
+}
+
+function wifiClientSubjectHistoryCells(item) {
+  const data = subjectData(item);
+  const grouped = item.subject_type === "wifi_client_group" || data.grouped_randomized;
+  const mac = data.mac || item.subject_id || "";
+  return [
+    grouped ? item.subject || `${data.randomized_group_count || 0} randomized Wi-Fi client MACs` : annotatedDetailLink(item, item.subject || mac, "wifi-client", mac),
+    vendorLabel(data),
+    ssidList(data.ssids, grouped),
+    item.first_seen || "",
+    item.last_seen || "",
+    signalRange(data),
+    data.probe_count || 0,
+    data.association_count || 0,
+    data.deauth_count || 0,
+    data.disassoc_count || 0,
+    grouped ? "" : subjectAnnotationButton({
+      collector: "wifi",
+      subject_type: item.subject_type || "wifi_client",
+      subject_id: item.subject_id || mac,
+      subject: item.subject || mac || "Wi-Fi client",
+      annotation: item.annotation
+    })
+  ];
 }
 
 function updateDeviceHistoryStatus(history) {
@@ -4566,7 +5331,7 @@ function updateDeviceHistoryStatus(history) {
   const subjectCounts = history.subject_counts || {};
   const subjects = Array.isArray(history.subjects) ? history.subjects : [];
   const directSubjects = subjects.filter((item) =>
-    ["aprsis", "rayhunter", "rtlsdr", "noaa", "usgs", "swpc", "pws", "lan"].includes(String(item.collector || ""))
+    ["aprsis", "rayhunter", "rtlsdr", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"].includes(String(item.collector || ""))
   );
   const window = history.window || {};
   const refreshedAt = history.generated_at || history.refreshed_at;
@@ -4608,7 +5373,7 @@ function subjectData(item) {
 
 function subjectTypeLabel(item) {
   return String((item || {}).subject_type || "")
-    .replace(/^(aprsis|rayhunter|rtlsdr|wifi|bluetooth)_/, "")
+    .replace(/^(aprsis|rayhunter|rtlsdr|rtl433|adsb|wifi|bluetooth)_/, "")
     .replace(/^pws_/, "")
     .replace(/^swpc_/, "")
     .replace(/_/g, " ");
@@ -4695,6 +5460,14 @@ function rtlsdrSubjectSignal(item) {
     data.power_dbm !== undefined ? `${data.power_dbm} dBm` : "",
     data.above_floor_db !== undefined ? `+${data.above_floor_db} dB` : "",
     data.reason || ""
+  ].filter(Boolean).join("; ");
+}
+
+function rtl433SubjectActivity(item) {
+  const data = subjectData(item);
+  return [
+    data.event_count ? `${data.event_count} event(s)` : "",
+    data.burst_count ? `${data.burst_count} burst(s)` : ""
   ].filter(Boolean).join("; ");
 }
 
@@ -4871,12 +5644,15 @@ function buildDetail(type, key) {
   if (type === "bluetooth-device") return buildBluetoothDetail(key);
   if (type === "wifi-ssid") return buildWifiSsidDetail(key);
   if (type === "wifi-bssid") return buildWifiBssidDetail(key);
+  if (type === "wifi-client") return buildWifiClientDetail(key);
   if (type === "aprsis-subject") return buildAprsisSubjectDetail(key);
   if (type === "rayhunter-subject") return buildRayhunterSubjectDetail(key);
   if (type === "noaa-subject") return buildNoaaSubjectDetail(key);
   if (type === "usgs-subject") return buildUsgsSubjectDetail(key);
   if (type === "swpc-subject") return buildSwpcSubjectDetail(key);
   if (type === "pws-subject") return buildPwsSubjectDetail(key);
+  if (type === "adsb-subject") return buildAdsbSubjectDetail(key);
+  if (type === "rtl433-subject") return buildRtl433SubjectDetail(key);
   if (type === "lan-subject") return buildLanSubjectDetail(key);
   return {
     kind: "Detail",
@@ -5175,6 +5951,97 @@ function buildPwsSubjectDetail(key) {
   };
 }
 
+function buildAdsbSubjectDetail(key) {
+  const subject = findAdsbHistorySubject(key);
+  const live = subject ? null : findAdsbLiveEvent(key);
+  const data = subject ? subjectData(subject) : (live || {});
+  const reports = relatedReportsFor("adsb-subject", key);
+  if (!subject && !live) return missingDetail("ADS-B Subject", key, reports);
+  return {
+    kind: subject ? "ADS-B Subject" : "Live ADS-B Aircraft",
+    title: (subject || {}).subject || [data.callsign, data.airline_icao ? `(${data.airline_icao})` : "", data.icao].filter(Boolean).join(" ") || key,
+    sections: [
+      !subject ? detailMessage("Live row shown; Subject History/Reports have not materialized this item in the loaded view yet.") : null,
+      detailSection("Aircraft", [
+        ["ICAO", data.icao],
+        ["Callsign", data.callsign],
+        ["Airline ICAO", data.airline_icao],
+        ["Category", data.category],
+        ["Squawk", data.squawk],
+        ["Emergency", data.emergency ? "yes" : ""]
+      ]),
+      detailSection("Position / Motion", [
+        ["Position", adsbPositionText(data)],
+        ["Altitude", adsbAltitudeText(data)],
+        ["Air / Ground", adsbAirGroundText(data)],
+        ["CPR", adsbCprText(data)],
+        ["Position Source", data.position_source || ""],
+        ["State / Motion", adsbStateMotionText(data)],
+        ["Distance", adsbDistanceText(data)],
+        ["Path Span", data.path_span_km !== undefined ? `${data.path_span_km} km` : ""]
+      ]),
+      detailSection("Observed", [
+        ["First Seen", (subject || {}).first_seen || data.first_seen],
+        ["Last Seen", (subject || {}).last_seen || data.last_seen],
+        ["Updates", data.seen_count],
+        ["Positions", data.position_count],
+        ["Messages", data.messages],
+        ["RSSI", data.rssi_dbfs !== undefined ? `${data.rssi_dbfs} dBFS` : ""]
+      ]),
+      detailSection("Source", [
+        ["Decoder", data.decoder],
+        ["Source", data.source]
+      ]),
+      reportsSection(reports)
+    ].filter(Boolean)
+  };
+}
+
+function buildRtl433SubjectDetail(key) {
+  const subject = findRtl433HistorySubject(key);
+  const live = subject ? null : findRtl433LiveEvent(key);
+  const data = subject ? subjectData(subject) : (live || {});
+  const reports = relatedReportsFor("rtl433-subject", key);
+  if (!subject && !live) return missingDetail("RTL-433 Subject", key, reports);
+  return {
+    kind: subject ? "RTL-433 Subject" : "Live RTL-433 Event",
+    title: (subject || {}).subject || rtl433SubjectLabel(data) || key,
+    sections: [
+      !subject ? detailMessage("Live row shown; Subject History/Reports have not materialized this item in the loaded view yet.") : null,
+      detailSection("Subject", [
+        ["Model", data.model],
+        ["ID", data.id],
+        ["Channel", data.channel],
+        ["Protocol", data.protocol],
+        ["Category", rtl433CategoryText(data)],
+        ["Subject Key", data.subject_key || key]
+      ]),
+      detailSection("Signal", [
+        ["Frequency / Signal", rtl433SignalText(data)],
+        ["Frequency Plan", data.frequency_plan],
+        ["Event Time", displayTimestamp(data, "event_time") || data.event_time]
+      ]),
+      detailSection("Observed", [
+        ["First Seen", (subject || {}).first_seen || data.first_seen],
+        ["Last Seen", (subject || {}).last_seen || data.last_seen],
+        ["Events", data.event_count || data.seen_count],
+        ["Bursts", data.burst_count],
+        ["Sample Times", compactList(data.sample_times || [], 8)]
+      ]),
+      detailSection("Decoded Fields", [
+        ["Latest Fields", rtl433DetailsText(data)],
+        ["Raw", rtl433RawDetailText(data.raw || data.latest_raw || data.sample_fields || {})]
+      ]),
+      reportsSection(reports)
+    ].filter(Boolean)
+  };
+}
+
+function rtl433RawDetailText(raw) {
+  const rows = Object.keys(raw || {}).sort().map((key) => `${key}: ${rtl433ValueText(raw[key])}`);
+  return rows.length ? compactList(rows, 16) : "";
+}
+
 function buildLanSubjectDetail(key) {
   const subject = findLanHistorySubject(key);
   const reports = relatedReportsFor("lan-subject", key);
@@ -5185,6 +6052,7 @@ function buildLanSubjectDetail(key) {
     title: subject.subject || data.hostname || data.mac || data.gateway_ip || key,
     sections: [
       detailSection("Identity", [
+        ["Annotation", annotationText(subject) || annotationText(data)],
         ["Type", subjectTypeLabel(subject)],
         ["MAC", data.mac],
         ["IPs", compactList(data.ips || data.gateway_ips || (data.ip ? [data.ip] : data.gateway_ip ? [data.gateway_ip] : []), 8)],
@@ -5226,8 +6094,9 @@ function buildBluetoothDetail(mac) {
     title: mac,
     sections: [
       detailSection("Identity", [
+        ["Annotation", annotationText(device)],
         ["MAC", device.mac],
-        ["Transport", (device.transports || []).join(", ")],
+        ["Transport", valueList(device.transports).join(", ")],
         ["Identity", bleDeviceIdentity(device)],
         ["Find My", device.findmy_accessory ? (device.findmy_label || "Apple Find My accessory") : ""],
         ["Find My Payload", findmyPayloadText(device)],
@@ -5298,6 +6167,7 @@ function buildWifiBssidDetail(bssid) {
     title: bssid,
     sections: [
       detailSection("Access Point", [
+        ["Annotation", annotationText(ap)],
         ["SSID", ap.ssid || "(blank)"],
         ["BSSID", ap.bssid],
         ["Vendor", vendorLabel(ap)],
@@ -5311,6 +6181,37 @@ function buildWifiBssidDetail(bssid) {
         ["Seen", ap.observations],
         ["Sessions", sessionCount(ap)],
         ["Insights", ap.finding_count]
+      ]),
+      reportsSection(reports)
+    ]
+  };
+}
+
+function buildWifiClientDetail(mac) {
+  const client = findWifiHistoryClient(mac);
+  const reports = relatedReportsFor("wifi-client", mac);
+  if (!client) return missingDetail("Wi-Fi Client", mac, reports);
+  return {
+    kind: "Wi-Fi Client",
+    title: mac,
+    sections: [
+      detailSection("Identity", [
+        ["Annotation", annotationText(client)],
+        ["MAC", client.mac],
+        ["Vendor", vendorLabel(client)],
+        ["Probed SSIDs", ssidList(client.ssids, client.randomized_mac)]
+      ]),
+      detailSection("Monitor Activity", [
+        ["Probe Requests", client.probe_count || 0],
+        ["Associations", client.association_count || 0],
+        ["Deauth Frames", client.deauth_count || 0],
+        ["Disassociation Frames", client.disassoc_count || 0],
+        ["Signal", signalRange(client)]
+      ]),
+      detailSection("Observed", [
+        ["First Seen", client.first_seen],
+        ["Last Seen", client.last_seen],
+        ["Findings", client.finding_count || 0]
       ]),
       reportsSection(reports)
     ]
@@ -5354,6 +6255,16 @@ function findPwsLiveEvent(key) {
     ];
     return values.some((value) => String(value || "").toLowerCase() === normalized);
   });
+}
+
+function findAdsbLiveEvent(key) {
+  const normalized = String(key || "").toUpperCase();
+  return (rows.adsb || []).find((item) => adsbLiveEventKey(item) === normalized);
+}
+
+function findRtl433LiveEvent(key) {
+  const normalized = String(key || "").toLowerCase();
+  return (rows.rtl433 || []).find((item) => rtl433LiveEventKey(item) === normalized);
 }
 
 function noaaLiveTypeLabel(item) {
@@ -5499,6 +6410,11 @@ function reportMatchesDetail(report, type, key) {
         String(evidence.ssid || "(blank)").toLowerCase() ===
           String(ap.ssid || "(blank)").toLowerCase());
   }
+  if (type === "wifi-client") {
+    return String(evidence.mac || "").toLowerCase() === normalizedKey ||
+      String(evidence.client_mac || "").toLowerCase() === normalizedKey ||
+      String(evidence.transmitter_mac || "").toLowerCase() === normalizedKey;
+  }
   if (type === "wifi-ssid") {
     return String(evidence.ssid || "(blank)").toLowerCase() === normalizedKey;
   }
@@ -5540,6 +6456,17 @@ function reportMatchesDetail(report, type, key) {
       String(evidence.mac_address || "").toLowerCase() === normalizedKey ||
       String((report || {}).subject || "").toLowerCase().includes(normalizedKey);
   }
+  if (type === "adsb-subject") {
+    return String(evidence.icao || "").toLowerCase() === normalizedKey ||
+      String(evidence.callsign || "").toLowerCase() === normalizedKey ||
+      String((report || {}).subject || "").toLowerCase().includes(normalizedKey);
+  }
+  if (type === "rtl433-subject") {
+    return String(evidence.subject_key || "").toLowerCase() === normalizedKey ||
+      String(evidence.model || "").toLowerCase() === normalizedKey ||
+      String(evidence.id || "").toLowerCase() === normalizedKey ||
+      String((report || {}).subject || "").toLowerCase().includes(normalizedKey);
+  }
   if (type === "lan-subject") {
     return String(evidence.subject_key || "").toLowerCase() === normalizedKey ||
       String(evidence.mac || "").toLowerCase() === normalizedKey ||
@@ -5574,6 +6501,16 @@ function findWifiHistoryAp(bssid) {
   );
 }
 
+function findWifiHistoryClient(mac) {
+  const normalized = String(mac || "").toLowerCase();
+  const wifi = (latestDeviceHistory || {}).wifi || {};
+  const historyClients = wifi.clients || [];
+  const clients = historyClients.length ? historyClients : rows.monitorEvents;
+  return clients.find((client) =>
+    String(client.mac || client.client_mac || client.transmitter_mac || "").toLowerCase() === normalized
+  );
+}
+
 function findBluetoothHistoryDevice(mac) {
   const normalized = String(mac || "").toLowerCase();
   return bluetoothHistoryDevices().find((device) =>
@@ -5603,6 +6540,14 @@ function swpcHistorySubjects() {
 
 function pwsHistorySubjects() {
   return historySubjectsFor(latestDeviceHistory || {}, "pws");
+}
+
+function adsbHistorySubjects() {
+  return historySubjectsFor(latestDeviceHistory || {}, "adsb");
+}
+
+function rtl433HistorySubjects() {
+  return historySubjectsFor(latestDeviceHistory || {}, "rtl433");
 }
 
 function lanHistorySubjects() {
@@ -5675,6 +6620,25 @@ function findPwsHistorySubject(key) {
       String(data.station_id || "").toLowerCase() === normalized ||
       String(data.station_name || "").toLowerCase() === normalized ||
       String(data.mac_address || "").toLowerCase() === normalized;
+  });
+}
+
+function findAdsbHistorySubject(key) {
+  const normalized = String(key || "").toUpperCase();
+  return adsbHistorySubjects().find((subject) => {
+    const data = subjectData(subject);
+    return String(subject.subject_id || "").toUpperCase() === normalized ||
+      String(data.icao || "").toUpperCase() === normalized;
+  });
+}
+
+function findRtl433HistorySubject(key) {
+  const normalized = String(key || "").toLowerCase();
+  return rtl433HistorySubjects().find((subject) => {
+    const data = subjectData(subject);
+    return String(subject.subject || "").toLowerCase() === normalized ||
+      String(subject.subject_id || "").toLowerCase() === normalized ||
+      String(data.subject_key || "").toLowerCase() === normalized;
   });
 }
 
@@ -5777,9 +6741,8 @@ function renderHistoryAnalysis(analysis) {
 }
 
 function renderCombinedInsights() {
-  const findings = ((latestFindingsHistory || {}).findings || []).map(normalizeFindingInsight);
   const observations = ((latestHistoryAnalysis || {}).observations || []).map(normalizeObservationInsight);
-  rows.insights = sortInsights(findings.concat(observations));
+  rows.insights = sortInsights(observations);
   updateInsightsStatus();
   renderInsights();
 }
@@ -5900,6 +6863,8 @@ function reportEvidenceItems(report) {
     items = wifiApReportEvidenceItems(evidence);
   } else if (source === "wifi_monitor" || type.startsWith("wifi_client")) {
     items = wifiClientReportEvidenceItems(evidence);
+  } else if (source === "adsb" || type.startsWith("adsb")) {
+    items = adsbReportEvidenceItems(evidence, type);
   } else if (source === "rayhunter" || type.startsWith("rayhunter")) {
     items = rayhunterReportEvidenceItems(evidence);
   } else if (source === "aprsis" || type.startsWith("aprsis")) {
@@ -5912,6 +6877,8 @@ function reportEvidenceItems(report) {
     items = swpcReportEvidenceItems(evidence);
   } else if (source === "pws" || type.startsWith("pws")) {
     items = pwsReportEvidenceItems(evidence);
+  } else if (source === "rtl433" || type.startsWith("rtl433")) {
+    items = rtl433ReportEvidenceItems(evidence, type);
   } else if (source === "lan" || type.startsWith("lan")) {
     items = lanReportEvidenceItems(evidence);
   } else {
@@ -6067,17 +7034,18 @@ function wifiApReportEvidenceItems(evidence) {
     evidence.channels && evidence.channels.length ? `channels ${compactList(evidence.channels, 8)}` : "",
     evidence.bands && evidence.bands.length ? `bands ${compactList(evidence.bands, 4)}` : "",
     evidence.bssid_count ? `${evidence.bssid_count} BSSIDs` : "",
-    evidence.encryption && evidence.encryption.length ? `security ${compactList(evidence.encryption, 6)}` : ""
+    evidence.encryption && evidence.encryption.length ? `security ${compactList(evidence.encryption, 6)}` : "",
+    signal && !foldedSignal ? `signal ${signal}` : ""
   ].filter(Boolean).join("; ");
   if (radio) parts.push({label: "Radio", value: radio});
   if (evidence.vendors && evidence.vendors.length) {
     parts.push({label: "Vendors", value: compactList(evidence.vendors, 4)});
   }
-  const pattern = presencePatternText(evidence);
-  if (pattern) parts.push({label: "Pattern", value: pattern});
-  const observed = observedSessionText(evidence);
-  if (observed) parts.push({label: "Observed", value: observed});
-  if (signal && !foldedSignal) parts.push({label: "Signal", value: signal});
+  const activity = [
+    presencePatternText(evidence),
+    reportSessionSummaryText(evidence)
+  ].filter(Boolean).join("; ");
+  if (activity) parts.push({label: "Activity", value: activity});
   return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
 }
 
@@ -6103,6 +7071,67 @@ function wifiClientReportEvidenceItems(evidence) {
     parts.push({label: "Observed", value: timeRangeText(evidence.first_seen, evidence.last_seen)});
   }
   return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function adsbReportEvidenceItems(evidence, type) {
+  if (type === "adsb_aircraft_population") {
+    return adsbPopulationReportEvidenceItems(evidence);
+  }
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const identity = [
+    evidence.icao ? `ICAO ${evidence.icao}` : "",
+    evidence.callsign ? `callsign ${evidence.callsign}` : "",
+    evidence.airline_icao ? `airline ${evidence.airline_icao}` : "",
+    evidence.squawk ? `squawk ${evidence.squawk}` : "",
+    evidence.air_ground || ""
+  ].filter(Boolean).join("; ");
+  if (identity) parts.push({label: "Identity", value: identity});
+  const altitude = [
+    evidence.altitude_ft !== undefined ? `latest ${evidence.altitude_ft} ft` : "",
+    evidence.min_altitude_ft !== undefined ? `min ${evidence.min_altitude_ft} ft` : "",
+    evidence.altitude_baro_ft !== undefined ? `baro ${evidence.altitude_baro_ft} ft` : "",
+    evidence.altitude_geom_ft !== undefined ? `geom ${evidence.altitude_geom_ft} ft` : ""
+  ].filter(Boolean).join("; ");
+  if (altitude) parts.push({label: "Altitude", value: altitude});
+  const position = [
+    evidence.distance_km !== undefined ? `${evidence.distance_km} km latest` : "",
+    evidence.min_distance_km !== undefined ? `${evidence.min_distance_km} km closest` : "",
+    evidence.path_span_km !== undefined ? `path ${evidence.path_span_km} km` : "",
+    evidence.position_count ? `${evidence.position_count} position(s)` : "",
+    evidence.position_source ? `source ${evidence.position_source}` : ""
+  ].filter(Boolean).join("; ");
+  if (position) parts.push({label: "Position", value: position});
+  const motion = [
+    evidence.speed_kt !== undefined ? `${evidence.speed_kt} kt` : "",
+    evidence.track_deg !== undefined ? `track ${evidence.track_deg} deg` : "",
+    evidence.seen_count ? `${evidence.seen_count} update(s)` : ""
+  ].filter(Boolean).join("; ");
+  if (motion) parts.push({label: "Motion", value: motion});
+  if (evidence.observed) parts.push({label: "Observed", value: evidence.observed});
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
+}
+
+function adsbPopulationReportEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const activity = [
+    evidence.aircraft_count ? `${evidence.aircraft_count} aircraft` : "",
+    evidence.positioned_count ? `${evidence.positioned_count} with position` : "",
+    evidence.emergency_count ? `${evidence.emergency_count} emergency` : "",
+    evidence.low_nearby_count ? `${evidence.low_nearby_count} low nearby` : ""
+  ].filter(Boolean).join("; ");
+  if (activity) parts.push({label: "Activity", value: activity});
+  const closest = [
+    evidence.closest_aircraft || "",
+    evidence.closest_km !== undefined && evidence.closest_km !== "" ? `${evidence.closest_km} km closest` : ""
+  ].filter(Boolean).join("; ");
+  if (closest) parts.push({label: "Closest", value: closest});
+  const lastSeen = displayTimestamp({last_seen_epoch: evidence.last_seen}, "last_seen");
+  if (lastSeen) parts.push({label: "Last Seen", value: lastSeen});
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
 }
 
 function rayhunterReportEvidenceItems(evidence) {
@@ -6824,6 +7853,92 @@ function pwsPopulationReportEvidenceItems(evidence) {
   return parts.length ? parts : genericEvidenceItems(evidence, "");
 }
 
+function rtl433ReportEvidenceItems(evidence, type) {
+  if (type === "rtl433_device_population") {
+    return rtl433PopulationReportEvidenceItems(evidence);
+  }
+  if (type === "rtl433_device_profile") {
+    return rtl433DeviceProfileReportEvidenceItems(evidence);
+  }
+  return genericEvidenceItems(evidence, "");
+}
+
+function rtl433DeviceProfileReportEvidenceItems(evidence) {
+  const parts = [];
+  const profileFindings = (evidence.findings || []).filter((item) => {
+    const text = String(item || "").toLowerCase();
+    return !text.includes("decode event") && !text.includes("clustered transmission");
+  });
+  const findings = findingsText(profileFindings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const identity = [
+    evidence.model || "",
+    evidence.id ? `ID ${evidence.id}` : "",
+    evidence.channel ? `channel ${evidence.channel}` : "",
+    evidence.protocol ? `protocol ${evidence.protocol}` : "",
+    evidence.category || ""
+  ].filter(Boolean).join("; ");
+  if (identity) parts.push({label: "Identity", value: identity});
+  const activity = [
+    evidence.events ? `${evidence.events} event(s)` : "",
+    evidence.bursts ? `${evidence.bursts} clustered repeat(s)` : ""
+  ].filter(Boolean).join("; ");
+  if (activity) parts.push({label: "Activity", value: activity});
+  const rf = [
+    evidence.latest_signal || "",
+    evidence.frequencies_mhz && evidence.frequencies_mhz.length ? `freqs ${compactList(evidence.frequencies_mhz, 6)}` : ""
+  ].filter(Boolean).join("; ");
+  if (rf) parts.push({label: "RF", value: rf});
+  const fields = rtl433LatestFieldsText(evidence.latest_fields);
+  if (fields) parts.push({label: "Fields", value: fields});
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
+}
+
+function rtl433LatestFieldsText(fields) {
+  if (!fields || typeof fields !== "object") return "";
+  const preferred = [
+    "temperature_C", "temperature_F", "humidity", "moisture", "battery_ok",
+    "button", "state", "status", "mod", "mic", "rssi", "snr", "noise"
+  ];
+  const seen = new Set();
+  const parts = [];
+  preferred.forEach((key) => {
+    if (fields[key] === undefined || fields[key] === null || fields[key] === "") return;
+    seen.add(key);
+    parts.push(`${key}: ${fields[key]}`);
+  });
+  Object.keys(fields).sort().forEach((key) => {
+    if (seen.has(key) || ["time", "model", "id", "channel", "freq", "protocol"].includes(key)) return;
+    const value = fields[key];
+    if (value === undefined || value === null || value === "") return;
+    parts.push(`${key}: ${value}`);
+  });
+  return compactList(parts, 6);
+}
+
+function rtl433PopulationReportEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const counts = [
+    rtl433CountText(evidence.device_count, "device"),
+    rtl433CountText(evidence.security_count, "security"),
+    rtl433CountText(evidence.tpms_count, "TPMS"),
+    rtl433CountText(evidence.utility_count, "utility"),
+    rtl433CountText(evidence.weather_count, "weather")
+  ].filter(Boolean).join("; ");
+  if (counts) parts.push({label: "Counts", value: counts});
+  const lastSeen = displayTimestamp({last_seen_epoch: evidence.last_seen}, "last_seen");
+  if (lastSeen) parts.push({label: "Last Seen", value: lastSeen});
+  return parts.length ? parts : genericEvidenceItems(evidence, "");
+}
+
+function rtl433CountText(value, label) {
+  const count = Number(value || 0);
+  if (!count) return "";
+  return `${count} ${label}${count === 1 || label === "TPMS" ? "" : "s"}`;
+}
+
 function lanReportEvidenceItems(evidence) {
   if (evidence.population_kind) return lanPopulationReportEvidenceItems(evidence);
   const parts = [];
@@ -7073,6 +8188,13 @@ function observedSessionText(evidence) {
   return [observed, session].filter(Boolean).join("; ");
 }
 
+
+function reportSessionSummaryText(evidence) {
+  const session = sessionText(evidence.sessions, evidence.active_session);
+  if (session) return session;
+  return timeRangeText(evidence.first_seen, evidence.last_seen);
+}
+
 function sessionText(count, active) {
   const sessions = Number(count || 0);
   const sessionPart = sessions ? `${sessions} visit${sessions === 1 ? "" : "s"}` : "";
@@ -7215,8 +8337,20 @@ function renderCollectorHealth(statuses) {
       const start = document.createElement("button");
       start.textContent = "Start";
       start.addEventListener("click", () => {
-        setCollectorBanner(item.key, "STARTING", "Start requested");
-        socket.emit("collector_control", {key: item.key, action: "start"});
+        const payload = collectorControlPayload(item.key, "start");
+        const detail = item.key === "rtl433"
+          ? rtl433StartRequestedDetail(payload.overrides || {})
+          : "Start requested";
+        setCollectorBanner(item.key, "STARTING", detail);
+        if (item.key === "rtl433" && payload.overrides && payload.overrides.frequency_plan) {
+          updateRtl433FrequencyState({
+            clear_frequency_state: true,
+            frequency_summary: payload.overrides.frequency_plan,
+            submitted_plan: payload.overrides.frequency_plan,
+            tune_pending: true
+          });
+        }
+        socket.emit("collector_control", payload);
       });
       control.appendChild(start);
     }
@@ -7225,7 +8359,7 @@ function renderCollectorHealth(statuses) {
       stop.textContent = "Stop";
       stop.addEventListener("click", () => {
         setCollectorBanner(item.key, "STOPPING", "Stop requested");
-        socket.emit("collector_control", {key: item.key, action: "stop"});
+        socket.emit("collector_control", collectorControlPayload(item.key, "stop"));
       });
       control.appendChild(stop);
     }
@@ -7240,6 +8374,9 @@ function renderCollectorTabStatusDots() {
   setTabStatusDots("wifi", [statusByKey.get("wifi")]);
   setTabStatusDots("wifi_monitor", [statusByKey.get("wifi_monitor")]);
   setTabStatusDots("rtlsdr", [statusByKey.get("rtlsdr")]);
+  setTabStatusDots("rtl433", [statusByKey.get("rtl433")]);
+  setTabStatusDots("adsb", [statusByKey.get("adsb")]);
+  setTabStatusDots("rayhunter", [statusByKey.get("rayhunter")]);
   setTabStatusDots("aprsis", [statusByKey.get("aprsis")]);
   setTabStatusDots("noaa", [statusByKey.get("noaa")]);
   setTabStatusDots("usgs", [statusByKey.get("usgs")]);
@@ -7464,6 +8601,13 @@ function hardwareSummary(item) {
       "local OS neighbor/default-route state"
     ].filter(Boolean).join(", ");
   }
+  if (item.key === "rtl433") {
+    return [
+      detected.enabled === false ? "disabled" : "",
+      detected.device_index !== undefined ? `RTL-SDR index ${detected.device_index}` : "",
+      detected.frequency_plan ? `plan ${detected.frequency_plan}` : ""
+    ].filter(Boolean).join(", ");
+  }
   return item.hardware || "";
 }
 
@@ -7540,6 +8684,9 @@ function softwareSummary(key) {
       executableStatus("rtl_test", detected.rtl_test)
     ].filter(Boolean).join(", ");
   }
+  if (key === "rtl433") {
+    return executableStatus("rtl_433", detected.rtl_433);
+  }
   if (key === "ble") {
     return packageStatus("bleak", detected.bleak);
   }
@@ -7557,8 +8704,10 @@ function softwareSummary(key) {
   }
   if (key === "lan") {
     return [
-      executableStatus("ip", detected.ip),
-      executableStatus("arp", detected.arp)
+      toolRoleStatus("ip", detected.ip, "required"),
+      toolRoleStatus("arp", detected.arp, "recommended"),
+      toolRoleStatus("arp-scan", detected.arp_scan, "optional"),
+      toolRoleStatus("avahi-browse", detected.avahi_browse, "optional")
     ].filter(Boolean).join(", ");
   }
   return "";
@@ -7567,6 +8716,12 @@ function softwareSummary(key) {
 function executableStatus(name, found) {
   if (found === undefined) return "";
   return `${name}: ${found ? "located" : "missing"}`;
+}
+
+function toolRoleStatus(name, found, role) {
+  if (found === undefined) return "";
+  const suffix = role ? ` ${role}` : "";
+  return `${name}${suffix}: ${found ? "available" : "missing"}`;
 }
 
 function wifiScanToolStatus(detected) {

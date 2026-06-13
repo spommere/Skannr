@@ -16,6 +16,7 @@ from .collectors.noaa import (
     tsunami_is_alertworthy,
 )
 from .collectors.pws import clean_pws_data
+from .collectors.rtl433 import clean_rtl433_data
 from .collectors.swpc import (
     clean_swpc_data,
     number_or_none,
@@ -92,6 +93,9 @@ DEFAULT_ALERT_CONFIG = {
         "level": "critical",
         "window_sec": 60,
         "count": 5,
+        "broadcast_count": 3,
+        "distinct_receiver_count": 3,
+        "single_receiver_count": 50,
     },
     "wifi_open_sensitive": {
         "enabled": True,
@@ -170,6 +174,20 @@ DEFAULT_ALERT_CONFIG = {
         "enabled": False,
         "level": "warning",
     },
+    "adsb_aircraft": {
+        "enabled": True,
+        "level": "warning",
+        "critical_level": "critical",
+        "nearby_radius_km": 10,
+        "low_altitude_ft": 1500,
+    },
+    "rtl433_signal": {
+        "enabled": False,
+        "level": "warning",
+        "categories": ["tpms", "security"],
+        "model_patterns": [],
+        "protocols": [],
+    },
 }
 
 LEVEL_PRIORITY = {
@@ -245,6 +263,10 @@ class AlertEngine:
             alerts.extend(self.process_swpc(event_type, data, timestamp, now, emit))
         elif collector == "pws":
             alerts.extend(self.process_pws(event_type, data, timestamp, now, emit))
+        elif collector == "adsb":
+            alerts.extend(self.process_adsb(event_type, data, timestamp, now, emit))
+        elif collector == "rtl433":
+            alerts.extend(self.process_rtl433(event_type, data, timestamp, now, emit))
         elif collector == "lan":
             alerts.extend(self.process_lan(event_type, data, timestamp, now, emit))
         elif collector == "system":
@@ -471,52 +493,110 @@ class AlertEngine:
         return wifi_is_open(data.get("encryption"))
 
     def wifi_disruption_alerts(self, source, event_type, data, timestamp, now, emit):
-        """Alert on bursts of deauth/disassociation frames."""
+        """Alert only when deauth/disassociation frames look attack-like."""
         rule = self.rule("wifi_disruption")
         if not rule.get("enabled", True):
             return []
-        ap = data.get("ap_mac") or data.get("bssid") or "unknown"
-        client = data.get("client_mac") or "unknown"
-        key = "{}:{}:{}".format(event_type, normalized_key(ap), normalized_key(client))
+        transmitter = (
+            data.get("transmitter_mac")
+            or data.get("client_mac")
+            or data.get("ap_mac")
+            or data.get("bssid")
+            or "unknown"
+        )
+        receiver = (
+            data.get("receiver_mac")
+            or data.get("ap_mac")
+            or data.get("client_mac")
+            or "unknown"
+        )
+        bssid = data.get("bssid") or data.get("ap_mac") or transmitter
+        receiver_key = normalized_key(receiver)
+        broadcast = bool(data.get("receiver_is_broadcast")) or self.is_broadcast_mac(receiver)
+        key = "{}:{}".format(event_type, normalized_key(transmitter))
         history = self.wifi_disruptions.setdefault(key, deque())
-        history.append(now)
+        history.append(
+            {
+                "timestamp": now,
+                "receiver": receiver_key,
+                "bssid": normalized_key(bssid),
+                "broadcast": broadcast,
+                "channel": data.get("channel"),
+                "rssi": self.to_number(data.get("rssi")),
+            }
+        )
         window = float(rule.get("window_sec", 60))
-        while history and now - history[0] > window:
+        while history and now - history[0]["timestamp"] > window:
             history.popleft()
-        count = int(rule.get("count", 5))
-        if len(history) < count:
+        total_count = len(history)
+        min_total = int(rule.get("count", 5))
+        broadcast_count = sum(1 for item in history if item.get("broadcast"))
+        distinct_receivers = {
+            item.get("receiver")
+            for item in history
+            if item.get("receiver") and item.get("receiver") != "unknown"
+        }
+        per_receiver_count = sum(
+            1 for item in history if item.get("receiver") == receiver_key
+        )
+        required_broadcast = int(rule.get("broadcast_count", 3))
+        required_receivers = int(rule.get("distinct_receiver_count", 3))
+        required_single = int(rule.get("single_receiver_count", 50))
+        attack_pattern = None
+        if broadcast_count >= required_broadcast and total_count >= min_total:
+            attack_pattern = "broadcast"
+        elif (
+            len(distinct_receivers) >= required_receivers
+            and total_count >= min_total
+        ):
+            attack_pattern = "multi-receiver"
+        elif per_receiver_count >= required_single:
+            attack_pattern = "high-rate single-receiver"
+        if not attack_pattern:
             return []
         title = "Wi-Fi disruption burst"
-        summary = "{} {} frame(s) in {:.0f}s; AP {}; client {}".format(
-            len(history),
+        summary = "{} attack-like {} frame(s) in {:.0f}s; transmitter {}; receivers {}; pattern {}".format(
+            total_count,
             "deauth" if event_type == "deauth_seen" else "disassociation",
             window,
-            ap,
-            client,
+            transmitter,
+            len(distinct_receivers) or 1,
+            attack_pattern,
         )
         return self.emit_alert(
             "wifi_disruption_burst",
             "wifi-disruption:{}:{}:{}".format(
-                event_type, normalized_key(ap), normalized_key(client)
+                event_type, normalized_key(transmitter), attack_pattern
             ),
             rule.get("level", "critical"),
             source,
             title,
-            ap,
+            transmitter,
             summary,
             timestamp,
             now,
             emit,
             {
                 "event_type": event_type,
-                "bssid": ap,
-                "mac": client,
-                "count": len(history),
+                "bssid": bssid,
+                "transmitter_mac": transmitter,
+                "receiver_mac": receiver,
+                "receiver_is_broadcast": broadcast,
+                "attack_pattern": attack_pattern,
+                "count": total_count,
+                "broadcast_count": broadcast_count,
+                "distinct_receiver_count": len(distinct_receivers),
+                "single_receiver_count": per_receiver_count,
                 "window_sec": window,
                 "channel": data.get("channel"),
                 "rssi": self.to_number(data.get("rssi")),
             },
         )
+
+    @staticmethod
+    def is_broadcast_mac(mac):
+        """Return True for broadcast destination MACs."""
+        return str(mac or "").lower() == "ff:ff:ff:ff:ff:ff"
 
     def process_ble(self, event_type, data, timestamp, now, emit):
         """Return BLE tracker-style alerts."""
@@ -1056,6 +1136,158 @@ class AlertEngine:
                 "vendor_name": data.get("vendor_name") or "",
             },
         )
+
+    def process_adsb(self, event_type, data, timestamp, now, emit):
+        """Return ADS-B alerts for emergency or low nearby aircraft."""
+        if event_type == "collector_offline" or event_type == "collector_retrying":
+            return self.collector_issue_alert("adsb", event_type, data, timestamp, now, emit)
+        if event_type != "adsb_aircraft":
+            return []
+        rule = self.rule("adsb_aircraft")
+        if not rule.get("enabled", True):
+            return []
+        icao = str(data.get("icao") or "").upper()
+        if not icao:
+            return []
+        callsign = str(data.get("callsign") or "").strip()
+        subject = "{} {}".format(callsign, icao).strip()
+        alerts = []
+        if data.get("emergency"):
+            alerts.append(
+                self.emit_alert(
+                    "adsb_aircraft",
+                    "adsb:emergency:{}".format(icao),
+                    rule.get("critical_level", "critical"),
+                    "adsb",
+                    "ADS-B emergency aircraft",
+                    subject,
+                    self.adsb_alert_summary(data),
+                    timestamp,
+                    now,
+                    emit,
+                    self.adsb_alert_details(data),
+                )
+            )
+        altitude = number_or_none(data.get("altitude_ft"))
+        distance = number_or_none(data.get("distance_km"))
+        low_altitude = number_or_none(rule.get("low_altitude_ft"))
+        nearby = number_or_none(rule.get("nearby_radius_km"))
+        if (
+            altitude is not None
+            and distance is not None
+            and low_altitude is not None
+            and nearby is not None
+            and altitude <= low_altitude
+            and distance <= nearby
+        ):
+            alerts.append(
+                self.emit_alert(
+                    "adsb_aircraft",
+                    "adsb:low-nearby:{}".format(icao),
+                    rule.get("level", "warning"),
+                    "adsb",
+                    "Low nearby aircraft",
+                    subject,
+                    self.adsb_alert_summary(data),
+                    timestamp,
+                    now,
+                    emit,
+                    self.adsb_alert_details(data),
+                )
+            )
+        return [alert for alert in alerts if alert]
+
+    def process_rtl433(self, event_type, data, timestamp, now, emit):
+        """Return optional rtl_433 alerts for configured decoded signals."""
+        if event_type == "collector_offline" or event_type == "collector_retrying":
+            return self.collector_issue_alert("rtl433", event_type, data, timestamp, now, emit)
+        if event_type != "rtl433_event":
+            return []
+        rule = self.rule("rtl433_signal")
+        if not rule.get("enabled", False):
+            return []
+        data = clean_rtl433_data(data)
+        category = str(data.get("category") or "").lower()
+        categories = {
+            str(item or "").strip().lower()
+            for item in rule.get("categories") or []
+            if str(item or "").strip()
+        }
+        protocol = str(data.get("protocol") or "")
+        protocols = {str(item or "").strip() for item in rule.get("protocols") or []}
+        matched = (
+            (categories and category in categories)
+            or (protocols and protocol in protocols)
+            or pattern_match(data.get("model"), rule.get("model_patterns"))
+        )
+        if not matched:
+            return []
+        subject = " ".join(
+            part
+            for part in (
+                data.get("model") or "",
+                data.get("id") or "",
+                data.get("channel") or "",
+            )
+            if part
+        ).strip() or "RTL-433 device"
+        alert = self.emit_alert(
+            "rtl433_signal",
+            "rtl433:{}:{}".format(category or "device", data.get("subject_key") or subject),
+            rule.get("level", "warning"),
+            "rtl433",
+            "RTL-433 decoded signal",
+            subject,
+            "{} event decoded by rtl_433.".format(category or "device"),
+            timestamp,
+            now,
+            emit,
+            {
+                "model": data.get("model") or "",
+                "id": data.get("id") or "",
+                "channel": data.get("channel") or "",
+                "protocol": data.get("protocol") or "",
+                "category": category,
+                "frequency_mhz": data.get("frequency_mhz") or "",
+                "rssi_db": data.get("rssi_db") or "",
+                "snr_db": data.get("snr_db") or "",
+            },
+        )
+        return [alert] if alert else []
+
+    def adsb_alert_summary(self, data):
+        """Return compact ADS-B alert text."""
+        parts = []
+        if data.get("callsign"):
+            parts.append(data.get("callsign"))
+        if data.get("icao"):
+            parts.append(data.get("icao"))
+        if data.get("squawk"):
+            parts.append("squawk {}".format(data.get("squawk")))
+        if data.get("altitude_ft") not in (None, ""):
+            parts.append("alt {} ft".format(data.get("altitude_ft")))
+        if data.get("distance_km") not in (None, ""):
+            parts.append("{:.1f} km away".format(float(data.get("distance_km"))))
+        if data.get("ground_speed_kt") not in (None, ""):
+            parts.append("{} kt".format(data.get("ground_speed_kt")))
+        return "; ".join(str(part) for part in parts if part) or "ADS-B aircraft event"
+
+    def adsb_alert_details(self, data):
+        """Return structured ADS-B alert details."""
+        return {
+            "icao": data.get("icao") or "",
+            "callsign": data.get("callsign") or "",
+            "squawk": data.get("squawk") or "",
+            "altitude_ft": data.get("altitude_ft"),
+            "distance_km": data.get("distance_km"),
+            "lat": data.get("lat"),
+            "lon": data.get("lon"),
+            "ground_speed_kt": data.get("ground_speed_kt"),
+            "track_deg": data.get("track_deg"),
+            "vertical_rate_fpm": data.get("vertical_rate_fpm"),
+            "emergency": bool(data.get("emergency")),
+            "source": data.get("source") or "",
+        }
 
     def process_system(self, event_type, data, timestamp, now, emit):
         """Return alerts from collector lifecycle status."""

@@ -138,6 +138,7 @@ class PWSCollector(BaseCollector):
     name = "PWS"
     tab_label = "PWS"
     required_hardware = "Ambient Weather API"
+    subject_history_event_types = ("pws_weather", "collector_offline", "collector_retrying")
 
     @classmethod
     def hardware_status(cls, config):

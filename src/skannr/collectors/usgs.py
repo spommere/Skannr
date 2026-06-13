@@ -84,6 +84,7 @@ class USGSCollector(BaseCollector):
     name = "USGS"
     tab_label = "USGS"
     required_hardware = "Internet access"
+    subject_history_event_types = ("usgs_earthquake", "collector_offline", "collector_retrying")
 
     @classmethod
     def hardware_status(cls, config):

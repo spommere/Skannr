@@ -6,15 +6,18 @@ Longer historical interpretation belongs in device_history.py, history_analysis.
 and reports.py.
 """
 
+import fnmatch
 import math
 from collections import deque
 
 from .bus import local_now
+from .collectors.adsb import clean_adsb_data
 from .collectors.aprsis import clean_aprs_data
 from .collectors.lan import clean_lan_data
 from .collectors.noaa import clean_noaa_data, tsunami_is_alertworthy
 from .collectors.pws import clean_pws_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
+from .collectors.rtl433 import clean_rtl433_data
 from .collectors.swpc import clean_swpc_data, number_or_none, swpc_event_is_alert
 from .collectors.usgs import clean_usgs_data
 from .log_utils import event_time_epoch, now_epoch, timestamp_epoch
@@ -32,6 +35,17 @@ DEFAULT_FINDINGS_CONFIG = {
     "lost_after_sec": 300,
     "ble_live_identity_required": True,
     "ble_live_service_identity": False,
+    "wifi_monitor_emit_client_new": False,
+    "wifi_monitor_emit_client_returned": False,
+    "wifi_monitor_emit_client_lost": False,
+    "wifi_monitor_emit_blank_probe": False,
+    "wifi_monitor_emit_randomized_mac": False,
+    "wifi_monitor_emit_probe_burst": False,
+    "wifi_monitor_emit_strong_client": False,
+    "wifi_monitor_emit_ap_presence": False,
+    "wifi_monitor_emit_strong_ap": False,
+    "wifi_monitor_probe_burst_once": True,
+    "sensitive_ssids": [],
     "burst_window_sec": 30,
     "burst_count": 5,
     "cooldown_sec": 120,
@@ -45,6 +59,9 @@ DEFAULT_FINDINGS_CONFIG = {
     "pws_rain_1h_high_in": 0.25,
     "pws_wind_high_mph": 25,
     "pws_gust_high_mph": 35,
+    "adsb_low_altitude_ft": 1500,
+    "adsb_nearby_radius_km": 10,
+    "adsb_emit_new_aircraft": True,
     "swpc_warning_xray_class": "X1.0",
     "swpc_warning_radio_blackout": "R3",
     "swpc_warning_solar_radiation_storm": "S3",
@@ -72,6 +89,7 @@ class FindingsEngine:
         self.wifi_clients = {}
         self.wifi_aps = {}
         self.wifi_probe_history = {}
+        self.wifi_probe_burst_active = set()
         self.ble_devices = {}
         self.bt_classic_devices = {}
         self.rtlsdr_signals = {}
@@ -84,6 +102,8 @@ class FindingsEngine:
         self.lan_devices = {}
         self.lan_gateways = {}
         self.pws_stations = {}
+        self.adsb_aircraft = {}
+        self.rtl433_subjects = {}
 
     def bootstrap(self, events):
         """Replay persisted events to rebuild state without replaying old noise."""
@@ -220,6 +240,14 @@ class FindingsEngine:
             findings.extend(
                 self._process_rtlsdr(event_type, event, timestamp, emit)
             )
+        elif collector == "rtl433":
+            findings.extend(
+                self._process_rtl433(event_type, event, timestamp, emit)
+            )
+        elif collector == "adsb":
+            findings.extend(
+                self._process_adsb(event_type, event, timestamp, emit)
+            )
         elif collector == "rayhunter":
             findings.extend(
                 self._process_rayhunter(event_type, event, timestamp, emit)
@@ -333,7 +361,18 @@ class FindingsEngine:
             "vendor_name": data.get("vendor_name") or "",
         }
 
-        if previous is None or not was_active or self._is_return(previous, now):
+        if (
+            (previous is None and self.emit_wifi_monitor_client_new(source))
+            or (
+                previous
+                and (not was_active or self._is_return(previous, now))
+                and self.emit_wifi_monitor_client_returned(source)
+            )
+            or (
+                source != "wifi_monitor"
+                and (previous is None or not was_active or self._is_return(previous, now))
+            )
+        ):
             findings.extend(
                 self._finding_list(
                     timestamp,
@@ -348,7 +387,11 @@ class FindingsEngine:
                 )
             )
 
-        if not ssid and not blank_reported:
+        if (
+            not ssid
+            and not blank_reported
+            and self.emit_wifi_monitor_blank_probe(source)
+        ):
             findings.extend(
                 self._finding_list(
                     timestamp,
@@ -365,7 +408,11 @@ class FindingsEngine:
                 )
             )
 
-        if self._is_randomized_mac(mac) and previous is None:
+        if (
+            self._is_randomized_mac(mac)
+            and previous is None
+            and self.emit_wifi_monitor_randomized_mac(source)
+        ):
             findings.extend(
                 self._finding_list(
                     timestamp,
@@ -383,6 +430,7 @@ class FindingsEngine:
         if (
             self._is_strong(rssi, self.config["strong_wifi_rssi"])
             and not was_strong
+            and self.emit_wifi_monitor_strong_client(source)
         ):
             findings.extend(
                 self._finding_list(
@@ -399,19 +447,52 @@ class FindingsEngine:
             )
 
         findings.extend(
+            self._wifi_sensitive_probe(source, mac, ssid, timestamp, emit, data)
+        )
+        findings.extend(
             self._wifi_probe_burst(source, mac, ssid, timestamp, now, emit)
         )
         return findings
 
+    def _wifi_sensitive_probe(self, source, mac, ssid, timestamp, emit, data):
+        """Detect probes for explicitly configured sensitive SSID patterns."""
+        if source != "wifi_monitor" or not ssid:
+            return []
+        if not self.matches_sensitive_ssid(ssid):
+            return []
+        return self._finding_list(
+            timestamp,
+            "warning",
+            source,
+            "wifi_sensitive_ssid_probe",
+            "Sensitive SSID probed",
+            "Client {} probed for sensitive SSID '{}'".format(mac, ssid),
+            "wifi-sensitive-probe:{}:{}".format(mac, ssid.lower()),
+            emit,
+            self.wifi_client_attributes(mac, ssid, data),
+        )
+
     def _wifi_probe_burst(self, source, mac, ssid, timestamp, now, emit):
         """Detect a burst of probe requests from one client MAC."""
+        if source == "wifi_monitor" and not self.config.get(
+            "wifi_monitor_emit_probe_burst", False
+        ):
+            return []
         history = self.wifi_probe_history.setdefault(mac, deque())
         history.append(now)
         window = float(self.config["burst_window_sec"])
         while history and now - history[0] > window:
             history.popleft()
         if len(history) < int(self.config["burst_count"]):
+            self.wifi_probe_burst_active.discard(mac)
             return []
+        if (
+            self.config.get("wifi_monitor_probe_burst_once", True)
+            and source == "wifi_monitor"
+            and mac in self.wifi_probe_burst_active
+        ):
+            return []
+        self.wifi_probe_burst_active.add(mac)
         return self._finding_list(
             timestamp,
             "warning",
@@ -489,7 +570,7 @@ class FindingsEngine:
             "strong_reported": strong_reported or strong_now,
         }
 
-        if previous is None:
+        if previous is None and self.emit_wifi_monitor_ap_presence(source):
             findings.extend(
                 self._finding_list(
                     timestamp,
@@ -504,7 +585,12 @@ class FindingsEngine:
                 )
             )
 
-        if strong_now and not was_strong and not strong_reported:
+        if (
+            strong_now
+            and not was_strong
+            and not strong_reported
+            and self.emit_wifi_monitor_strong_ap(source)
+        ):
             findings.extend(
                 self._finding_list(
                     timestamp,
@@ -527,9 +613,11 @@ class FindingsEngine:
             if event_type == "deauth_seen"
             else "Wi-Fi disassociation frame observed"
         )
-        detail = "Client {} AP {} channel {}".format(
-            data.get("client_mac") or "unknown",
-            data.get("ap_mac") or "unknown",
+        transmitter = data.get("transmitter_mac") or data.get("client_mac") or "unknown"
+        receiver = data.get("receiver_mac") or data.get("ap_mac") or "unknown"
+        detail = "Transmitter {} receiver {} channel {}".format(
+            transmitter,
+            receiver,
             data.get("channel") or "unknown",
         )
         return self._finding_list(
@@ -540,12 +628,13 @@ class FindingsEngine:
             title,
             detail,
             "{}:{}:{}".format(
-                event_type, data.get("client_mac"), data.get("ap_mac")
+                event_type, transmitter, receiver
             ),
             emit,
             {
-                "mac": data.get("client_mac") or "",
-                "bssid": data.get("ap_mac") or "",
+                "mac": transmitter,
+                "bssid": data.get("bssid") or data.get("ap_mac") or "",
+                "receiver_mac": receiver,
             },
         )
 
@@ -918,6 +1007,118 @@ class FindingsEngine:
                 "rtlsdr", event_type, data, timestamp, emit
             )
         return []
+
+    def _process_rtl433(self, event_type, event, timestamp, emit):
+        """Generate compact findings from decoded rtl_433 events."""
+        data = clean_rtl433_data(event.get("data") or {})
+        if event_type in ("collector_offline", "collector_retrying"):
+            return self._collector_warning("rtl433", event_type, data, timestamp, emit)
+        if event_type != "rtl433_event":
+            return []
+        key = data.get("subject_key") or data.get("model") or data.get("id")
+        if not key:
+            return []
+        previous = self.rtl433_subjects.get(key)
+        self.rtl433_subjects[key] = data
+        label = " ".join(
+            part
+            for part in (
+                data.get("model") or "",
+                data.get("id") or "",
+                data.get("channel") or "",
+            )
+            if part
+        ).strip() or "RTL-433 device"
+        category = data.get("category") or "device"
+        severity = "warning" if category in ("tpms", "security") else "info"
+        title = "RTL-433 decoded signal"
+        if previous is None:
+            title = "New RTL-433 decoded subject"
+        detail = "{} decoded by rtl_433 ({})".format(label, category)
+        return self._finding_list(
+            timestamp,
+            severity,
+            "rtl433",
+            "rtl433_decoded_subject",
+            title,
+            detail,
+            "rtl433:{}:{}".format(category, key),
+            emit,
+            data,
+        )
+
+    def _process_adsb(self, event_type, event, timestamp, emit):
+        """Generate focused findings from decoded ADS-B aircraft state."""
+        data = clean_adsb_data(event.get("data") or {})
+        if event_type in ("collector_offline", "collector_retrying"):
+            return self._collector_warning("adsb", event_type, data, timestamp, emit)
+        if event_type != "adsb_aircraft":
+            return []
+        icao = data.get("icao")
+        if not icao:
+            return []
+        previous = self.adsb_aircraft.get(icao)
+        self.adsb_aircraft[icao] = data
+        findings = []
+        label = "{} {}".format(data.get("callsign") or "", icao).strip()
+        if previous is None and self.config.get("adsb_emit_new_aircraft", True):
+            findings.extend(
+                self._finding_list(
+                    timestamp,
+                    "info",
+                    "adsb",
+                    "adsb_aircraft_new",
+                    "New ADS-B aircraft",
+                    "{} observed".format(label),
+                    "adsb-aircraft-new:{}".format(icao),
+                    emit,
+                    data,
+                )
+            )
+        if data.get("emergency"):
+            findings.extend(
+                self._finding_list(
+                    timestamp,
+                    "warning",
+                    "adsb",
+                    "adsb_emergency_squawk",
+                    "ADS-B emergency squawk",
+                    "{} squawk {}".format(label, data.get("squawk") or "emergency"),
+                    "adsb-emergency:{}".format(icao),
+                    emit,
+                    data,
+                )
+            )
+        if self.adsb_low_nearby(data):
+            findings.extend(
+                self._finding_list(
+                    timestamp,
+                    "warning",
+                    "adsb",
+                    "adsb_low_nearby",
+                    "Low nearby ADS-B aircraft",
+                    "{} at {} ft, {} km".format(
+                        label,
+                        data.get("altitude_ft"),
+                        data.get("distance_km"),
+                    ),
+                    "adsb-low-nearby:{}".format(icao),
+                    emit,
+                    data,
+                )
+            )
+        return findings
+
+    def adsb_low_nearby(self, data):
+        """Return True for low aircraft near the observer."""
+        altitude = self._to_number(data.get("altitude_ft"))
+        distance = self._to_number(data.get("distance_km"))
+        if altitude is None or distance is None:
+            return False
+        return (
+            altitude <= float(self.config.get("adsb_low_altitude_ft", 1500))
+            and distance <= float(self.config.get("adsb_nearby_radius_km", 10))
+        )
 
     def _process_system(self, event_type, event, timestamp, emit):
         data = event.get("data") or {}
@@ -2327,6 +2528,11 @@ class FindingsEngine:
             ):
                 data["active"] = False
                 source = data.get("source") or "wifi"
+                if (
+                    source == "wifi_monitor"
+                    and not self.config.get("wifi_monitor_emit_client_lost", False)
+                ):
+                    continue
                 findings.extend(
                     self._finding_list(
                         timestamp,
@@ -2349,6 +2555,58 @@ class FindingsEngine:
             ):
                 data["active"] = False
         return findings
+
+    def emit_wifi_monitor_client_new(self, source):
+        """Return True when monitor-mode new-client findings should be emitted."""
+        return source != "wifi_monitor" or bool(
+            self.config.get("wifi_monitor_emit_client_new", False)
+        )
+
+    def emit_wifi_monitor_client_returned(self, source):
+        """Return True when monitor-mode returned-client findings should be emitted."""
+        return source != "wifi_monitor" or bool(
+            self.config.get("wifi_monitor_emit_client_returned", False)
+        )
+
+    def emit_wifi_monitor_blank_probe(self, source):
+        """Return True when monitor-mode blank-probe findings should be emitted."""
+        return source != "wifi_monitor" or bool(
+            self.config.get("wifi_monitor_emit_blank_probe", False)
+        )
+
+    def emit_wifi_monitor_randomized_mac(self, source):
+        """Return True when monitor-mode randomized-MAC findings should be emitted."""
+        return source != "wifi_monitor" or bool(
+            self.config.get("wifi_monitor_emit_randomized_mac", False)
+        )
+
+    def emit_wifi_monitor_strong_client(self, source):
+        """Return True when monitor-mode strong-client findings should be emitted."""
+        return source != "wifi_monitor" or bool(
+            self.config.get("wifi_monitor_emit_strong_client", False)
+        )
+
+    def emit_wifi_monitor_ap_presence(self, source):
+        """Return True when monitor-mode AP presence findings should be emitted."""
+        return source != "wifi_monitor" or bool(
+            self.config.get("wifi_monitor_emit_ap_presence", False)
+        )
+
+    def emit_wifi_monitor_strong_ap(self, source):
+        """Return True when monitor-mode strong-AP findings should be emitted."""
+        return source != "wifi_monitor" or bool(
+            self.config.get("wifi_monitor_emit_strong_ap", False)
+        )
+
+    def matches_sensitive_ssid(self, ssid):
+        """Return True if an SSID matches configured sensitive probe patterns."""
+        text = str(ssid or "").strip()
+        if not text:
+            return False
+        for pattern in self.config.get("sensitive_ssids") or []:
+            if fnmatch.fnmatchcase(text.lower(), str(pattern).lower()):
+                return True
+        return False
 
     def _finding_list(
         self,

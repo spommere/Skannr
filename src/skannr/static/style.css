@@ -233,12 +233,22 @@ h3 {
   padding: 4px 8px;
   font-size: 12px;
   font-weight: 650;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, transform 80ms ease, box-shadow 120ms ease;
 }
 
 .global-alert-actions button:hover,
 #alerts-list button:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+button:not(.detail-link):active,
+button:not(.detail-link).button-clicked {
+  border-color: var(--accent);
+  background: #dceff1;
+  color: var(--accent);
+  box-shadow: inset 0 2px 4px rgba(23, 33, 38, 0.22);
+  transform: translateY(1px);
 }
 
 .alert-detail-items a {
@@ -361,6 +371,14 @@ main {
   background: #fff;
 }
 
+#tab-rtlsdr .control-bar {
+  grid-template-columns: repeat(5, minmax(145px, 1fr));
+}
+
+#tab-rtlsdr .control-bar input {
+  min-width: 9ch;
+}
+
 .source-filter {
   display: flex;
   flex-wrap: wrap;
@@ -470,7 +488,8 @@ main {
 }
 
 table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   margin-top: 12px;
   table-layout: auto;
@@ -558,42 +577,78 @@ table {
   min-width: 18ch;
 }
 
-.reports-table .report-col-source {
-  width: 1%;
-  white-space: nowrap;
+.reports-table {
+  width: 100%;
+  max-width: 100%;
+  table-layout: fixed;
+}
+
+.reports-table th,
+.reports-table td {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .reports-table .report-col-score {
-  min-width: 48px;
-  width: 48px;
+  width: 5%;
   text-align: right;
   white-space: nowrap;
 }
 
 .reports-table .report-col-last-seen {
+  width: 9%;
   white-space: nowrap;
 }
 
 .reports-table .report-col-confidence {
-  min-width: 88px;
-  width: 88px;
+  width: 8%;
   white-space: nowrap;
 }
 
 .reports-table .report-col-reasons {
-  min-width: 120px;
-  width: 120px;
+  width: 9%;
 }
 
-.reports-table .report-col-summary {
-  min-width: 180px;
-  width: 18%;
+.reports-table .report-col-subject {
+  width: 30%;
+}
+
+.reports-table .report-col-report {
+  width: 15%;
 }
 
 .reports-table .report-col-evidence {
-  min-width: 420px;
-  max-width: none;
-  width: 46%;
+  width: 24%;
+}
+
+.reports-table .report-source-line {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.reports-table .report-title-line {
+  margin-top: 2px;
+}
+
+.reports-table .report-subject-line {
+  font-weight: 600;
+}
+
+.reports-table .report-summary-line {
+  margin-top: 8px;
+}
+
+.reports-table .evidence-list {
+  grid-template-columns: minmax(7ch, max-content) minmax(0, 1fr);
+}
+
+.reports-table .evidence-list dd.evidence-nowrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .reports-section {
@@ -638,46 +693,79 @@ table {
 
 #history-bluetooth-panel table th:nth-child(1),
 #history-bluetooth-panel table td:nth-child(1) {
-  min-width: 18ch;
-  white-space: nowrap;
+  max-width: 16ch;
+  width: 12%;
 }
 
 #history-bluetooth-panel table th:nth-child(2),
 #history-bluetooth-panel table td:nth-child(2) {
-  min-width: 10ch;
-  white-space: nowrap;
+  min-width: 24ch;
+  max-width: 32ch;
+  width: 24%;
+}
+
+#history-bluetooth-panel table th:nth-child(3),
+#history-bluetooth-panel table td:nth-child(3) {
+  min-width: 20ch;
+  max-width: 24ch;
+  width: 15%;
 }
 
 #history-bluetooth-panel table th:nth-child(4),
-#history-bluetooth-panel table td:nth-child(4) {
-  max-width: 22ch;
-}
-
+#history-bluetooth-panel table td:nth-child(4),
 #history-bluetooth-panel table th:nth-child(5),
-#history-bluetooth-panel table td:nth-child(5),
-#history-bluetooth-panel table th:nth-child(6),
-#history-bluetooth-panel table td:nth-child(6) {
+#history-bluetooth-panel table td:nth-child(5) {
   min-width: 7ch;
   white-space: nowrap;
 }
 
-#history-bluetooth-panel table th:nth-child(7),
-#history-bluetooth-panel table td:nth-child(7),
-#history-bluetooth-panel table th:nth-child(16),
-#history-bluetooth-panel table td:nth-child(16) {
+#history-bluetooth-panel table th:nth-child(6),
+#history-bluetooth-panel table td:nth-child(6),
+#history-bluetooth-panel table th:nth-child(15),
+#history-bluetooth-panel table td:nth-child(15) {
   min-width: 9ch;
   white-space: nowrap;
 }
 
-#history-bluetooth-panel table th:nth-child(8),
-#history-bluetooth-panel table td:nth-child(8) {
+#history-bluetooth-panel table th:nth-child(7),
+#history-bluetooth-panel table td:nth-child(7) {
   min-width: 8ch;
   white-space: nowrap;
 }
 
-#history-bluetooth-panel table th:nth-child(17),
-#history-bluetooth-panel table td:nth-child(17) {
-  min-width: 8ch;
+#history-bluetooth-panel table th:nth-child(8),
+#history-bluetooth-panel table td:nth-child(8),
+#history-bluetooth-panel table th:nth-child(9),
+#history-bluetooth-panel table td:nth-child(9) {
+  min-width: 10ch;
+  white-space: nowrap;
+}
+
+#history-bluetooth-panel table th:nth-child(10),
+#history-bluetooth-panel table td:nth-child(10) {
+  min-width: 10ch;
+  white-space: nowrap;
+}
+
+#history-bluetooth-panel table th:nth-child(11),
+#history-bluetooth-panel table td:nth-child(11),
+#history-bluetooth-panel table th:nth-child(13),
+#history-bluetooth-panel table td:nth-child(13) {
+  min-width: 9ch;
+  white-space: nowrap;
+}
+
+#history-bluetooth-panel table th:nth-child(12),
+#history-bluetooth-panel table td:nth-child(12),
+#history-bluetooth-panel table th:nth-child(14),
+#history-bluetooth-panel table td:nth-child(14) {
+  min-width: 12ch;
+  white-space: nowrap;
+}
+
+#history-bluetooth-panel table th:nth-child(16),
+#history-bluetooth-panel table td:nth-child(16) {
+  min-width: 7ch;
   white-space: nowrap;
 }
 
@@ -835,6 +923,72 @@ table {
   white-space: nowrap;
 }
 
+
+#history-wifi-panel table th:nth-child(1),
+#history-wifi-panel table td:nth-child(1) {
+  max-width: 26ch;
+  width: 18%;
+}
+
+#history-wifi-panel table th:nth-child(2),
+#history-wifi-panel table td:nth-child(2),
+#history-wifi-monitor-panel table th:nth-child(1),
+#history-wifi-monitor-panel table td:nth-child(1) {
+  min-width: 18ch;
+  white-space: nowrap;
+}
+
+#history-wifi-panel table th:nth-child(4),
+#history-wifi-panel table td:nth-child(4),
+#history-wifi-panel table th:nth-child(5),
+#history-wifi-panel table td:nth-child(5),
+#history-wifi-monitor-panel table th:nth-child(4),
+#history-wifi-monitor-panel table td:nth-child(4),
+#history-wifi-monitor-panel table th:nth-child(5),
+#history-wifi-monitor-panel table td:nth-child(5) {
+  min-width: 17ch;
+  white-space: nowrap;
+}
+
+#history-wifi-panel table th:nth-child(9),
+#history-wifi-panel table td:nth-child(9) {
+  min-width: 6ch;
+  white-space: nowrap;
+}
+
+#history-wifi-panel table th:nth-child(10),
+#history-wifi-panel table td:nth-child(10),
+#history-wifi-monitor-panel table th:nth-child(11),
+#history-wifi-monitor-panel table td:nth-child(11) {
+  min-width: 7ch;
+  white-space: nowrap;
+}
+
+#history-wifi-monitor-panel table th:nth-child(3),
+#history-wifi-monitor-panel table td:nth-child(3) {
+  max-width: 20ch;
+  width: 14%;
+}
+
+#history-wifi-monitor-panel table th:nth-child(7),
+#history-wifi-monitor-panel table td:nth-child(7),
+#history-wifi-monitor-panel table th:nth-child(8),
+#history-wifi-monitor-panel table td:nth-child(8),
+#history-wifi-monitor-panel table th:nth-child(9),
+#history-wifi-monitor-panel table td:nth-child(9),
+#history-wifi-monitor-panel table th:nth-child(10),
+#history-wifi-monitor-panel table td:nth-child(10) {
+  min-width: 8ch;
+  white-space: nowrap;
+}
+
+
+#history-lan-panel table th:nth-child(9),
+#history-lan-panel table td:nth-child(9) {
+  min-width: 7ch;
+  white-space: nowrap;
+}
+
 .history-pws-subjects-table th:nth-child(1),
 .history-pws-subjects-table td:nth-child(1) {
   min-width: 13ch;
@@ -847,7 +1001,7 @@ td {
   padding: 8px;
   text-align: left;
   vertical-align: top;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
   word-break: normal;
   font-size: 14px;
 }
@@ -855,7 +1009,10 @@ td {
 th {
   color: var(--muted);
   font-size: 12px;
+  overflow-wrap: normal;
   text-transform: uppercase;
+  white-space: nowrap;
+  word-break: normal;
 }
 
 .alert-block {
@@ -898,6 +1055,7 @@ td button {
   border-radius: 4px;
   padding: 5px 8px;
   cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, transform 80ms ease, box-shadow 120ms ease;
 }
 
 .detail-link {
@@ -1023,6 +1181,7 @@ td button {
   padding: 6px 12px;
   cursor: pointer;
   font-weight: 650;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, transform 80ms ease, box-shadow 120ms ease;
 }
 
 .native-frame-actions {

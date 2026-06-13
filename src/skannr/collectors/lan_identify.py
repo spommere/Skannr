@@ -60,6 +60,7 @@ class LANIdentifyCollector(BaseCollector):
     name = "LAN Identify"
     tab_label = "LAN Identify"
     required_hardware = "nmap/curl for active LAN identification"
+    subject_history_event_types = ("identify_result",)
 
     @classmethod
     def hardware_status(cls, config):

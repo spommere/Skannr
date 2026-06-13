@@ -214,6 +214,14 @@ class NOAACollector(BaseCollector):
     name = "NOAA"
     tab_label = "NOAA"
     required_hardware = "Internet access"
+    subject_history_event_types = (
+        "noaa_weather_alert",
+        "noaa_tropical_advisory",
+        "noaa_forecast_summary",
+        "noaa_tsunami_alert",
+        "collector_offline",
+        "collector_retrying",
+    )
 
     @classmethod
     def hardware_status(cls, config):

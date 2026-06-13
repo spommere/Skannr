@@ -1,6 +1,6 @@
 # Skannr Design Document
 
-Version: 0.2.5, 2026-06-09
+Version: 0.2.6, 2026-06-11
 
 ## 1. Overview
 
@@ -16,6 +16,8 @@ The current implementation focuses on:
 - on-demand BLE Device Information Service reads
 - on-demand Bluetooth Classic inquiry
 - RTL-SDR spectrum scanning with `rtl_power`
+- optional RTL-433 decoded ISM-band context through `rtl_433`
+- optional ADS-B aircraft context through `dump1090`/`readsb`
 - optional APRS-IS internet-fed local-area situational context
 - optional NOAA/NWS/NHC/tsunami.gov internet-fed hazard context
 - optional USGS internet-fed earthquake context
@@ -35,12 +37,13 @@ that explicitly depend on it, such as APRS-IS, NOAA, USGS, SWPC, and PWS.
 ### Goals
 
 - Provide one local dashboard for nearby Wi-Fi, Bluetooth, RTL-SDR activity,
-  optional internet-fed situational context, and local LAN state.
+  ADS-B aircraft context, optional internet-fed situational context, and local
+  LAN state.
 - Degrade visibly when configured or required hardware is missing, rather than
   silently pretending the collector is healthy.
 - Keep collectors independent so Wi-Fi scan, Wi-Fi monitor, Bluetooth,
-  RTL-SDR, and internet-fed collectors can fail or stop without taking down the
-  whole dashboard.
+  RTL-SDR, RTL-433, ADS-B, and internet-fed collectors can fail or stop without
+  taking down the whole dashboard.
 - Persist raw events as simple JSONL files that can be inspected or analyzed
   outside Skannr.
 - Maintain materialized summaries so normal startup and refresh do not need to
@@ -65,6 +68,10 @@ Skannr is a single Python process with these major components:
   view refresh orchestration, and process startup/shutdown.
 - `src/skannr/bus.py`: in-process asynchronous event bus.
 - `src/skannr/collectors/`: collector Python modules and hardware probes.
+- `scripts/skannr_precheck.py` and `scripts/skannr_postcheck.py`: install-time
+  and post-install collector support checks that seed fresh collector enabled
+  flags and report missing required/recommended/optional local tools and
+  selected hardware probes.
 - `src/skannr/persistence/`: persistence backend interface and filesystem JSONL backend.
 - `src/skannr/findings.py`: live deterministic findings engine over collector events.
 - `src/skannr/alerts.py`: live alert engine for operator-attention events.
@@ -74,7 +81,8 @@ Skannr is a single Python process with these major components:
 - `src/skannr/device_history.py`: internal Wi-Fi/Bluetooth compatibility view
   used by older browser drilldown and live-table code.
 - `src/skannr/subject_history.py`: collector-neutral subject rollups for
-  Wi-Fi, Bluetooth, APRS-IS, Rayhunter, RTL-SDR, NOAA, USGS, SWPC, PWS, and LAN.
+  Wi-Fi, Bluetooth, APRS-IS, Rayhunter, RTL-SDR, RTL-433, ADS-B, NOAA, USGS,
+  SWPC, PWS, and LAN.
 - `src/skannr/history_analysis.py`: deterministic Insights from the subject
   device view.
 - `src/skannr/reports.py`: slower longitudinal summaries from Subject History.
@@ -109,7 +117,9 @@ The normal event path is:
    connectivity check, so unavailable internet or Pushover API failures are
    logged without blocking collector fan-out.
 9. `FindingsEngine.process()` may emit one or more finding events.
-10. Finding events are persisted under `runtime/logs/findings` and broadcast to browsers.
+10. Finding events are broadcast to browsers and may be retained under
+    `runtime/logs/findings` as live/debug evidence. Retained finding logs are
+    not a derived-data dependency.
 11. Collector health and system status snapshots are broadcast.
 
 Browser updates use Server-Sent Events from `/events`. Socket.IO remains present
@@ -125,7 +135,7 @@ that retained material. The important dependency graph is:
 collector event
   -> runtime/logs/<collector>/YYYY-MM-DD.jsonl
   -> runtime/logs/alerts/YYYY-MM-DD.jsonl       live AlertEngine output
-  -> runtime/logs/findings/YYYY-MM-DD.jsonl     live FindingsEngine output
+  -> runtime/logs/findings/YYYY-MM-DD.jsonl     live/debug FindingsEngine output
 
 raw collector JSONL
   -> runtime/logs/device_history/subject_history.json
@@ -138,10 +148,6 @@ Subject History
   -> Wi-Fi/Bluetooth compatibility view         device_history.json tables
   -> Insights                                   short-lived tactical findings
   -> Reports                                    ranked intelligence summary
-
-findings JSONL
-  -> runtime/logs/device_history/findings_history.json
-     retained Findings/Insights history
 ```
 
 The `device_history` directory name is historical. `subject_history.json` is the
@@ -152,7 +158,14 @@ Subject History is the main materialized layer. Reports and longer-window
 analysis should read Subject History instead of rescanning raw collector logs.
 The Wi-Fi/Bluetooth compatibility view exists only so older Wi-Fi/Bluetooth UI
 code can keep using its existing table model while APRS-IS, Rayhunter, RTL-SDR,
-NOAA, USGS, SWPC, PWS, and LAN share the same subject-oriented contract.
+RTL-433, ADS-B, NOAA, USGS, SWPC, PWS, and LAN share the same
+subject-oriented contract.
+
+Direct collectors expose their durable Subject History event types on the
+collector class through `subject_history_event_types` and, for event families,
+`subject_history_event_prefixes`. Subject History consumes that collector-owned
+contract instead of carrying a second per-collector allowlist, so adding a new
+feed event and adding it to history stay in the same ownership boundary.
 
 Live BLE Findings are intentionally identity-gated. Anonymous or
 manufacturer-only randomized BLE addresses remain visible in the BLE feed and
@@ -172,14 +185,17 @@ Reports dependency.
 Cleanup follows those dependencies:
 
 - Removing raw collector logs limits future rebuilds from scratch but does not
-  automatically delete already-materialized Subject History, Findings History,
-  Insights, or Reports.
+  automatically delete already-materialized Subject History, Insights, or
+  Reports.
 - Removing Subject History forces the Wi-Fi/Bluetooth compatibility view,
   Insights, and Reports to rebuild from retained raw collector logs on the next
   forced refresh.
+- Removing raw logs or materialized Subject History does not remove user subject
+  annotations. Those live in `runtime/logs/device_history/subject_annotations.json`
+  and must be deleted explicitly when an operator wants a completely clean start.
 - Removing Reports has no upstream effect; Reports rebuild from Subject History.
-- Removing Findings History has no upstream effect; it rebuilds from retained
-  `runtime/logs/findings` JSONL.
+- Removing retained `runtime/logs/findings` JSONL has no upstream effect on
+  current derived Insights or Reports because those derive from Subject History.
 
 ### Event Envelope
 
@@ -244,6 +260,30 @@ Collector YAML files own:
 relative `log_dir` against the project root, and asks each configured collector
 for its hardware/software probes for System Status.
 
+Collector availability has three levels. `scripts/skannr_precheck.py` is a
+standalone standard-library script that can run before install, writes
+`config/precheck.yaml`, and can apply enabled flags to a freshly copied
+`config/collectors/` tree. `install.sh` uses that file when it creates a new
+local config: collectors with required local tools are enabled, collectors with
+missing required tools stay disabled, and config-required internet/API
+collectors stay disabled until the operator edits their YAML. SDR-backed
+collectors also require visible RTL-SDR hardware during this fresh-config
+seeding step, so installing `rtl_433` alone does not auto-enable RTL-433 on a
+Pi with no dongle. Optional or recommended tools, such as LAN `arp`,
+`arp-scan`, and `avahi-browse`, are reported without disabling the base
+collector.
+
+After Python dependencies are installed, `install.sh` runs
+`scripts/skannr_postcheck.py` from the virtual environment. The postcheck reuses
+the precheck inventory, writes `config/postcheck.yaml`, and also verifies Python
+modules such as `bleak` and `scapy`. On a fresh config, `install.sh` applies the
+postcheck result as the final enabled/disabled decision, so the final seed
+reflects required software, selected hardware probes, and Python dependencies.
+Existing configs are not rewritten by these checks. Runtime availability remains
+collector-owned: each collector exposes `hardware_status()` for System Status
+and `detect()` for actual startup. This keeps install output helpful without
+turning disabled optional collectors into installation failures.
+
 `install.sh` copies `config.example/` to `config/` when `config/skannr.yaml` is
 missing. Existing YAML is not rewritten on startup, so comments and user
 formatting are preserved.
@@ -285,9 +325,11 @@ observations should behave.
   endpoint. Rayhunter, NOAA, USGS, and SWPC are poll collectors. Poll feeds
   must de-duplicate by source event/subject identity because the same old
   advisory, earthquake, or space-weather product can appear in every poll.
-- `listen`: Skannr opens a stream/sniffer and waits for events. APRS-IS and
-  Wi-Fi Monitor are listen collectors. Individual packets/frames remain raw
-  evidence, while Subject History rolls them up by station/device/network.
+- `listen`: Skannr opens a stream, sniffer, or local decoder feed and waits for
+  events. APRS-IS, Wi-Fi Monitor, RTL-433, and ADS-B are listen collectors.
+  Individual packets/frames/decoded device rows/aircraft state changes remain
+  raw evidence, while Subject History rolls them up by station/device/network,
+  decoded device subject, or aircraft ICAO.
 
 The browser uses this metadata for future-facing behavior, but the durable
 contract is subject-focused. Subject History participation is code-owned
@@ -373,6 +415,12 @@ Important events:
 - `collector_retrying`
 - `collector_offline`
 
+Browser behavior:
+
+- The Rayhunter tab shows one latest row per endpoint with warning count,
+  recording metadata, compact device health fields, and status summary text.
+- The same endpoint key links live rows to Subject History and related Reports.
+
 Subject History contribution:
 
 - Wi-Fi AP records keyed by BSSID
@@ -388,12 +436,47 @@ Purpose: on-demand monitor-mode packet capture and channel hopping.
 
 Implementation:
 
-- Requires an interface that is already in monitor mode.
+- Requires an interface that is already in monitor mode, or an explicitly
+  configured interface with `prepare_monitor_mode: true`.
 - Uses Scapy sniffing in a thread.
 - Uses an asyncio channel hopper to retune with `iw dev <iface> set channel`.
 - Supports 2.4 GHz and 5 GHz when the adapter reports those frequencies.
-- Starts with configured typical channels.
-- Can optionally append channels previously seen in Wi-Fi AP logs.
+- Supports `channel_mode: hop` and `channel_mode: fixed`. Fixed mode tunes the
+  monitor interface to one configured `fixed_channel` and leaves it there.
+- Hop mode builds a channel plan from enabled bands, configured common
+  channels, and optionally channels previously seen in Wi-Fi AP logs.
+  `seen_channels_first` can prioritize site-observed channels; `common_channel_fallback`
+  keeps common channels in the plan when discovered channels are sparse or
+  absent. `dwell_sec` controls time spent on each channel.
+
+Operational model:
+
+- Skannr detects monitor-mode interfaces with `iw dev` and reports missing
+  monitor mode in System Status. By default it does not change adapter mode.
+- When `prepare_monitor_mode: true` is set with a concrete interface such as
+  `wlan1`, Skannr runs `nmcli dev set <iface> managed no` when requested and
+  available, then `ip link set <iface> down`, `iw dev <iface> set type monitor`,
+  and `ip link set <iface> up` before capture.
+- `prepare_monitor_mode` is intentionally explicit. `interface: auto` means
+  discover an already monitor-mode adapter; it does not let Skannr choose one of
+  the managed wireless adapters to convert. If `interface: auto` and
+  `interfaces: []` are configured, setup logs `candidates=[]` and exits without
+  changing adapter mode.
+- Monitor-mode preparation requires the Skannr service process to have network
+  administration privilege, usually root or equivalent `CAP_NET_ADMIN`. Manual
+  success with `sudo ip` or `sudo iw` only proves the commands work for the
+  interactive shell, not for a non-root service.
+- A dedicated RPi monitor adapter should normally be excluded from
+  NetworkManager with a persistent keyfile entry such as
+  `unmanaged-devices=interface-name:wlan1`. The transient alternative is
+  `nmcli dev set wlan1 managed no`, but that may not survive reboot or
+  NetworkManager restart.
+- Monitor-mode setup can be automated outside Skannr with a systemd oneshot
+  that runs `ip link set wlan1 down`, `iw dev wlan1 set type monitor`, and
+  `ip link set wlan1 up`. This is preferred over having Skannr change global
+  OS network-manager files at runtime.
+- Monitor preparation remains opt-in and interface-specific so Skannr does not
+  accidentally convert the normal managed Wi-Fi interface.
 
 Important events:
 
@@ -585,7 +668,126 @@ Subject History contribution:
 - Frequency subjects retain first seen, last seen, signal count, lost count,
   maximum power, and maximum above-floor delta.
 - Reports do not yet create dedicated RTL-SDR rows; power-pattern reporting and
-  protocol decoder integrations are planned separately.
+  protocol decoder integrations are handled by separate collectors.
+
+### RTL-433 (`rtl433`)
+
+Purpose: consume decoded ISM-band device messages from `rtl_433`.
+
+RTL-433 is decoder-backed. Skannr does not demodulate TPMS, garage/security,
+weather-sensor, utility-meter, or remote-control protocols directly. It starts
+`rtl_433`, requests JSON output, preserves the decoded payload fields, and
+normalizes a small subject identity around model, ID, channel, and protocol
+when those fields are present. Sparse payloads fall back to a bounded hash of
+the decoded JSON.
+
+An individual RTL-SDR dongle is exclusive. ADS-B, RTL-433, and `rtl_power`
+scanning normally cannot run on the same dongle at the same time, but a host can
+run them concurrently when it has multiple dongles. `main.py` treats `rtlsdr`,
+`rtl433`, and managed `adsb` as RTL-SDR owners keyed by configured
+`device_index`: starting one from the browser stops only another running member
+with the same device index and marks that previous collector offline with a
+handoff reason. ADS-B with `manage_decoder: false` or a configured `url` is only
+reading an external decoder feed and does not claim a Skannr-managed dongle.
+
+Implementation:
+
+- Validates the `rtl_433` executable and parses the configured frequency plan.
+- Supports fixed frequencies and ranges using Skannr syntax such as
+  `433.92:0`, `315.22:12`, `915-916:50:10`, or a comma-separated combination.
+  Range entries are `start-end:step_khz:dwell_sec`.
+- Converts the plan into `rtl_433 -f ... -H ...` arguments and runs `rtl_433`
+  as an asyncio subprocess with `-F json`, `-M protocol`, and signal-level
+  metadata.
+- Publishes the current configured frequency hop to the browser and uses that
+  frequency as a fallback when a decoded JSON row omits its own frequency.
+- Reads one JSON object per stdout line, preserves bounded raw decoded fields,
+  and emits `rtl433_event`.
+- Classifies broad categories such as `tpms`, `security`, `weather`, and
+  `utility` using conservative string matching over decoded fields.
+
+Important events:
+
+- `scanner_started`
+- `collector_retrying`
+- `collector_offline`
+- `rtl433_event`
+
+Subject History contribution:
+
+- Subjects are keyed by decoded model, ID, channel, and protocol when possible.
+- Subjects retain first seen, last seen, event count, burst count, sample
+  times, sample fields, frequencies, latest signal level, and latest raw
+  decoded fields.
+
+Insights and Reports:
+
+- Findings emit compact decoded-subject rows. TPMS/security-like categories are
+  warning severity in the live feed, but the dedicated alert rule is disabled
+  by default.
+- Reports add a population row plus per-subject rows for repeated or
+  TPMS/security-like decoded subjects. Report language is intentionally
+  conservative: it can describe activity clusters and possible
+  garage/security/remote/contact activity, but it does not infer open/close
+  state unless the decoded payload explicitly contains state.
+- Alerts use `alerts.rtl433_signal`, which is configurable but disabled by
+  default because local ISM environments are noisy and real samples are needed
+  before deciding what should page the operator.
+
+### ADS-B (`adsb`)
+
+Purpose: consume decoded ADS-B aircraft state from `dump1090` or `readsb`.
+
+ADS-B is decoder-backed. The RTL-SDR is owned by `dump1090` or `readsb`, which
+demodulates 1090 MHz ADS-B and exposes aircraft state through an
+`aircraft.json` file or HTTP endpoint. By default Skannr starts the configured
+decoder on `device_index`, writes decoder JSON files under
+`runtime/logs/adsb_decoder/`, reads `aircraft.json`, and stops the decoder when
+the collector stops. Operators can set `manage_decoder: false` or configure
+`url` when an external service already owns the decoder. Skannr does not try to
+auto-pick a dongle; the local YAML assigns which dongle each managed collector
+uses.
+
+Implementation:
+
+- Starts the configured decoder when `manage_decoder` is enabled and no `url`
+  is configured.
+- Finds the managed or first readable configured `aircraft.json` path, or reads
+  a configured HTTP `url`.
+- Polls the decoded snapshot at `poll_interval_sec`, default one second.
+- Normalizes aircraft rows into compact fields: ICAO, callsign, squawk,
+  emergency state, latitude/longitude, altitude, speed, track, vertical rate,
+  decoder message count, RSSI, source, and optional distance from configured
+  observer latitude/longitude.
+- Keeps a per-ICAO fingerprint so unchanged snapshot rows do not create
+  duplicate live rows or subject updates.
+- Emits `adsb_aircraft` rows only when material aircraft state changes.
+
+Important events:
+
+- `collector_online`
+- `collector_retrying`
+- `collector_offline`
+- `adsb_aircraft`
+
+Subject History contribution:
+
+- Subjects are keyed by ICAO hex. Callsign is display enrichment, not stable
+  identity, because callsigns can be absent or reused.
+- Aircraft subjects retain first seen, last seen, update count, position count,
+  sample callsigns/squawks, latest position, altitude range, closest distance,
+  maximum speed, path span, and emergency state.
+
+Insights and Reports:
+
+- Findings emit optional new-aircraft rows, emergency-squawk warnings, and
+  low-nearby aircraft warnings.
+- Reports add an ADS-B population row plus per-aircraft profile rows for
+  emergency aircraft, low nearby aircraft, or aircraft seen enough times to pass
+  `reports.adsb_report_min_seen`.
+- Alerts use `alerts.adsb_aircraft`: emergency state is critical by default;
+  aircraft below `low_altitude_ft` and within `nearby_radius_km` are warning by
+  default.
 
 ### Rayhunter (`rayhunter`)
 
@@ -1024,7 +1226,7 @@ The dashboard-facing derived views have distinct responsibilities:
 
 All four products use the same selected dashboard view window as their maximum
 raw-log scope. Insights then apply an additional recent-event lookback,
-`history_analysis.insights_recent_hours`, because the tab is meant to answer
+`history_analysis.insights_recent_minutes`, because the tab is meant to answer
 "what changed recently?" rather than reproduce the full longitudinal report.
 Set the value to `0` to disable the additional Insights cutoff.
 
@@ -1052,8 +1254,8 @@ refresh and waits for completion instead of rendering older cached data.
 Each backend stage logs start/finish timings with an operator-facing phase
 number:
 
-- Phase 1/2, Subject and Findings History: fold raw collector logs into the
-  collector-neutral subject cache and load/window persisted finding records.
+- Phase 1/2, Subject History: fold raw collector logs into the
+  collector-neutral subject cache.
 - Phase 2/2, Insights analysis and Reports: derive tactical observations and
   the ranked operator-facing intelligence summary from Subject History.
 
@@ -1090,7 +1292,7 @@ collector JSONL, Subject History, Reports, or Alerts.
 Manual or automatic refresh of any derived tab refreshes the whole bundle in
 dependency order:
 
-1. Subject History and Findings History
+1. Subject History from raw collector JSONL
 2. Wi-Fi/Bluetooth compatibility view
 3. History-based Insights and Reports
 
@@ -1098,7 +1300,7 @@ dependency order:
 
 Findings are live deterministic observations produced by `FindingsEngine` from
 incoming events. The engine keeps small in-memory maps for recent Wi-Fi APs,
-Wi-Fi clients, Bluetooth devices, RTL-SDR signals, and collector health. It
+Wi-Fi clients, Bluetooth devices, RTL-SDR signals, ADS-B aircraft, and collector health. It
 emits normalized finding records for explicit conditions such as:
 
 - new or returned Wi-Fi AP/client
@@ -1106,6 +1308,7 @@ emits normalized finding records for explicit conditions such as:
 - randomized/local Wi-Fi MAC
 - strong nearby Wi-Fi client or AP
 - probe burst
+- configured sensitive SSID probe
 - BLE device seen/returned/lost
 - strong BLE signal
 - BLE identify success/failure
@@ -1117,10 +1320,18 @@ emits normalized finding records for explicit conditions such as:
 - LAN device/gateway observations and changes
 - collector offline/retrying/stopped
 
-Findings are written back as events under `runtime/logs/findings`.
+For `wifi_monitor`, generic per-client probe churn, blank probes, randomized
+MAC notices, client lost/returned events, generic probe bursts, generic AP
+presence, and generic strong-client/AP observations are disabled as live
+Findings by default. Monitor-mode still retains the raw data and rolls it into
+Subject History/Reports, while live Insights focus on disruption frames and
+explicitly configured sensitive SSID probes.
 
-`findings_history.json` is the materialized view used by the dashboard. It is
-updated incrementally from new finding log bytes.
+Findings may be written back as events under `runtime/logs/findings` for
+operator audit/debugging and live replay while the process is running. They are
+not reloaded as a derived upstream. Dashboard Insights are rebuilt from Subject
+History through `history_analysis.json`, which keeps disabled collectors and old
+finding logs from resurfacing after cleanup or configuration changes.
 
 ### Subject History
 
@@ -1163,21 +1374,52 @@ The materialized file is:
 runtime/logs/device_history/subject_history.json
 ```
 
+User-provided subject annotations are stored separately in:
+
+```text
+runtime/logs/device_history/subject_annotations.json
+```
+
+Annotations are keyed by stable subject identity and applied as an overlay while
+Subject History is loaded or rebuilt. They never overwrite `subject`,
+`subject_id`, `subject_type`, or collector identity; UI, detail panes, Insights,
+and Reports may display the annotation beside the original subject. The first
+supported annotation families are Wi-Fi BSSIDs/clients, Bluetooth devices, and
+LAN devices/gateways.
+
+Randomized or locally administered identities are handled as low-confidence
+subjects unless another stable signal exists. Device History keeps raw per-MAC
+evidence in append-only JSONL logs, but its normal persisted state groups
+low-identity Wi-Fi/BLE churn before writing `device_history.json`. Named,
+vendor/model-rich, service-rich, finding-linked, or otherwise identifiable
+devices stay individual; low-identity randomized MACs collapse into aggregate
+Device History and Subject History rows such as `4934 randomized devices found`.
+This applies to Wi-Fi monitor client/probe MACs, Bluetooth private/randomized
+addresses, and weak LAN private-MAC rows with no hostname or service evidence.
+Bluetooth aggregate rows use the strongest shared identity bucket, so Apple
+manufacturer-only rows, Apple Find My accessory rows, Microsoft rows, Unknown
+rows, and any other manufacturer buckets remain separate in Subject History and
+Reports cross-subject patterns.
+
 The summary also carries report-compatible sections such as `wifi`, `bluetooth`,
-`aprsis`, `rayhunter`, `rtlsdr`, `noaa`, `usgs`, `swpc`, `pws`, and `lan`. The
-visible History tab renders Subject History rows so APRS-IS callsigns,
-Rayhunter endpoints, RTL-SDR subjects, NOAA alerts, USGS earthquakes, SWPC
-space-weather events, PWS stations, and LAN subjects can be inspected directly.
+`aprsis`, `rayhunter`, `rtlsdr`, `rtl433`, `adsb`, `noaa`, `usgs`, `swpc`,
+`pws`, and `lan`. The visible History tab renders Subject History rows so
+APRS-IS callsigns, Rayhunter endpoints, RTL-SDR subjects, RTL-433 decoded
+subjects, ADS-B aircraft, NOAA alerts, USGS earthquakes, SWPC space-weather
+events, PWS stations, and LAN subjects can be
+inspected directly.
 The Wi-Fi/Bluetooth compatibility view remains derived from this
 summary.
 
 For collectors outside the Wi-Fi/Bluetooth compatibility fold,
-Subject History keeps compact `direct_observations` for APRS-IS, Rayhunter,
-RTL-SDR, NOAA, USGS, SWPC, PWS, and LAN. Refresh reads only JSONL bytes beyond the
-saved checkpoint, appends those normalized observations, and rebuilds the
-selected-window subject rows from the materialized data. The browser API omits
-those durable observations and exposes the smaller normalized `subjects` list
-instead.
+Subject History keeps compact per-collector direct state for APRS-IS,
+Rayhunter, RTL-SDR, RTL-433, ADS-B, NOAA, USGS, SWPC, PWS, and LAN. Each
+`subject_history_direct_<collector>.json` file stores compact history rows plus
+the collector checkpoint; it does not retain every normalized raw observation.
+Refresh reads only JSONL bytes beyond the saved checkpoint, folds those new
+bytes into compact subject summaries, and writes the compact state for the next
+refresh. The browser API exposes the normalized `subjects` list and report
+sections, not the direct-state internals.
 
 ### Subject History And Wi-Fi/Bluetooth Compatibility
 
@@ -1266,7 +1508,7 @@ runtime/logs/device_history/history_analysis.json
 
 The persisted analysis file can cover the selected View window, but the
 browser-facing Insights payload is filtered by
-`history_analysis.insights_recent_hours`. For Findings, the event timestamp is
+`history_analysis.insights_recent_minutes`. For Findings, the event timestamp is
 the cutoff field. For history observations, `last_seen_epoch` is preferred over
 the row timestamp because observations are regenerated on refresh; this prevents
 old device behavior from becoming "recent" merely because analysis was rebuilt.
@@ -1691,9 +1933,9 @@ complexity before the collector set stabilizes.
 ## 14. Known Limitations
 
 - Subject History currently has rich Wi-Fi, Bluetooth, APRS-IS, Rayhunter,
-  NOAA, USGS, SWPC, PWS, and LAN support. RTL-SDR has a minimal frequency subject
-  rollup, and System is omitted because it is runtime state rather than an
-  observed subject source.
+  RTL-433, ADS-B, NOAA, USGS, SWPC, PWS, and LAN support. RTL-SDR has a
+  minimal frequency subject rollup, and System is omitted because it is runtime
+  state rather than an observed subject source.
 - Reports are deterministic summaries, not forensic conclusions.
 - Wi-Fi Monitor only hears frames on the channel currently selected by the
   channel hopper.
@@ -1777,7 +2019,6 @@ complexity before the collector set stabilizes.
       <collector>/YYYY-MM-DD.jsonl
       device_history/subject_history.json
       device_history/device_history.json
-      device_history/findings_history.json
       device_history/history_analysis.json
       device_history/reports.json
       skannr.log
@@ -1790,9 +2031,8 @@ complexity before the collector set stabilizes.
 
 - Use filesystem JSONL instead of SQLite to keep deployment simple and make raw
   logs easy to inspect.
-- Materialize Subject History, Findings History, Insights, Reports, and the
-  Wi-Fi/Bluetooth compatibility view so refresh does not repeatedly scan all raw
-  logs.
+- Materialize Subject History, Insights, Reports, and the Wi-Fi/Bluetooth
+  compatibility view so refresh does not repeatedly scan all raw logs.
 - Keep Wi-Fi Scan and Wi-Fi Monitor separate because monitor-mode channel
   hopping has different hardware, CPU, and connectivity implications.
 - Group BLE Scan, BLE Identify, and Bluetooth Classic under one Bluetooth UI
