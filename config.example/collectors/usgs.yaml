@@ -5,12 +5,18 @@ description: Optional internet-fed USGS earthquake feed
 acquisition_mode: poll
 enabled: false
 
-# Poll a local-radius USGS GeoJSON earthquake query. This is internet-fed
-# situational context, not a local sensor measurement.
+# USGS is internet-fed situational context, not a local sensor measurement.
+
+# HTTP polling controls. poll_interval_sec is the normal GeoJSON refresh cadence,
+# request_timeout_sec is the per-request timeout, and user_agent is sent with
+# requests.
 poll_interval_sec: 300
 request_timeout_sec: 15
 user_agent: "Skannr USGS collector"
 
+# Local-radius earthquake query controls. latitude/longitude are the observer
+# center, radius_km bounds the query, min_magnitude filters small events, and
+# orderby controls USGS result ordering.
 latitude: 37.7749
 longitude: -122.4194
 radius_km: 300

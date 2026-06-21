@@ -9,7 +9,7 @@ import re
 import shlex
 import shutil
 
-from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE, STATE_RETRYING
+from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE
 
 
 RTL433_FIELD_MAX = 240
@@ -66,6 +66,23 @@ def clean_rtl433_data(data):
         "last_seen_epoch",
         "event_count",
         "burst_count",
+        "burst_gap_min_sec",
+        "burst_gap_max_sec",
+        "burst_gap_avg_sec",
+        "recent_observation_count",
+        "pressure_kpa",
+        "pressure_psi",
+        "pressure_bar",
+        "pressure_kpa_min",
+        "pressure_kpa_max",
+        "pressure_psi_min",
+        "pressure_psi_max",
+        "temperature_c",
+        "temperature_f",
+        "temperature_c_min",
+        "temperature_c_max",
+        "temperature_f_min",
+        "temperature_f_max",
     }
     for key, value in data.items():
         if value in (None, "", []):
@@ -210,91 +227,102 @@ class RTL433Collector(BaseCollector):
         return True
 
     async def start(self):
-        """Run rtl_433 until stopped, emitting decoded JSON rows."""
+        """Run rtl_433 until stopped, retrying after transient dongle failures."""
         self._running = True
-        if not self.detect():
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
-            return
-        command = rtl433_command(self.config)
-        args = rtl433_args(self.config, self._plan)
-        logging.info(
-            "Starting rtl_433 command=%s args=%s device_index=%s frequency_plan=%s "
-            "frequency_summary=%s",
-            command,
-            " ".join(shlex.quote(str(item)) for item in args),
-            self.config.get("device_index", 0),
-            self.config.get("frequency_plan") or "",
-            self._plan_summary,
-        )
-        try:
-            self._process = await asyncio.create_subprocess_exec(
-                command,
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            self._stderr_task = asyncio.get_event_loop().create_task(
-                self.drain_stderr()
-            )
-            await self.emit(
-                "scanner_started",
-                {
-                    "frequency_plan": self.config.get("frequency_plan") or "",
-                    "frequency_summary": self._plan_summary,
-                    "scan_frequencies_mhz": [
-                        item.get("frequency_mhz") for item in self._plan
-                    ],
-                    "planned_frequency_mhz": self._current_frequency_mhz,
-                    "source": "configured plan" if self._current_frequency_mhz is not None else None,
-                    "process_started": True,
-                    "gain": self.config.get("gain", "auto"),
-                    "sample_rate": self.config.get("sample_rate", "250k"),
-                    "decoder": "rtl_433",
-                },
-            )
-        except Exception as exc:
-            self.state = STATE_OFFLINE
-            self.warning = "rtl_433 start failed: {}".format(exc)
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
-            return
-
         while self._running:
-            line = await self._process.stdout.readline()
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace").strip()
-            if not text:
+            if not self.detect():
+                reason = self.warning or "rtl_433 detection failed"
+                if reason.startswith("Invalid rtl_433 frequency plan"):
+                    await self.emit("collector_offline", {"reason": reason}, "warning")
+                    return
+                await self.retrying(reason)
                 continue
-            try:
-                payload = json.loads(text)
-            except json.JSONDecodeError:
-                logging.debug("rtl_433 non-json stdout: %s", text[:500])
-                continue
-            if rtl433_scanner_state_payload(payload):
-                frequency = rtl433_payload_frequency_mhz(payload, "center_frequency")
-                if frequency is not None:
-                    self._current_frequency_mhz = frequency
-                    await self.emit(
-                        "scanner_frequency",
-                        {
-                            "frequency_mhz": frequency,
-                            "frequency_summary": self._plan_summary,
-                            "device_index": self.config.get("device_index", 0),
-                            "source": "rtl_433 stdout",
-                        },
-                    )
-                continue
-            data = rtl433_event_data(
-                payload, self._plan_summary, self._current_frequency_mhz
+
+            command = rtl433_command(self.config)
+            args = rtl433_args(self.config, self._plan)
+            logging.info(
+                "Starting rtl_433 command=%s args=%s device_index=%s frequency_plan=%s "
+                "frequency_summary=%s",
+                command,
+                " ".join(shlex.quote(str(item)) for item in args),
+                self.config.get("device_index", 0),
+                self.config.get("frequency_plan") or "",
+                self._plan_summary,
             )
-            await self.emit("rtl433_event", data, severity_for_rtl433(data))
-        if self._running:
-            self.state = STATE_RETRYING
-            code = self._process.returncode if self._process else None
-            reason = "rtl_433 exited with status {}".format(code)
-            self.warning = reason
-            await self.emit("collector_retrying", {"reason": reason}, "warning")
-        await self.stop_process()
+            try:
+                self._process = await asyncio.create_subprocess_exec(
+                    command,
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                self._stderr_task = asyncio.get_event_loop().create_task(
+                    self.drain_stderr()
+                )
+                self.state = STATE_ONLINE
+                self.warning = None
+                await self.emit(
+                    "scanner_started",
+                    {
+                        "frequency_plan": self.config.get("frequency_plan") or "",
+                        "frequency_summary": self._plan_summary,
+                        "scan_frequencies_mhz": [
+                            item.get("frequency_mhz") for item in self._plan
+                        ],
+                        "planned_frequency_mhz": self._current_frequency_mhz,
+                        "source": "configured plan" if self._current_frequency_mhz is not None else None,
+                        "process_started": True,
+                        "gain": self.config.get("gain", "auto"),
+                        "sample_rate": self.config.get("sample_rate", "250k"),
+                        "decoder": "rtl_433",
+                    },
+                )
+            except Exception as exc:
+                await self.retrying("rtl_433 start failed: {}".format(exc))
+                await self.stop_process()
+                continue
+
+            while self._running:
+                line = await self._process.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").strip()
+                if not text:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    logging.debug("rtl_433 non-json stdout: %s", text[:500])
+                    continue
+                if rtl433_scanner_state_payload(payload):
+                    frequency = rtl433_payload_frequency_mhz(payload, "center_frequency")
+                    if frequency is not None:
+                        self._current_frequency_mhz = frequency
+                        await self.emit(
+                            "scanner_frequency",
+                            {
+                                "frequency_mhz": frequency,
+                                "frequency_summary": self._plan_summary,
+                                "device_index": self.config.get("device_index", 0),
+                                "source": "rtl_433 stdout",
+                            },
+                        )
+                    continue
+                data = rtl433_event_data(
+                    payload, self._plan_summary, self._current_frequency_mhz
+                )
+                await self.emit("rtl433_event", data, severity_for_rtl433(data))
+
+            if self._running:
+                if self._process:
+                    await self._process.wait()
+                code = self._process.returncode if self._process else None
+                reason = "rtl_433 exited with status {}".format(code)
+                await self.retrying(reason, sleep=False)
+                await self.stop_process()
+                await self.retry_sleep()
+            else:
+                await self.stop_process()
 
     async def stop(self):
         """Terminate rtl_433 before marking the collector stopped."""
@@ -338,11 +366,17 @@ class RTL433Collector(BaseCollector):
             logging.debug("rtl_433 stderr: %s", text)
 
 def rtl433_command(config):
-    """Return the rtl_433 command path."""
+    """Return the configured or default rtl_433 command path."""
     command = compact_rtl433_text(config.get("command"), 300)
     if command:
-        return command
-    return shutil.which("rtl_433")
+        resolved = shutil.which(command)
+        if resolved:
+            return resolved
+        logging.warning(
+            "Configured rtl_433 command %s was not found; trying rtl_433 fallback",
+            command,
+        )
+    return shutil.which("rtl_433") or ""
 
 
 def rtl433_args(config, plan):
@@ -514,6 +548,7 @@ def rtl433_event_data(payload, plan_summary, current_frequency_mhz=None):
         frequency = frequency / 1000.0
     tuned_frequency = current_frequency_mhz if current_frequency_mhz is not None else frequency
     subject_key = rtl433_subject_key(model, identifier, channel, protocol, raw)
+    category = rtl433_category(model, raw)
     data = {
         "model": model,
         "id": identifier,
@@ -526,11 +561,83 @@ def rtl433_event_data(payload, plan_summary, current_frequency_mhz=None):
         "noise_db": first_number(payload, "noise", "noise_db", "Noise"),
         "event_time": first_text(payload, "time"),
         "subject_key": subject_key,
-        "category": rtl433_category(model, raw),
+        "category": category,
         "frequency_plan": plan_summary,
         "raw": raw,
     }
+    data.update(rtl433_tpms_fields(payload, category))
     return clean_rtl433_data(data)
+
+
+def rtl433_tpms_fields(payload, category):
+    """Return conservative TPMS-specific fields from a decoded rtl_433 payload."""
+    if category != "tpms":
+        return {}
+    data = {}
+    pressure_kpa = first_number(
+        payload,
+        "pressure_kPa",
+        "pressure_kpa",
+        "pressure_kpa_1",
+        "pressure_kpa_2",
+        "pressure_kPa_1",
+        "pressure_kPa_2",
+    )
+    pressure_psi = first_number(
+        payload,
+        "pressure_PSI",
+        "pressure_psi",
+        "pressure_psi_1",
+        "pressure_psi_2",
+    )
+    pressure_bar = first_number(payload, "pressure_bar", "pressure_Bar")
+    if pressure_kpa is None and pressure_psi is not None:
+        pressure_kpa = pressure_psi / 0.1450377377
+    if pressure_psi is None and pressure_kpa is not None:
+        pressure_psi = pressure_kpa * 0.1450377377
+    if pressure_bar is None and pressure_kpa is not None:
+        pressure_bar = pressure_kpa / 100.0
+    if pressure_kpa is not None:
+        data["pressure_kpa"] = round(pressure_kpa, 1)
+    if pressure_psi is not None:
+        data["pressure_psi"] = round(pressure_psi, 1)
+    if pressure_bar is not None:
+        data["pressure_bar"] = round(pressure_bar, 2)
+    temperature_c = first_number(
+        payload,
+        "temperature_C",
+        "temperature_c",
+        "temperature_1_C",
+        "temperature_2_C",
+        "temperature_C_1",
+        "temperature_C_2",
+    )
+    temperature_f = first_number(payload, "temperature_F", "temperature_f")
+    if temperature_f is None and temperature_c is not None:
+        temperature_f = temperature_c * 9.0 / 5.0 + 32.0
+    if temperature_c is None and temperature_f is not None:
+        temperature_c = (temperature_f - 32.0) * 5.0 / 9.0
+    if temperature_c is not None:
+        data["temperature_c"] = round(temperature_c, 1)
+    if temperature_f is not None:
+        data["temperature_f"] = round(temperature_f, 1)
+    battery = first_text(
+        payload,
+        "battery",
+        "battery_ok",
+        "battery_low",
+        "battery_mV",
+        "battery_V",
+    )
+    if battery:
+        data["battery_status"] = battery
+    status = first_text(payload, "status", "state", "flags")
+    if status:
+        data["tpms_status"] = status
+    position = first_text(payload, "tire", "tyre", "wheel", "position")
+    if position:
+        data["tpms_position"] = position
+    return data
 
 
 def rtl433_scanner_state_payload(payload):

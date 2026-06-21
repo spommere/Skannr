@@ -4,31 +4,37 @@ label: Wi-Fi Monitor
 description: On-demand monitor-mode Wi-Fi packet capture and channel hopping
 acquisition_mode: listen
 enabled: true
+
+# Monitor mode is hardware/driver sensitive, so this action collector is enabled
+# but not auto-started by default. Start it from the UI or set auto_start: true
+# only on hosts with a known-good monitor-mode adapter.
 auto_start: false
 validation_timeout_sec: 10
-# auto chooses the best monitor-mode interface. ALFA/external USB adapters are
-# preferred when their metadata is visible through sysfs.
+
+# Interface selection. interface: auto chooses a discovered monitor interface or
+# a configured candidate. interfaces is an ordered allow/preference list.
+# interface_regex filters automatically discovered monitor interfaces.
 interface: auto
 interfaces: []
 interface_regex: wlan|^mon
-# Leave false when monitor mode is managed by NetworkManager/systemd/manual host
-# setup. Set true only with a specific interface such as wlan1 when Skannr should
-# run nmcli/ip/iw setup before starting packet capture.
-#
-# prepare_monitor_mode does not convert interface: auto into a managed adapter.
-# auto only discovers adapters that are already in monitor mode. For Skannr to
-# prepare the adapter, set interface: wlan1 or interfaces: [wlan1].
+
+# Optional host-local monitor-mode setup. Leave prepare_monitor_mode false if an
+# external script/systemd unit already creates the monitor interface. When true,
+# Skannr runs nmcli/ip/iw setup against the configured interface candidate.
 prepare_monitor_mode: false
 set_networkmanager_unmanaged: true
 monitor_setup_timeout_sec: 10
+
+# Channel plan. channel_mode: hop rotates through supported configured channels.
+# channel_mode: fixed uses fixed_channel only. bands limits which channel groups
+# are considered by the plan builder.
 bands:
 - '2.4'
 - '5'
-# channel_mode:
-# - hop: retune across the channel plan below
-# - fixed: stay on fixed_channel only
 channel_mode: hop
 fixed_channel:
+
+# Common channel sets used for hopping after adapter support is checked.
 typical_channels_24:
 - 1
 - 6
@@ -43,9 +49,17 @@ typical_channels_5:
 - 157
 - 161
 - 165
+
+# Optional channel learning from previous Wi-Fi Monitor AP beacon observations.
+# include_seen_channels adds channels seen in prior monitor logs. seen_channels_first
+# places those learned channels before the typical list. common_channel_fallback
+# keeps common channels when no supported learned channels are available.
 include_seen_channels: false
 seen_channels_first: false
 common_channel_fallback: true
+
+# Seconds to remain on each channel while hopping. This is the hop cadence; the
+# retry settings below apply only after setup/capture failures.
 dwell_sec: 1
 retry_interval_sec: 5
 retry_timeout_sec: 30

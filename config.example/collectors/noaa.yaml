@@ -5,52 +5,47 @@ description: Optional internet-fed NOAA/NWS/NHC/tsunami.gov hazard feed
 acquisition_mode: poll
 enabled: false
 
-# NOAA is an internet-fed situational-awareness collector. It polls NWS active
-# alerts for a configured point/state, optional NHC tropical cyclone feeds, and
-# tsunami.gov NTWC/PTWC feeds.
+# Shared HTTP polling controls. poll_interval_sec is the normal feed refresh
+# cadence; request_timeout_sec is the per-request network timeout.
 poll_interval_sec: 300
 request_timeout_sec: 15
 user_agent: "Skannr NOAA collector"
 
-# Prefer a point query for local NWS alerts.
+# Observer location for NWS alert/forecast grid lookup. State can be added when
+# using state-scoped alert feeds.
 latitude: 37.7749
 longitude: -122.4194
 # state: CA
 
+# NWS active alerts for the configured location. Leave url blank for Skannr's
+# generated point/state feed URL, or set it for a custom NWS API endpoint.
 nws:
   enabled: true
-  # Optional override if you want a specific NWS API URL:
   # url: "https://api.weather.gov/alerts/active?point=37.7749,-122.4194"
 
-# Optional NWS point forecast summary. Existing configs do not need this
-# section; forecast polling defaults on when nws.enabled is true and latitude /
-# longitude are configured.
+# NWS point forecast. Skannr summarizes near-term forecast periods; forecast
+# delta/change reporting is a separate planned enhancement.
 forecast:
   enabled: true
   window_hours: 12
   soon_hours: 6
   precip_probability_threshold: 50
-  # Optional override if you want a specific NWS hourly forecast URL:
-  # url: "https://api.weather.gov/gridpoints/MTR/85,105/forecast/hourly"
+  # url: "https://api.weather.gov/gridpoints/MTR/85,105/forecast"
 
+# National Hurricane Center products. Basins are Atlantic, eastern Pacific, and
+# central Pacific feed selectors.
 nhc:
   enabled: true
-  # Available basin names: atlantic, eastern_pacific, central_pacific.
-  basins:
-    - atlantic
-    - eastern_pacific
-    - central_pacific
+  basins: [atlantic, eastern_pacific, central_pacific]
 
+# tsunami.gov CAP feeds. fetch_bulletin_text: true follows bulletin links and
+# stores richer text in Skannr events. Set false to avoid those extra network
+# requests; Skannr will still use the CAP/feed metadata, but event text will be
+# less detailed. It is useful but not required.
 tsunami:
   enabled: true
   fetch_bulletin_text: true
-  # Official tsunami.gov centers: ntwc (National Tsunami Warning Center) and
-  # ptwc (Pacific Tsunami Warning Center).
-  centers:
-    - ntwc
-    - ptwc
-  # Optional per-center URL overrides, normally not needed:
+  centers: [ntwc, ptwc]
   # feeds:
-  #   ntwc:
-  #     atom_url: "https://www.tsunami.gov/events/xml/PAAQAtom.xml"
-  #     cap_url: "https://www.tsunami.gov/events/xml/PAAQCAP.xml"
+  #   ntwc: "https://www.tsunami.gov/events/xml/PAAQAtom.xml"
+  #   ptwc: "https://www.tsunami.gov/events/xml/PTWCAtom.xml"

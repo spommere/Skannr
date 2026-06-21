@@ -4,7 +4,12 @@ label: Rayhunter
 description: Optional Rayhunter cellular-monitor status endpoint
 acquisition_mode: poll
 enabled: false
+
+# HTTP endpoint exposed by the Rayhunter device/service.
 endpoint: http://127.0.0.1:8080/
+
+# Poll and retry controls. poll_interval_sec is the normal status refresh;
+# request_timeout_sec is the HTTP timeout; retry_* applies after failures.
 poll_interval_sec: 30
 request_timeout_sec: 10
 retry_interval_sec: 10

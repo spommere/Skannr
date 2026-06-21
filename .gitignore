@@ -9,6 +9,7 @@
 /VERSION_HISTORY.md
 /scripts/skannr_reg*
 /scripts/validate*
+/scripts/ble*
 /git/
 
 # Python caches.

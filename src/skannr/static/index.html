@@ -30,7 +30,6 @@
     <button class="tab" data-tab="wifi">Wi-Fi Scan <span class="tab-row-count" data-tab-count="wifi"></span><span class="tab-status-dots" data-status-tab="wifi"></span></button>
     <button class="tab" data-tab="wifi_monitor">Wi-Fi Monitor <span class="tab-row-count" data-tab-count="wifi_monitor"></span><span class="tab-status-dots" data-status-tab="wifi_monitor"></span></button>
     <button class="tab" data-tab="bluetooth">Bluetooth <span class="tab-row-count" data-tab-count="bluetooth"></span><span class="tab-status-dots" data-status-tab="bluetooth"></span></button>
-    <button class="tab" data-tab="rtlsdr">RTL-SDR <span class="tab-row-count" data-tab-count="rtlsdr"></span><span class="tab-status-dots" data-status-tab="rtlsdr"></span></button>
     <button class="tab" data-tab="rtl433">RTL-433 <span class="tab-row-count" data-tab-count="rtl433"></span><span class="tab-status-dots" data-status-tab="rtl433"></span></button>
     <button class="tab" data-tab="adsb">ADS-B <span class="tab-row-count" data-tab-count="adsb"></span><span class="tab-status-dots" data-status-tab="adsb"></span></button>
     <button class="tab" data-tab="rayhunter">Rayhunter <span class="tab-row-count" data-tab-count="rayhunter"></span><span class="tab-status-dots" data-status-tab="rayhunter"></span></button>
@@ -74,7 +73,7 @@
           <input id="insights-search" type="search" placeholder="Filter visible columns">
         </label>
       </div>
-      <table class="system-status-table">
+      <table id="insights-table" class="system-status-table insights-table">
         <thead id="insights-head"></thead>
         <tbody id="insights-list"></tbody>
       </table>
@@ -142,16 +141,9 @@
       </div>
       <div id="history-bluetooth-panel" class="subpanel history-source-panel" data-source="bluetooth">
         <h3>Bluetooth Devices</h3>
-        <table>
-          <thead><tr><th>MAC</th><th>Identity</th><th>Services / UUIDs</th><th>Model</th><th>Serial</th><th>Firmware</th><th>PnP ID</th><th>First Seen</th><th>Last Seen</th><th>Signal</th><th>BLE Seen</th><th>BLE Updates</th><th>BLE Lost</th><th>Classic Seen</th><th>Sessions</th><th>Action</th></tr></thead>
+        <table class="history-bluetooth-table">
+          <thead><tr><th class="history-bt-col-mac">MAC</th><th class="history-bt-col-identity">Identity</th><th class="history-bt-col-services">Services / UUIDs</th><th class="history-bt-col-model">Model</th><th class="history-bt-col-serial">Serial</th><th class="history-bt-col-firmware">Firmware</th><th class="history-bt-col-pnp">PnP ID</th><th class="history-bt-col-first-seen">First Seen</th><th class="history-bt-col-last-seen">Last Seen</th><th class="history-bt-col-signal">Signal</th><th class="history-bt-col-counts" title="BLE Seen / Updates">BLE Seen/Upd</th><th class="history-bt-col-sessions" title="Sessions">Sess.</th><th class="history-bt-col-action" title="Action">Action</th></tr></thead>
           <tbody id="history-bluetooth-devices"></tbody>
-        </table>
-      </div>
-      <div id="history-rtlsdr-panel" class="subpanel history-source-panel" data-source="rtlsdr">
-        <h3>RTL-SDR</h3>
-        <table>
-          <thead><tr><th>Subject</th><th>Type</th><th>First Seen</th><th>Last Seen</th><th>Activity</th><th>Signal</th></tr></thead>
-          <tbody id="history-rtlsdr-subjects"></tbody>
         </table>
       </div>
       <div id="history-rtl433-panel" class="subpanel history-source-panel" data-source="rtl433">
@@ -244,6 +236,11 @@
       </div>
       <div id="wifi_monitor-banner" class="status-strip muted">Waiting for collector status</div>
       <div id="wifi-monitor-plan" class="status-strip muted">Start on demand after a monitor-mode interface exists</div>
+      <div class="filter-bar">
+        <label>Search
+          <input id="wifi-monitor-search" type="search" placeholder="Type, channel, client, AP/BSSID, SSID">
+        </label>
+      </div>
       <table>
         <thead><tr><th>Type</th><th>Channel</th><th>Client</th><th>AP/BSSID</th><th>SSID</th><th>Signal</th><th>Time</th></tr></thead>
         <tbody id="wifi-monitor-events"></tbody>
@@ -270,8 +267,8 @@
             <input id="ble-search" type="search" placeholder="MAC, identity, service UUID">
           </label>
         </div>
-        <table>
-          <thead><tr><th>MAC</th><th>Identity</th><th>RSSI</th><th>Services / UUIDs</th><th>Last Seen</th><th>Action</th></tr></thead>
+        <table class="ble-devices-table">
+          <thead><tr><th class="ble-col-mac">MAC</th><th class="ble-col-identity">Identity</th><th class="ble-col-rssi">RSSI</th><th class="ble-col-services">Services / UUIDs</th><th class="ble-col-last-seen">Last Seen</th><th class="ble-col-action">Action</th></tr></thead>
           <tbody id="ble-devices"></tbody>
         </table>
         <h3>BLE Identify Activity</h3>
@@ -299,29 +296,6 @@
         </table>
       </div>
 
-    </section>
-
-    <section id="tab-rtlsdr" class="panel">
-      <div class="panel-head">
-        <h2>RTL-SDR</h2>
-        <div id="rtlsdr-status" class="badge">Waiting</div>
-      </div>
-      <div id="rtlsdr-banner" class="status-strip muted">Waiting for collector status</div>
-      <div class="control-bar">
-        <label>Start MHz <input id="rtlsdr-start" type="number" step="any"></label>
-        <label>End MHz <input id="rtlsdr-end" type="number" step="any"></label>
-        <label>Step kHz <input id="rtlsdr-step" type="number"></label>
-        <label>Gain <input id="rtlsdr-gain" type="text"></label>
-        <label>Threshold dB <input id="rtlsdr-threshold" type="number"></label>
-      </div>
-      <div id="rtlsdr-baseline-state" class="status-strip muted">Waiting for spectrum baseline</div>
-      <h3>Active Signals</h3>
-      <table>
-        <thead><tr><th>Frequency MHz</th><th>Power dBm</th><th>Above Floor dB</th><th>First Detected</th><th>Last Seen</th></tr></thead>
-        <tbody id="rtlsdr-signals"></tbody>
-      </table>
-      <h3>Signal Event Log</h3>
-      <ul id="rtlsdr-events" class="event-list"></ul>
     </section>
 
     <section id="tab-adsb" class="panel">
@@ -488,13 +462,13 @@
       </div>
       <h3>Live LAN Events</h3>
       <table class="lan-events-table">
-        <thead><tr><th>Time</th><th>Type</th><th>IP / MAC</th><th>Vendor</th><th>Identity</th><th>Interface / State</th><th>Source</th><th>Gateway</th><th>Change</th><th>Action</th></tr></thead>
+        <thead><tr><th class="lan-event-col-time">Time</th><th class="lan-event-col-type">Type</th><th class="lan-event-col-subject">IP / MAC</th><th class="lan-event-col-vendor">Vendor</th><th class="lan-event-col-identity">Identity</th><th class="lan-event-col-interface">Interface / State</th><th class="lan-event-col-source">Source</th><th class="lan-event-col-gateway">Gateway</th><th class="lan-event-col-change">Change</th><th class="lan-event-col-action">Action</th></tr></thead>
         <tbody id="lan-events"></tbody>
       </table>
       <h3>LAN Identify Activity</h3>
       <div id="lan_identify-banner" class="status-strip muted">Identify runs only when requested for a LAN IP</div>
       <table class="lan-identify-results-table">
-        <thead><tr><th>Time</th><th>Target</th><th>Result</th><th>Open Ports</th><th>HTTP</th><th>Hints</th><th>Errors</th></tr></thead>
+        <thead><tr><th class="lan-identify-col-time">Time</th><th class="lan-identify-col-target">Target</th><th class="lan-identify-col-result">Result</th><th class="lan-identify-col-ports">Open Ports</th><th class="lan-identify-col-http">HTTP</th><th class="lan-identify-col-hints">Hints</th><th class="lan-identify-col-errors">Errors</th></tr></thead>
         <tbody id="lan-identify-results"></tbody>
       </table>
     </section>
@@ -503,7 +477,7 @@
       <h2>System Status</h2>
       <h3>Collector Health</h3>
       <table class="collector-health-table">
-        <thead><tr><th>Name</th><th>State</th><th>Hardware</th><th>Software</th><th>Events</th><th>Last Event</th><th>Warning</th><th>Control</th></tr></thead>
+        <thead><tr><th class="collector-health-col-name">Name</th><th class="collector-health-col-state">State</th><th class="collector-health-col-hardware">Hardware</th><th class="collector-health-col-software">Software</th><th class="collector-health-col-events">Events</th><th class="collector-health-col-last-event">Last Event</th><th class="collector-health-col-warning">Warning</th><th class="collector-health-col-control">Control</th></tr></thead>
         <tbody id="collector-health"></tbody>
       </table>
     </section>
@@ -520,7 +494,7 @@
         </label>
       </div>
       <table class="alerts-table">
-        <thead><tr><th>Level</th><th>Source</th><th>Subject</th><th>Summary</th><th>Details</th><th>First Seen</th><th>Last Seen</th><th>Seen</th><th>State</th><th>Action</th></tr></thead>
+        <thead><tr><th class="alert-col-level">Level</th><th class="alert-col-source">Source</th><th class="alert-col-subject">Subject</th><th class="alert-col-summary">Summary</th><th class="alert-col-details">Details</th><th class="alert-col-first-seen">First Seen</th><th class="alert-col-last-seen">Last Seen</th><th class="alert-col-count">Seen</th><th class="alert-col-state">State</th><th class="alert-col-action">Action</th></tr></thead>
         <tbody id="alerts-list"></tbody>
       </table>
     </section>

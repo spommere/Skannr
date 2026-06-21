@@ -5,55 +5,52 @@ description: Optional passive local-network neighbor observation
 acquisition_mode: scan
 enabled: false
 
-# LAN is local OS state, not RF evidence. Default behavior is passive:
-# neighbor table, ARP fallback, default routes, mDNS/SSDP advertisements, and
-# optional DHCP lease files. Active ARP scan is available but disabled by
-# default.
+# Main poll controls. poll_interval_sec is the normal passive/command collection
+# cadence. command_timeout_sec is the default timeout for local helper commands.
 poll_interval_sec: 60
 command_timeout_sec: 10
+
+# Passive OS-neighbor sources. These read local kernel/service state and do not
+# actively probe hosts.
 collect_ip_neigh: true
 collect_arp: true
-
-# Passive multicast enrichment. These listen for advertisements and fold them
-# into the normal LAN poll output.
 collect_mdns: true
 collect_ssdp: true
 
-# Optional resolved mDNS/Bonjour import. Requires avahi-utils/avahi-daemon and
-# enriches LAN subjects with hostnames, service names, ports, and selected TXT
-# clues. Disabled by default; the lightweight Python mDNS listener above still
-# works without avahi-browse.
+# Optional avahi-browse service discovery. This can add useful service names but
+# is a command poll, so it has its own slower interval and timeout.
 collect_avahi_browse: false
 avahi_browse_interval_sec: 300
 avahi_browse_timeout_sec: 15
 avahi_browse_command: avahi-browse -a -r -p -t
 
-# Optional passive DHCP and raw ARP listeners. These can require privileges or
-# conflict with local services, so they are disabled by default.
+# Optional passive packet listeners. DHCP uses UDP 67/68 by default. Passive ARP
+# can be bound to selected interfaces; empty means the collector default.
 collect_passive_dhcp: false
 passive_dhcp_ports: [67, 68]
 collect_passive_arp: false
 passive_arp_interfaces: []
 
-# Optional active ARP scan. Requires arp-scan and may need root/cap_net_raw.
-# Leave active_arp_scan_interfaces empty to let arp-scan choose. On multi-homed
-# Pis, prefer listing interfaces explicitly, e.g. [eth0, wlan0]. Do not use
-# tun0/Yggdrasil here; ARP scan is for IPv4 Ethernet/L2 LANs.
+# Optional active ARP sweep. This improves LAN inventory but generates traffic;
+# keep off unless you intentionally want active local-network probing.
 collect_active_arp_scan: false
 active_arp_scan_interval_sec: 300
 active_arp_scan_timeout_sec: 20
-# Retain active-scan subjects across intermittent missed ARP replies. Leave
-# blank for max(180 sec, active_arp_scan_interval_sec * 3).
+# Blank retention means Skannr derives a retention window from the scan interval.
 active_arp_scan_retention_sec: ""
+# Empty interfaces lets the command choose its default local network. Use names
+# such as [eth0, wlan0] when you need per-interface scans.
 active_arp_scan_interfaces: []
+# Use {interface} in the command if the command should be parameterized per
+# active_arp_scan_interfaces entry.
 active_arp_scan_command: arp-scan --localnet
+# Set when arp-scan needs a working directory to find vendor files.
 active_arp_scan_working_dir: ""
 
-# Optional dnsmasq-style lease files. Leave empty if Skannr cannot read them.
+# Optional DHCP lease import. Paths are parsed directly; dhcp_lease_command can
+# be used when leases need to be emitted by a local helper. Import has a separate
+# cadence so it can be slower than the main LAN poll.
 dhcp_lease_import_interval_sec: 300
 dhcp_lease_import_timeout_sec: 10
 dhcp_lease_paths: []
-
-# Optional command that prints dnsmasq-style lease rows. Use a local wrapper
-# script if a router export needs ssh/curl/custom parsing.
 dhcp_lease_command: ""

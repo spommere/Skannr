@@ -33,11 +33,6 @@ COLLECTOR_TOOL_REQUIREMENTS = [
         "note": "needed when classic Bluetooth inquiry is enabled",
     },
     {
-        "collector": "RTL-SDR power scan",
-        "commands": ["rtl_power", "rtl_test"],
-        "note": "needed when the rtlsdr collector is enabled",
-    },
-    {
         "collector": "RTL-433 decoder",
         "commands": ["rtl_433"],
         "note": "needed when the rtl433 collector is enabled",

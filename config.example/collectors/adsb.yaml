@@ -5,26 +5,42 @@ description: Optional dump1090/readsb decoded aircraft feed
 acquisition_mode: listen
 enabled: false
 
-# By default Skannr starts dump1090/readsb on device_index, tells it where to
-# write aircraft.json, reads that file, and rolls decoded aircraft state up into
-# aircraft subjects, Insights, Alerts, and Reports. ADS-B can run alongside
-# RTL-433 or rtl_power only when those collectors use different RTL-SDR indexes.
+# ADS-B uses an RTL-SDR-compatible decoder such as dump1090 or readsb. ADS-B
+# and RTL-433 cannot use the same RTL-SDR dongle at the same time, so use
+# different device_index values when both collectors run on one host.
+
+# Aircraft state polling. poll_interval_sec controls how often Skannr reads the
+# decoder's aircraft.json. request_timeout_sec bounds HTTP/file read attempts.
 poll_interval_sec: 1
 request_timeout_sec: 2
+
+# Decoder management. When manage_decoder is true, Skannr starts a local decoder,
+# points it at device_index, and reads the generated aircraft.json output.
 manage_decoder: true
 device_index: 0
-decoder_command: dump1090-mutability
+
+# Leave blank for automatic fallback: dump1090-mutability, dump1090-fa,
+# dump1090, then readsb.
+decoder_command: ""
+
+# Arguments for managed decoder startup. {device_index} and {json_dir} are
+# substituted by Skannr. These dump1090-style defaults are translated to readsb
+# arguments when readsb is selected as the fallback decoder.
 decoder_args:
 - --net
 - --device-index
 - "{device_index}"
 - --write-json
 - "{json_dir}"
+
+# Managed decoder output. Blank decoder_output_dir uses
+# runtime/logs/adsb_decoder/. decoder_start_timeout_sec bounds startup wait.
 decoder_output_dir: ""
 decoder_start_timeout_sec: 10
 
-# Leave url blank for managed decoder or local aircraft_json_paths mode. If url
-# is set, Skannr does not start the decoder and reads this HTTP endpoint.
+# External decoder mode. If url is set, Skannr does not start a decoder and reads
+# that aircraft.json endpoint instead. When url is blank, these local paths are
+# tried before/alongside managed decoder output.
 url: ""
 aircraft_json_paths:
 - /run/dump1090-fa/aircraft.json
@@ -34,15 +50,11 @@ aircraft_json_paths:
 - /run/readsb/aircraft.json
 - /var/run/readsb/aircraft.json
 
-# If manage_decoder is true and decoder_output_dir is blank, Skannr writes the
-# decoder JSON files under runtime/logs/adsb_decoder/. Skannr's own raw ADS-B
-# event audit remains under runtime/logs/adsb/YYYY-MM-DD.jsonl.
-
 # Optional observer coordinates. If omitted, Skannr falls back to NOAA/USGS
 # collector latitude/longitude when available.
 latitude:
 longitude:
 
-# Used for live warning Insights/Reports when distance is known.
+# Used for live warning Insights, Alerts, and Reports when distance is known.
 nearby_radius_km: 10
 low_altitude_ft: 1500

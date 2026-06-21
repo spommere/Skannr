@@ -1,3 +1,7 @@
+# Main Skannr application configuration. Collector-specific settings live in
+# config/collectors/<collector>.yaml. See REFERENCE.md for the full parameter
+# appendix and guidance on how scan intervals, retries, alerts, findings,
+# reports, and UI freshness windows interact.
 skannr:
   # Web listener endpoints. Use 127.0.0.1 for local-only, 0.0.0.0 for all IPv4
   # interfaces, or [::] for all IPv6 interfaces. A specific Yggdrasil IPv6
@@ -8,13 +12,21 @@ skannr:
   # listeners:
   #   - "0.0.0.0:5004"
   #   - "[::]:5006"
+  # Python logging level for the web process and collectors. Common values are
+  # DEBUG, INFO, WARNING, and ERROR.
   log_level: INFO
-# Collector-specific settings live in config/collectors/<collector>.yaml.
+
+# Persistence controls where raw JSONL collector events are written and how long
+# local event files are retained before cleanup.
 persistence:
+  # filesystem is the supported example backend.
   backend: filesystem
   filesystem:
+    # Base directory for collector JSONL files and supporting runtime artifacts.
     log_dir: runtime/logs
+    # Age-based retention for local filesystem logs.
     retention_days: 30
+
 runtime:
   # Internal runtime knobs. Modify only if you know why; very small values can
   # increase CPU use or drop browser events under load.
@@ -23,6 +35,9 @@ runtime:
   sse_heartbeat_sec: 15
   system_status_interval_sec: 5
   shutdown_timeout_sec: 10
+# Findings are live interpreted observations derived from raw collector events.
+# These knobs decide what gets promoted into live Insights; raw Subject History
+# and Reports can still include events that are suppressed here.
 findings:
   enabled: true
   max_items: 200
@@ -81,6 +96,9 @@ findings:
   swpc_warning_geomagnetic_storm: G3
   swpc_warning_kp: 7
   lan_return_after_sec: 3600
+# Alerts are the operator-facing subset of events that should be acknowledged or
+# allowed to expire. Each nested alert rule has an enabled flag and level
+# thresholds/patterns specific to that signal family.
 alerts:
   # Alerts are the small set of live conditions that should be visible from any
   # tab and stay open until ACKed or until active_ttl_sec expires. Findings and
@@ -245,6 +263,8 @@ alerts:
     - security
     model_patterns: []
     protocols: []
+# History analysis controls derived Device History/Subject History pattern
+# detection. These thresholds are separate from live Findings and Alerts.
 history_analysis:
   new_device_window_sec: 3600
   strong_wifi_rssi: -50
@@ -268,6 +288,8 @@ history_analysis:
   wifi_short_lived_sec: 900
   rtl433_recent_min_events: 1
   sensitive_ssids: []
+# Reports are longer-window summaries computed from retained history. Report
+# thresholds can intentionally differ from live Findings/Alerts thresholds.
 reports:
   ble_long_presence_sec: 3600
   ble_recurring_min_days: 2
@@ -306,6 +328,8 @@ reports:
   rtl433_report_min_events: 2
   lan_report_new_devices: true
   lan_report_gateway_changes: true
+# UI retention and freshness controls. These values bound browser-side rendering
+# and derived-view refresh behavior; they do not delete raw collector logs.
 ui:
   max_live_rows: 200
   max_history_rows: 500

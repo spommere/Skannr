@@ -63,14 +63,6 @@ FALLBACK_COLLECTOR_DEFINITIONS = [
         "has_subject_history": True,
     },
     {
-        "key": "rtlsdr",
-        "order": 50,
-        "label": "RTL-SDR",
-        "description": "rtl_power spectrum scanning",
-        "acquisition_mode": ACQUISITION_SCAN,
-        "has_subject_history": True,
-    },
-    {
         "key": "rtl433",
         "order": 53,
         "label": "RTL-433",

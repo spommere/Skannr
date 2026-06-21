@@ -5,12 +5,21 @@ description: Lightweight Wi-Fi access-point scanning
 acquisition_mode: scan
 enabled: true
 validation_timeout_sec: 10
-# Optional ordered list. When empty, Skannr chooses the best available Wi-Fi
-# interface it can see.
+
+# Interface selection. Empty means Skannr ranks available managed Wi-Fi
+# interfaces. Set interfaces when the host has multiple radios and one should be
+# preferred for managed AP scans.
 interfaces: []
+
+# Steady-state scan cadence after a successful managed scan pass. This is not a
+# retry delay; retry_interval_sec below is used after command/setup failures.
 managed_scan_interval_sec: 2
-# auto uses iw when available and iwlist only when iw is absent. Set iwlist
-# explicitly only for old drivers where iw cannot scan but iwlist can.
+
+# Scanner backend. auto tries iw first and falls back to nmcli when needed.
 scan_tool: auto
+
+# Failure retry behavior. retry_interval_sec is the delay before retrying after a
+# failed scan command. retry_timeout_sec is the collector setup/retry timeout
+# shown in status and diagnostics; it does not change normal scan cadence.
 retry_interval_sec: 5
 retry_timeout_sec: 30

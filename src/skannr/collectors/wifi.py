@@ -22,10 +22,17 @@ from .base import (
 from .hardware import (
     availability_records,
     configured_candidates,
+    monitor_mode_interfaces,
     network_interface_exists,
     sort_wifi_interfaces,
     wireless_interfaces,
 )
+
+def managed_scan_interfaces():
+    """Return Wi-Fi interfaces that are not currently in monitor mode."""
+    monitors = set(monitor_mode_interfaces())
+    return [iface for iface in wireless_interfaces() if iface not in monitors]
+
 
 class WiFiCollector(BaseCollector):
     """Managed-mode Wi-Fi collector for visible access points.
@@ -43,7 +50,7 @@ class WiFiCollector(BaseCollector):
     @classmethod
     def hardware_status(cls, config):
         """Return managed Wi-Fi interface and scanner executable status."""
-        discovered = wireless_interfaces()
+        discovered = managed_scan_interfaces()
         configured = configured_candidates(config, "interfaces") or discovered
         return {
             "interfaces": availability_records(
@@ -65,7 +72,7 @@ class WiFiCollector(BaseCollector):
             self.warning = "Neither iw nor iwlist was found in PATH."
             return False
 
-        discovered = wireless_interfaces()
+        discovered = managed_scan_interfaces()
         configured = configured_candidates(self.config, "interfaces")
         candidates = configured or sort_wifi_interfaces(discovered, self.config)
         for interface in candidates:

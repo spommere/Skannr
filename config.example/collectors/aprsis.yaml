@@ -9,8 +9,14 @@ enabled: false
 # the packet. Use port 14580 so the server applies the location/range filter.
 # Some APRS-IS regional feeds do not forward CWOP weather reliably, so Skannr
 # can run a normal APRS feed plus a CWOP weather feed under one collector.
+
+# Login identity. Use a real callsign/passcode in local config when available;
+# NOCALL/-1 is suitable only as a template placeholder.
 callsign: NOCALL
 passcode: -1
+
+# Feed list. Each feed opens one APRS-IS connection. role is used by Skannr to
+# interpret packets as local situational traffic or weather/CWOP traffic.
 feeds:
   - name: local
     role: local
@@ -34,28 +40,35 @@ feeds:
     # server banner identifies this backend, for example CWOP-4.
     # preferred_server: CWOP-4
 
+# Connection handling. connect_timeout_sec covers TCP/login setup.
+# preferred_server_timeout_sec is the short wait for a desired pool backend.
 connect_timeout_sec: 10
 preferred_server_timeout_sec: 2
 # Optional collector-wide limit for preferred_server retries. When set, Skannr
 # accepts the current backend after this many non-preferred attempts instead of
 # reconnecting forever against a sticky pool.
 # preferred_server_max_attempts: 10
-# Skannr writes APRS connect, disconnect, preferred-server retry, timeout, and
-# drop diagnostics to runtime/logs/skannr.log. The browser status keeps only a
-# concise per-feed line.
-# Sparse CWOP/range filters can be quiet for several minutes. Keep the TCP
-# stream open long enough not to churn around periodic station updates.
+
+# Sparse CWOP/range filters can be quiet for several minutes. read_timeout_sec
+# should be long enough not to churn around periodic station updates.
 read_timeout_sec: 600
+
 # While connected, quiet feeds emit non-persistent status snapshots at this
 # cadence so System Status can show last-packet age without raw log churn.
 status_interval_sec: 60
+
+# Retry/offline/rate controls. retry_interval_sec delays reconnect after a
+# failure. offline_event_interval_sec throttles offline status events.
 retry_interval_sec: 30
 offline_event_interval_sec: 300
 max_events_per_minute: 120
-store_raw: false
+
+# Storage/diagnostic controls. store_raw writes raw APRS lines when true.
 # Dropped malformed, out-of-radius, or rate-limited packets are counted in
 # status payloads and can be logged for APRS-IS troubleshooting.
+store_raw: false
 log_dropped_packets: true
-# Server login/filter comments are logged and kept in status counters. Keep
-# live table events off unless debugging APRS-IS server behavior.
+
+# Server login/filter comments are logged and kept in status counters. Keep live
+# table events off unless debugging APRS-IS server behavior.
 emit_server_messages: false

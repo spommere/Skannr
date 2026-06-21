@@ -108,6 +108,17 @@ class BaseCollector:
         """Sleep for the collector-specific retry interval."""
         await asyncio.sleep(float(self.config.get("retry_interval_sec", 5)))
 
+    async def retrying(self, reason, data=None, sleep=True):
+        """Publish a standard retry state for transient collector failures."""
+        self.state = STATE_RETRYING
+        self.warning = str(reason or "collector retrying")
+        payload = {"reason": self.warning}
+        if isinstance(data, dict):
+            payload.update(data)
+        await self.emit("collector_retrying", payload, "warning")
+        if sleep and self._running:
+            await self.retry_sleep()
+
     def validate_configured(self, key, default_command=None):
         """Run one named validation command from collector config."""
         command = self.config.get(key, default_command)

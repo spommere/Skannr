@@ -8,10 +8,12 @@ import asyncio
 import inspect
 import os
 import re
+import shutil
 import subprocess
 
 import yaml
 
+from ..identity_policy import bluetooth_property_like_name
 from ..log_utils import now_epoch
 from ..paths import CONFIG_COLLECTORS_DIR, DATA_COLLECTORS_DIR
 from .base import (
@@ -146,6 +148,10 @@ class BLECollector(BaseCollector):
             return data
         return data.decode("utf-8", "replace")
 
+    def strip_ansi(self, text):
+        """Remove ANSI escape sequences from bluetoothctl output."""
+        return re.sub(r"\[[0-?]*[ -/]*[@-~]", "", str(text or ""))
+
     def bluetoothctl_has_controller(self):
         """Fallback detection for systems where hci0 exists only in BlueZ."""
         try:
@@ -198,10 +204,16 @@ class BLECollector(BaseCollector):
             )
             return
 
+        self._runtime_force_discover_scan = bool(
+            self.config.get("force_discover_scan", False)
+        )
+        self._runtime_bluetoothctl_scan = bool(
+            self.config.get("force_bluetoothctl_scan", False)
+        )
         self.prepare_adapter()
         await self.emit(
             "scanner_started",
-            {"adapter": self.active_hardware},
+            self.startup_payload(),
         )
         # seen tracks device state between scans so the UI can distinguish new,
         # updated, and lost devices instead of appending duplicate rows forever.
@@ -209,6 +221,8 @@ class BLECollector(BaseCollector):
         timeout = float(self.config.get("device_timeout_sec", 60))
         interval = float(self.config.get("scan_interval_sec", 5))
         consecutive_in_progress = 0
+        empty_scan_windows = 0
+        last_bluez_warmup = 0
 
         while self._running:
             now = asyncio.get_running_loop().time()
@@ -218,14 +232,14 @@ class BLECollector(BaseCollector):
                 # more likely during field use.
                 async with adapter_operation_lock(self.active_hardware):
                     self.prepare_adapter()
-                    devices = await self.discover_devices(
+                    devices = await self.discover_devices_with_timeout(
                         BleakScanner, interval, use_adapter=True
                     )
             except TypeError:
                 # Older bleak versions did not accept newer discover keywords.
                 async with adapter_operation_lock(self.active_hardware):
                     self.prepare_adapter()
-                    devices = await self.discover_devices(
+                    devices = await self.discover_devices_with_timeout(
                         BleakScanner, interval, use_adapter=False
                     )
             except Exception as exc:
@@ -243,7 +257,9 @@ class BLECollector(BaseCollector):
                     exc, consecutive_in_progress
                 )
                 await self.emit(
-                    "collector_retrying", {"reason": self.warning}, "warning"
+                    "collector_retrying",
+                    self.retry_payload(self.warning),
+                    "warning",
                 )
                 await self.retry_sleep()
                 if not self.detect():
@@ -254,6 +270,19 @@ class BLECollector(BaseCollector):
                 continue
 
             consecutive_in_progress = 0
+            if devices:
+                empty_scan_windows = 0
+            else:
+                empty_scan_windows += 1
+                last_bluez_warmup, warmup = self.maybe_warm_bluez_discovery(
+                    empty_scan_windows, last_bluez_warmup
+                )
+                if self.should_emit_empty_scan(empty_scan_windows, warmup):
+                    await self.emit(
+                        "scan_empty",
+                        self.empty_scan_payload(empty_scan_windows, warmup),
+                        "warning",
+                    )
             current = asyncio.get_running_loop().time()
             for device, advertisement in devices:
                 # bleak exposes slightly different attributes across versions;
@@ -272,6 +301,7 @@ class BLECollector(BaseCollector):
                 }
                 payload.update(self.findmy_accessory_fields(advertisement))
                 previous = seen.get(mac)
+                payload = self.merge_display_payload(previous, payload)
                 seen[mac] = dict(payload, last_seen=current)
                 if previous is None:
                     # first_seen is filled by Device History using the event
@@ -303,6 +333,43 @@ class BLECollector(BaseCollector):
                     )
                 )
 
+    async def discover_devices_with_timeout(self, scanner, interval, use_adapter=True):
+        """Run one Bleak discovery window with a hard timeout."""
+        configured = float(self.config.get("discover_timeout_sec", 0) or 0)
+        timeout = configured if configured > 0 else max(interval + 10, 15)
+        try:
+            return await asyncio.wait_for(
+                self.discover_devices(scanner, interval, use_adapter=use_adapter),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            method = self.scan_method_label()
+            self.recover_discovery_timeout()
+            if bool(self.config.get("bluetoothctl_fallback_after_timeout", True)):
+                self._runtime_bluetoothctl_scan = True
+                self._runtime_force_discover_scan = False
+                raise RuntimeError(
+                    "BLE {} discovery timed out after {:.1f}s; falling back to bluetoothctl".format(
+                        method, timeout
+                    )
+                )
+            if method == "callback":
+                self._runtime_force_discover_scan = True
+                raise RuntimeError(
+                    "BLE {} discovery timed out after {:.1f}s; falling back to discover()".format(
+                        method, timeout
+                    )
+                )
+            raise RuntimeError(
+                "BLE {} discovery timed out after {:.1f}s".format(method, timeout)
+            )
+
+    def scan_method_label(self):
+        """Return the current scan path used by this collector."""
+        if getattr(self, "_runtime_bluetoothctl_scan", False):
+            return "bluetoothctl"
+        return "discover" if getattr(self, "_runtime_force_discover_scan", False) else "callback"
+
     async def discover_devices(self, scanner, interval, use_adapter=True):
         """Return [(device, advertisement_data)] across old/new bleak APIs.
 
@@ -311,6 +378,11 @@ class BLECollector(BaseCollector):
         BLEDevice objects. Normalizing here keeps the main scan loop simple and
         prevents the UI from losing RSSI on Python 3.11/Pi installs.
         """
+        method = self.scan_method_label()
+        if method == "bluetoothctl":
+            return await self.discover_with_bluetoothctl(interval)
+        if method == "discover":
+            return await self.discover_once(scanner, interval, use_adapter)
         if self.config.get("callback_scan", True):
             try:
                 return await self.discover_with_callback(
@@ -322,6 +394,10 @@ class BLECollector(BaseCollector):
                 # callback API.
                 pass
 
+        return await self.discover_once(scanner, interval, use_adapter)
+
+    async def discover_once(self, scanner, interval, use_adapter=True):
+        """Run one Bleak discover() call with configured BlueZ options."""
         kwargs = {"timeout": interval}
         if use_adapter:
             kwargs["adapter"] = self.active_hardware
@@ -359,6 +435,282 @@ class BLECollector(BaseCollector):
                 continue
         result = await scanner.discover(timeout=kwargs.get("timeout", 5))
         return self.normalize_discovery_result(result)
+
+    async def discover_with_bluetoothctl(self, interval):
+        """Collect BLE rows using bluetoothctl when Bleak cannot scan."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self.bluetoothctl_scan_once, interval
+        )
+
+    def bluetoothctl_scan_once(self, interval):
+        """Run one bounded bluetoothctl scan and parse observed devices."""
+        bluetoothctl = shutil.which("bluetoothctl")
+        if not bluetoothctl:
+            raise RuntimeError("bluetoothctl is not installed")
+        duration = max(1, int(float(interval)))
+        command = [bluetoothctl, "--timeout", str(duration), "scan", "on"]
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+                timeout=duration + 3,
+            )
+        except Exception as exc:
+            raise RuntimeError("bluetoothctl scan failed: {}".format(exc))
+        output = self.strip_ansi(self.decode_output(result.stdout))
+        if result.returncode != 0:
+            raise RuntimeError(
+                "bluetoothctl scan exited {}; {}".format(
+                    result.returncode, output[:300]
+                )
+            )
+        rows = self.parse_bluetoothctl_scan_output(output)
+        if not rows:
+            rows = self.parse_bluetoothctl_devices_output(
+                self.command_output([bluetoothctl, "devices"])
+            )
+        rows = self.enrich_bluetoothctl_rows(rows)
+        return self.bluez_rows_to_seen_devices(rows)
+
+    def parse_bluetoothctl_scan_output(self, output):
+        """Parse bluetoothctl scan output into normalized BLE rows."""
+        rows = {}
+        for raw_line in str(output or "").splitlines():
+            line = raw_line.strip()
+            match = re.search(
+                r"\[CHG\]\s+Device\s+([0-9A-Fa-f:]{17})\s+RSSI:\s*(.+)$",
+                line,
+            )
+            if match:
+                mac = match.group(1).upper()
+                entry = rows.setdefault(mac, self.empty_bluetoothctl_row())
+                rssi = self.bluetoothctl_signal_value(match.group(2))
+                if rssi is not None:
+                    entry["rssi"] = rssi
+                continue
+            match = re.search(
+                r"\[CHG\]\s+Device\s+([0-9A-Fa-f:]{17})\s+([^:]+):\s*(.*)",
+                line,
+            )
+            if match:
+                mac = match.group(1).upper()
+                entry = rows.setdefault(mac, self.empty_bluetoothctl_row())
+                self.apply_bluetoothctl_property(
+                    entry,
+                    match.group(2).strip(),
+                    match.group(3).strip(),
+                )
+                continue
+            match = re.search(
+                r"(?:\[(?:NEW|DEL)\]\s+)?Device\s+([0-9A-Fa-f:]{17})(?:\s+(.+))?$",
+                line,
+            )
+            if match:
+                mac = match.group(1).upper()
+                name = (match.group(2) or "").strip()
+                entry = rows.setdefault(mac, self.empty_bluetoothctl_row())
+                if (
+                    name
+                    and self.is_valid_display_name(name)
+                    and not self.is_address_like_name(name)
+                ):
+                    entry["name"] = name
+        return rows
+
+    def parse_bluetoothctl_devices_output(self, output):
+        """Parse bluetoothctl devices cache into normalized BLE rows."""
+        rows = {}
+        for raw_line in str(output or "").splitlines():
+            parts = raw_line.strip().split(None, 2)
+            if len(parts) >= 2 and parts[0] == "Device":
+                mac = parts[1].upper()
+                entry = rows.setdefault(mac, self.empty_bluetoothctl_row())
+                if len(parts) >= 3:
+                    name = parts[2].strip()
+                    if (
+                        name
+                        and self.is_valid_display_name(name)
+                        and not self.is_address_like_name(name)
+                    ):
+                        entry["name"] = name
+        return rows
+
+    def empty_bluetoothctl_row(self):
+        """Return one mutable bluetoothctl-derived row accumulator."""
+        return {
+            "name": "",
+            "rssi": None,
+            "service_uuids": set(),
+            "manufacturer_ids": set(),
+        }
+
+    def apply_bluetoothctl_property(self, entry, key, value):
+        """Fold one bluetoothctl property line into a structured row."""
+        lowered = str(key or "").strip().lower()
+        normalized = re.sub(r"[^a-z0-9]+", " ", lowered).strip()
+        value = str(value or "").strip()
+        if not normalized:
+            return
+        if normalized in ("name", "alias"):
+            if (
+                value
+                and self.is_valid_display_name(value)
+                and not self.is_address_like_name(value)
+            ):
+                entry["name"] = value
+            return
+        if normalized in ("uuid", "uuids"):
+            for uuid in self.bluetoothctl_uuid_values(value):
+                entry["service_uuids"].add(uuid)
+            return
+        if normalized == "manufacturerdata key":
+            code = self.bluetoothctl_manufacturer_code(value)
+            if code is not None:
+                entry["manufacturer_ids"].add(code)
+            return
+
+    def bluetoothctl_signal_value(self, value):
+        """Return decimal RSSI/TxPower from bluetoothctl property text."""
+        text = str(value or "").strip()
+        match = re.search(r"\((-?\d+)\)", text)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+        match = re.search(r"(-?\d+)", text)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    def bluetoothctl_uuid_values(self, value):
+        """Extract UUID tokens from bluetoothctl property text."""
+        text = str(value or "").strip()
+        values = []
+        for candidate in re.findall(r"\(([0-9A-Fa-f\-]{4,36})\)", text):
+            cleaned = candidate.strip().lower()
+            if cleaned:
+                values.append(cleaned)
+        if values:
+            return values
+        values = []
+        for candidate in re.split(r"[,\s]+", text):
+            cleaned = candidate.strip().lower()
+            if re.match(r"^[0-9a-f]{4,8}$", cleaned) or re.match(
+                r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                cleaned,
+            ):
+                values.append(cleaned)
+        return values
+
+    def bluetoothctl_manufacturer_code(self, value):
+        """Return an integer manufacturer id parsed from bluetoothctl text."""
+        match = re.search(r"0x([0-9A-Fa-f]{1,4})", str(value or ""))
+        if not match:
+            return None
+        try:
+            return int(match.group(1), 16)
+        except ValueError:
+            return None
+
+    def enrich_bluetoothctl_rows(self, rows):
+        """Fill bluetoothctl scan rows from cached bluetoothctl info output."""
+        if not rows or not bool(self.config.get("bluetoothctl_info_lookup", True)):
+            return rows
+        ttl = float(self.config.get("bluetoothctl_info_interval_sec", 300))
+        limit = int(self.config.get("bluetoothctl_info_max_per_scan", 8))
+        cache = getattr(self, "_bluetoothctl_info_cache", None)
+        if cache is None:
+            cache = {}
+            self._bluetoothctl_info_cache = cache
+        now = now_epoch()
+        lookups = 0
+        for mac, entry in rows.items():
+            cached = cache.get(mac)
+            cached_row = (cached or {}).get("row") or {}
+            if self.bluetoothctl_row_has_identity(cached_row):
+                self.merge_bluetoothctl_row(entry, cached_row)
+                continue
+            if cached and now - cached.get("checked_at", 0) < ttl:
+                self.merge_bluetoothctl_row(entry, cached_row)
+                continue
+            if not self.bluetoothctl_row_needs_info(entry):
+                continue
+            if lookups >= limit:
+                continue
+            info_row = self.bluetoothctl_info_row(mac)
+            cache[mac] = {"checked_at": now, "row": info_row}
+            self.merge_bluetoothctl_row(entry, info_row)
+            lookups += 1
+        return rows
+
+    def bluetoothctl_row_needs_info(self, entry):
+        """Return True when bluetoothctl info may add missing identity fields."""
+        return not (
+            entry.get("name")
+            and entry.get("manufacturer_ids")
+            and entry.get("service_uuids")
+        )
+
+    def bluetoothctl_row_has_identity(self, entry):
+        """Return True when cached bluetoothctl info already found useful data."""
+        if not isinstance(entry, dict):
+            return False
+        return bool(
+            entry.get("name")
+            or entry.get("manufacturer_ids")
+            or entry.get("service_uuids")
+        )
+
+    def bluetoothctl_info_row(self, mac):
+        """Parse bluetoothctl info for one MAC into identity-only fields."""
+        output = self.strip_ansi(self.command_output(["bluetoothctl", "info", mac]))
+        entry = self.empty_bluetoothctl_row()
+        for raw_line in str(output or "").splitlines():
+            text = raw_line.strip()
+            if ":" not in text:
+                continue
+            key, value = text.split(":", 1)
+            normalized = re.sub(r"[^a-z0-9]+", " ", key.strip().lower()).strip()
+            if normalized not in ("name", "alias", "uuid", "uuids", "manufacturerdata key"):
+                continue
+            self.apply_bluetoothctl_property(entry, key.strip(), value.strip())
+        return entry
+
+    def merge_bluetoothctl_row(self, entry, extra):
+        """Merge cached bluetoothctl info data into one scan row."""
+        if not isinstance(extra, dict):
+            return entry
+        if (not entry.get("name")) and extra.get("name"):
+            entry["name"] = extra.get("name")
+        entry.setdefault("service_uuids", set()).update(extra.get("service_uuids") or set())
+        entry.setdefault("manufacturer_ids", set()).update(extra.get("manufacturer_ids") or set())
+        return entry
+
+    def bluez_rows_to_seen_devices(self, rows):
+        output = []
+        for mac, data in sorted(rows.items()):
+            device = _SeenDevice(
+                mac,
+                name=data.get("name") or "",
+                rssi=data.get("rssi"),
+            )
+            advertisement = _SeenAdvertisement()
+            advertisement.local_name = data.get("name") or ""
+            advertisement.rssi = data.get("rssi")
+            advertisement.service_uuids = sorted(data.get("service_uuids") or [])
+            advertisement.manufacturer_data = {
+                key: b""
+                for key in sorted(data.get("manufacturer_ids") or [])
+            }
+            output.append((device, advertisement))
+        return output
 
     async def discover_with_callback(self, scanner, interval, use_adapter=True):
         """Collect a scan window by merging every Bleak callback update.
@@ -535,7 +887,7 @@ class BLECollector(BaseCollector):
 
     def bluez_info_name(self, mac):
         """Parse Name/Alias from bluetoothctl info for one device."""
-        output = self.command_output(["bluetoothctl", "info", mac])
+        output = self.strip_ansi(self.command_output(["bluetoothctl", "info", mac]))
         values = {}
         for line in output.splitlines():
             text = line.strip()
@@ -554,7 +906,7 @@ class BLECollector(BaseCollector):
 
     def bluez_devices_name(self, mac):
         """Parse bluetoothctl devices as a broader local-cache fallback."""
-        output = self.command_output(["bluetoothctl", "devices"])
+        output = self.strip_ansi(self.command_output(["bluetoothctl", "devices"]))
         for line in output.splitlines():
             parts = line.strip().split(None, 2)
             if (
@@ -615,7 +967,9 @@ class BLECollector(BaseCollector):
             "failed to connect",
             "input/output error",
         )
-        return not any(fragment in lowered for fragment in bad_fragments)
+        if any(fragment in lowered for fragment in bad_fragments):
+            return False
+        return not bluetooth_property_like_name(text)
 
     def same_address(self, left, right):
         """Compare Bluetooth addresses while ignoring separators/case."""
@@ -623,6 +977,23 @@ class BLECollector(BaseCollector):
             r"[^0-9A-Fa-f]", "", str(value or "")
         ).lower()
         return bool(left and right and normalize(left) == normalize(right))
+
+    def merge_display_payload(self, previous, current):
+        """Preserve prior visible BLE fields when a new scan window is sparse."""
+        previous = previous or {}
+        merged = dict(current or {})
+        if not merged.get("name") and previous.get("name"):
+            merged["name"] = previous.get("name")
+        if merged.get("rssi") is None and previous.get("rssi") is not None:
+            merged["rssi"] = previous.get("rssi")
+        if not merged.get("manufacturer") and previous.get("manufacturer"):
+            merged["manufacturer"] = previous.get("manufacturer")
+        if not merged.get("service_uuids") and previous.get("service_uuids"):
+            merged["service_uuids"] = list(previous.get("service_uuids") or [])
+        for field in ("findmy_accessory", "findmy_status", "findmy_hint", "findmy_label"):
+            if merged.get(field) in (None, "") and previous.get(field) not in (None, ""):
+                merged[field] = previous.get(field)
+        return merged
 
     def display_payload_changed(self, previous, current):
         """Return True when any browser-visible BLE field changed."""
@@ -745,6 +1116,112 @@ class BLECollector(BaseCollector):
         self.command_succeeds(["btmgmt", "power", "on"])
         self.command_succeeds(["bluetoothctl", "power", "on"])
 
+    def recover_discovery_timeout(self):
+        """Recover after Bleak hangs inside a discovery window."""
+        adapter = self.selected_adapter()
+        self.command_succeeds(["bluetoothctl", "scan", "off"])
+        if bool(self.config.get("reset_after_discovery_timeout", True)):
+            self.command_succeeds(["hciconfig", adapter, "reset"])
+            self.command_succeeds(["hciconfig", adapter, "up"])
+        self.prepare_adapter()
+
+    def should_emit_empty_scan(self, empty_scan_windows, warmup):
+        """Return true when an empty scan should be visible to operators."""
+        threshold = int(self.config.get("bluez_warmup_after_empty_scans", 5))
+        if warmup.get("attempted"):
+            return True
+        return threshold > 0 and empty_scan_windows == threshold
+
+    def empty_scan_payload(self, empty_scan_windows, warmup):
+        """Build a compact UI/log payload for BLE empty-scan diagnostics."""
+        payload = {
+            "adapter": self.selected_adapter(),
+            "scan_method": self.scan_method_label(),
+            "fallback_active": self.bluetoothctl_fallback_active(),
+            "empty_scan_windows": empty_scan_windows,
+            "bluez_warmup": warmup.get("state", "not attempted"),
+        }
+        if warmup.get("command"):
+            payload["bluez_warmup_command"] = warmup["command"]
+        if warmup.get("returncode") is not None:
+            payload["bluez_warmup_returncode"] = warmup["returncode"]
+        if warmup.get("error"):
+            payload["bluez_warmup_error"] = warmup["error"]
+        payload["bluez_cached_devices"] = self.bluez_cached_device_count()
+        payload["diagnostics"] = self.adapter_diagnostics()
+        return payload
+
+    def maybe_warm_bluez_discovery(self, empty_scan_windows, last_warmup):
+        """Kick BlueZ discovery after repeated empty Bleak scan windows.
+
+        Some Kali/BlueZ combinations appear to leave the adapter powered but not
+        actively discovering until an external `bluetoothctl scan on` wakes the
+        controller. Keep this recovery bounded and rate-limited so quiet RF
+        environments do not spawn a helper on every scan loop.
+        """
+        skipped = {"attempted": False, "state": "not attempted"}
+        threshold = int(self.config.get("bluez_warmup_after_empty_scans", 5))
+        if threshold <= 0:
+            skipped["state"] = "disabled"
+            return last_warmup, skipped
+        if empty_scan_windows < threshold:
+            return last_warmup, skipped
+        now = now_epoch()
+        min_interval = float(self.config.get("bluez_warmup_min_interval_sec", 60))
+        if last_warmup and now - last_warmup < min_interval:
+            skipped["state"] = "rate limited"
+            return last_warmup, skipped
+        warmup = self.bluez_discovery_warmup()
+        if warmup.get("ok"):
+            return now, warmup
+        return last_warmup, warmup
+
+    def bluez_cached_device_count(self):
+        """Return the number of devices currently visible in BlueZ cache."""
+        output = self.command_output(["bluetoothctl", "devices"])
+        count = 0
+        for line in output.splitlines():
+            if line.strip().startswith("Device "):
+                count += 1
+        return count
+
+    def bluez_discovery_warmup(self):
+        """Run a short bluetoothctl discovery pass as a BlueZ wake-up."""
+        bluetoothctl = shutil.which("bluetoothctl")
+        if not bluetoothctl:
+            return {
+                "attempted": True,
+                "ok": False,
+                "state": "bluetoothctl missing",
+            }
+        duration = max(1, int(float(self.config.get("bluez_warmup_scan_sec", 4))))
+        command = [bluetoothctl, "--timeout", str(duration), "scan", "on"]
+        command_text = " ".join(command)
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=duration + 3,
+            )
+            ok = result.returncode == 0
+            return {
+                "attempted": True,
+                "ok": ok,
+                "state": "started" if ok else "failed",
+                "command": command_text,
+                "returncode": result.returncode,
+            }
+        except Exception as exc:
+            return {
+                "attempted": True,
+                "ok": False,
+                "state": "failed",
+                "command": command_text,
+                "error": str(exc),
+            }
+
     def is_operation_in_progress(self, exc):
         """Detect stale/concurrent BlueZ discovery across bleak versions."""
         text = str(exc).lower()
@@ -765,10 +1242,75 @@ class BLECollector(BaseCollector):
             self.command_succeeds(["hciconfig", adapter, "reset"])
             self.command_succeeds(["hciconfig", adapter, "up"])
 
+    def startup_payload(self):
+        """Build startup diagnostics for comparing hosts and regressions."""
+        return {
+            "adapter": self.active_hardware,
+            "scan_method": self.scan_method_label(),
+            "fallback_active": self.bluetoothctl_fallback_active(),
+            "diagnostics": self.startup_diagnostics(),
+        }
+
+    def retry_payload(self, warning):
+        """Build structured retry data so the UI can show method clearly."""
+        return {
+            "adapter": self.active_hardware or self.selected_adapter(),
+            "reason": warning,
+            "scan_method": self.scan_method_label(),
+            "fallback_active": self.bluetoothctl_fallback_active(),
+            "diagnostics": self.startup_diagnostics(),
+        }
+
+    def bluetoothctl_fallback_active(self):
+        """Return true once the runtime path has switched to bluetoothctl."""
+        return bool(getattr(self, "_runtime_bluetoothctl_scan", False))
+
+    def startup_diagnostics(self):
+        """Return stable version/config details useful for BLE regressions."""
+        fields = [
+            "method={}".format(self.scan_method_label()),
+            "config_file={}".format(self.config.get("config_file", "unknown")),
+            "bleak={}".format(self.python_package_version("bleak")),
+            "bluetoothctl_version={}".format(
+                self.command_output(["bluetoothctl", "--version"])[:80]
+            ),
+            "bluetoothd_version={}".format(
+                self.command_output(["bluetoothd", "-v"])[:80]
+            ),
+            "callback_scan={}".format(bool(self.config.get("callback_scan", True))),
+            "force_discover_scan={}".format(
+                bool(self.config.get("force_discover_scan", False))
+            ),
+            "force_bluetoothctl_scan={}".format(
+                bool(self.config.get("force_bluetoothctl_scan", False))
+            ),
+            "bluetoothctl_fallback_after_timeout={}".format(
+                bool(self.config.get("bluetoothctl_fallback_after_timeout", True))
+            ),
+        ]
+        return "; ".join(fields)
+
+    def python_package_version(self, package):
+        """Return an installed Python package version without hard dependency."""
+        try:
+            from importlib import metadata as importlib_metadata
+        except ImportError:
+            try:
+                import importlib_metadata
+            except ImportError:
+                return "unknown"
+        try:
+            return importlib_metadata.version(package)
+        except Exception:
+            return "unknown"
+
     def scan_retry_warning(self, exc, in_progress_count):
         """Build a retry warning with a clearer wedged-controller hint."""
-        detail = "BLE scan failed; retrying: {}; {}".format(
-            exc, self.adapter_diagnostics()
+        detail = "BLE scan failed; retrying: {}; method={}; {}; {}".format(
+            exc,
+            self.scan_method_label(),
+            self.startup_diagnostics(),
+            self.adapter_diagnostics(),
         )
         threshold = int(self.config.get("wedged_warning_after_in_progress", 6))
         if (

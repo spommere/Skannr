@@ -1,7 +1,7 @@
 # Skannr
 
-Skannr is a local monitoring dashboard for Wi-Fi, Bluetooth, RTL-SDR signals,
-optional RTL-433/ADS-B/APRS-IS/NOAA/USGS/SWPC/PWS situational context, and passive LAN
+Skannr is a local monitoring dashboard for Wi-Fi, Bluetooth, optional
+RTL-433/ADS-B/APRS-IS/NOAA/USGS/SWPC/PWS situational context, and passive LAN
 observations. It runs on Linux hosts such as Raspberry Pi OS or Kali, records
 local JSONL event logs, and provides live views plus deterministic Insights,
 Subject History, Alerts, and Reports through a browser UI.
@@ -16,6 +16,7 @@ For architecture, event flow, collector internals, and extension notes, see
 
 - `README.md`: operator manual and day-to-day setup/use instructions
 - `DESIGN.md`: architecture, data flow, collector model, and extension details
+- `REFERENCE.md`: configuration parameter appendix for `config.example/` and local `config/` files
 - `docs/ui-sample-data.md`: sanitized fake UI sample rows based on observed
   collector event shapes
 - `LICENSE`: project license
@@ -56,9 +57,9 @@ and local collector enablement:
 5. Start Skannr and use System Status for the authoritative runtime view of
    collector state, missing required tools, and missing optional tools.
 
-Hardware-bound SDR collectors (`rtlsdr`, `rtl433`, and managed ADS-B) are
-auto-enabled on fresh config only when required software and visible RTL-SDR
-hardware are both present. Optional LAN enrichment tools such as `arp-scan` and
+Hardware-bound SDR collectors (`rtl433` and managed ADS-B) are auto-enabled
+on fresh config only when required software and visible RTL-SDR hardware are
+both present. Optional LAN enrichment tools such as `arp-scan` and
 `avahi-browse` are reported but do not disable the base LAN collector.
 
 ## Quick Start
@@ -84,8 +85,8 @@ The precheck step is recommended for a new host; it is safe to skip because
 
 ## Install System Packages
 
-Python requirements do not install OS tools such as `rtl_power`, `iw`,
-`airmon-ng`, Bluetooth utilities, or BlueZ.
+Python requirements do not install OS tools such as `iw`, `airmon-ng`,
+Bluetooth utilities, BlueZ, `rtl_433`, or ADS-B decoder packages.
 
 On Debian, Kali, or Raspberry Pi OS:
 
@@ -134,9 +135,12 @@ The precheck writes `config/precheck.yaml`. When `install.sh` creates a fresh
 `config/` from `config.example/`, it applies those precheck results to
 `config/collectors/*.yaml`: collectors with required local tools present are
 enabled, missing local-tool collectors are disabled, and internet/API collectors
-that need local configuration stay disabled until configured manually. For
-SDR-backed collectors, `rtlsdr`, `rtl433`, and managed ADS-B are enabled only
-when required software is present and an RTL-SDR dongle is visible through
+that need local configuration stay disabled until configured manually. For Wi-Fi,
+fresh config also seeds `wifi.interfaces` with the first non-monitor wireless
+interface and `wifi_monitor.interfaces` with the first already-monitor-mode
+interface when those probes are available. For SDR-backed collectors, `rtl433`
+and managed ADS-B are enabled only when required software is present and an
+RTL-SDR dongle is visible through
 `rtl_test -t`. The four fresh-install cases are therefore explicit: software and
 hardware present enables the collector; software-only, hardware-only, or neither
 keeps it disabled. Optional LAN enrichment tools such as `arp-scan` and
@@ -398,15 +402,13 @@ Pi unless you are intentionally changing the shipped template.
     aircraft distance scoring.
   - `config/collectors/rtl433.yaml`: enable only when this host should run
     `rtl_433` against an attached RTL-SDR dongle. Set `device_index` and
-    `frequency_plan` for the local dongle and bands you want to decode. ADS-B,
-    RTL-433, and RTL-SDR power scanning can run together only when they use
-    different dongle indexes.
+    `frequency_plan` for the local dongle and bands you want to decode. ADS-B
+    and RTL-433 can run together only when they use different dongle indexes.
   - `config/collectors/lan.yaml`: enable if passive LAN neighbor/default-gateway
     and mDNS/SSDP service context is wanted. Active ARP scan is optional and
     disabled by default.
-  - `config/collectors/wifi*.yaml`, `ble.yaml`, `bt_classic.yaml`, and
-    `rtlsdr.yaml`: review adapter/interface/device settings for the hardware
-    attached to this host.
+  - `config/collectors/wifi*.yaml`, `ble.yaml`, and `bt_classic.yaml`: review
+    adapter/interface settings for the hardware attached to this host.
 
 Restart Skannr after changing any YAML:
 
@@ -658,7 +660,7 @@ System/status-only sources should be explicit in code.
 Acquisition modes define shared behavior:
 
 - `scan`: Skannr asks the local host for current observations. This includes
-  Wi-Fi Scan, BLE Scan, Bluetooth Classic, RTL-SDR, PWS, and LAN.
+  Wi-Fi Scan, BLE Scan, Bluetooth Classic, PWS, and LAN.
 - `poll`: Skannr periodically polls an endpoint or feed that returns current
   or recent events. This includes Rayhunter, NOAA, USGS, and SWPC.
 - `listen`: Skannr opens a stream, sniffer, or local decoder feed and waits for
@@ -698,9 +700,13 @@ Collector-specific keys:
   `typical_channels_5`, `include_seen_channels`, `dwell_sec`,
   `retry_interval_sec`, `retry_timeout_sec`.
 - `ble.yaml`: `validation_timeout_sec`, `adapters`, `scan_interval_sec`,
-  `device_timeout_sec`, `active_scan`, `callback_scan`,
-  `bluez_duplicate_data`, `name_lookup_interval_sec`,
-  `classic_name_lookup`, `classic_name_timeout_sec`, `retry_interval_sec`,
+  `discover_timeout_sec`, `device_timeout_sec`, `active_scan`, `callback_scan`,
+  `force_discover_scan`, `bluetoothctl_fallback_after_timeout`,
+  `force_bluetoothctl_scan`, `bluez_duplicate_data`,
+  `reset_after_discovery_timeout`, `bluez_warmup_after_empty_scans`,
+  `bluez_warmup_scan_sec`, `bluez_warmup_min_interval_sec`,
+  `name_lookup_interval_sec`, `classic_name_lookup`,
+  `classic_name_timeout_sec`, `retry_interval_sec`,
   `retry_timeout_sec`, `reset_after_in_progress`,
   `wedged_warning_after_in_progress`.
 - `ble_identify.yaml`: `adapters`, `identify_timeout_sec`,
@@ -708,9 +714,6 @@ Collector-specific keys:
   `retry_timeout_sec`.
 - `bt_classic.yaml`: `adapters`, `scan_interval_sec`, `scan_timeout_sec`,
   `device_timeout_sec`, `retry_interval_sec`.
-- `rtlsdr.yaml`: `validation`, `validation_timeout_sec`, `device_index`,
-  `scan_start_mhz`, `scan_end_mhz`, `step_khz`, `gain`, `threshold_db`,
-  `baseline_period_sec`, `retry_interval_sec`, `retry_timeout_sec`.
 - `adsb.yaml`: `poll_interval_sec`, `request_timeout_sec`, `manage_decoder`,
   `device_index`, `decoder_command`, `decoder_args`, optional `url`,
   `aircraft_json_path`, `aircraft_json_paths`, `latitude`, `longitude`,
@@ -886,6 +889,10 @@ The derived views have different jobs:
 - Subject History: collector-neutral subject rollup for reports, analysis, and
   the History tab. It includes Wi-Fi/Bluetooth plus APRS-IS, Rayhunter,
   RTL-SDR, RTL-433, ADS-B, NOAA, USGS, SWPC, PWS, and LAN subjects.
+- Compact privacy groups: BLE, Wi-Fi randomized-client, and LAN private-MAC
+  groups stay as one main-table row, while detail panes expose bounded
+  per-member evidence such as MAC, first/last seen, counts, signal, and
+  identity/source context.
 - Wi-Fi/Bluetooth compatibility view: internal view derived from Subject History
   for older browser drilldown and live-table code.
 
@@ -1040,9 +1047,10 @@ Collector checks happen in three layers:
 - Install-time precheck: `scripts/skannr_precheck.py` runs before the virtual
   environment is needed. It uses only the Python standard library, reports
   required/recommended/optional local tools and selected hardware probes, writes
-  `config/precheck.yaml`, and can apply enabled flags to a freshly copied
-  `config/collectors/` tree. SDR-backed collectors are not auto-enabled unless
-  required software and RTL-SDR hardware are both present.
+  `config/precheck.yaml`, and can apply enabled flags plus Wi-Fi interface
+  suggestions to a freshly copied `config/collectors/` tree. SDR-backed
+  collectors are not auto-enabled unless required software and RTL-SDR hardware
+  are both present.
 - Post-install check: `install.sh` runs `scripts/skannr_postcheck.py` from the
   installed virtual environment. It reuses the same inventory, checks Python
   modules such as `bleak` and `scapy`, writes `config/postcheck.yaml`, and is
@@ -1055,7 +1063,9 @@ Collector checks happen in three layers:
 
 Collector YAML files own their own hardware and software settings. For adapters
 and interfaces, use ordered candidate lists. When the list is empty, Skannr uses
-the devices Linux currently exposes:
+the devices Linux currently exposes. On fresh installs, precheck/postcheck may
+seed Wi-Fi lists so managed scan uses a non-monitor interface such as `wlan0`
+and Wi-Fi Monitor uses an already-monitor-mode interface such as `wlan1`:
 
 ```yaml
 interfaces: []
@@ -1063,18 +1073,13 @@ adapters: []
 validation_timeout_sec: 10
 ```
 
-Some collectors also have a command-based validation. The command is formatted
-with collector YAML keys, run with a timeout, and considered available only
-when it exits with status 0:
-
-```yaml
-validation: command -v rtl_power >/dev/null 2>&1 && command -v rtl_test >/dev/null 2>&1 && rtl_test -t
-```
+Some collectors also have command-based runtime validation. The command is
+formatted with collector YAML keys, run with a timeout, and considered
+available only when it exits with status 0.
 
 Optional collector tools are installed outside the Python virtual environment:
 
 - Wi-Fi Monitor: `iw`, plus an adapter that can be put into monitor mode.
-- RTL-SDR power scan: `rtl_power` and `rtl_test`.
 - RTL-433 decoded ISM feed: `rtl_433`.
 - ADS-B: `dump1090`, `dump1090-fa`, `dump1090-mutability`, or `readsb`.
   By default the ADS-B collector starts the configured decoder and reads its
@@ -1104,6 +1109,8 @@ It:
 - lists visible access points
 - records SSID, BSSID, vendor, channel/frequency, encryption, RSSI, and time
 - can run on a normal managed Wi-Fi interface
+- ignores interfaces already in monitor mode when no explicit `interfaces` list
+  is configured
 
 The live table has one Search box that matches across SSID, BSSID, vendor,
 channel/frequency, encryption, signal, and last-seen time.
@@ -1132,7 +1139,9 @@ It:
 By default, prepare a separate adapter first, then click Start in System Status
 or the Wi-Fi Monitor tab. On Raspberry Pi systems with a dedicated ALFA or
 similar USB adapter, keep that adapter out of NetworkManager and switch it to
-monitor mode before starting the collector.
+monitor mode before starting the collector. On fresh installs, precheck/postcheck
+seeds `interfaces` with the first interface already reported as monitor mode,
+so a dedicated `wlan1` monitor adapter is not accidentally used by Wi-Fi Scan.
 
 Skannr can also prepare a specifically configured interface before capture. Use
 this only for a dedicated monitor adapter, not for the normal network interface.
@@ -1328,7 +1337,15 @@ config/collectors/ble.yaml
 Use `adapters: []` to let Skannr rank the BlueZ adapters Linux exposes. External
 USB adapters are normally chosen before built-in radios. List specific adapters
 in order when you want to force a local choice. BLE visibility depends on adapter
-behavior, BlueZ state, and whether nearby devices are advertising.
+behavior, BlueZ state, and whether nearby devices are advertising. Each Bleak
+scan window has a hard `discover_timeout_sec` guard so a hung BlueZ discovery
+call becomes a visible retry diagnostic instead of leaving the feed idle. On
+hosts where the callback scanner hangs, Skannr can fall back to the
+`bluetoothctl` scan path after a Bleak timeout; set `force_bluetoothctl_scan:
+true` to start there immediately. If Bleak returns repeated empty scan windows,
+Skannr can run a short, rate-limited
+`bluetoothctl --timeout N scan on` warmup to wake BlueZ discovery; set
+`bluez_warmup_after_empty_scans: 0` to disable that workaround.
 
 ### Bluetooth Classic
 
@@ -1369,60 +1386,6 @@ It attempts to read selected Device Information Service fields:
 Many devices reject active connections, require pairing, omit individual fields,
 or stop advertising before the read finishes. Serial Number can be uniquely
 identifying, so treat exported Identify data accordingly.
-
-## RTL-SDR
-
-`RTL-SDR` uses `rtl_power` for passive spectrum scanning. It is a local scan
-collector: Skannr asks the attached dongle for power measurements across the
-configured frequency range, learns a short baseline, then flags frequency bins
-that rise above that baseline.
-
-Default config:
-
-```text
-config/collectors/rtlsdr.yaml
-```
-
-Default validation requires:
-
-```yaml
-validation: command -v rtl_power >/dev/null 2>&1 && command -v rtl_test >/dev/null 2>&1 && rtl_test -t
-```
-
-If `rtl_test -t` reports no supported device, the collector stays offline.
-
-Common settings:
-
-```yaml
-scan_start_mhz: 400
-scan_end_mhz: 470
-step_khz: 50
-gain: 40
-threshold_db: 10
-baseline_period_sec: 30
-```
-
-What it records:
-
-- scan range, gain, threshold, and baseline state
-- frequency bin in MHz
-- observed power in dBm
-- dB above the learned noise floor
-- signal detected/lost transitions
-
-The RTL-SDR live tab shows active frequency-bin detections and recent
-scanner/baseline events. Subject History rolls detections up by frequency bin so
-you can see first seen, last seen, detection count, lost count, maximum power,
-and maximum above-floor delta. Current RTL-SDR support is power-only; it does
-not decode APRS, ADS-B, GPS, LoRa, weather sensors, or other protocols. Those
-need protocol-specific decoders such as `direwolf`, `dump1090` / `readsb`,
-`gnss-sdr`, `rtl_433`, or GNU Radio based tooling and are tracked separately in
-the version plan.
-
-The baseline window intentionally suppresses signal detections until
-`baseline_period_sec` has elapsed. If `rtl_test -t` reports no supported device,
-or `rtl_power` cannot be started, System Status shows the collector offline and
-records the validation/start failure.
 
 ## RTL-433
 
@@ -1494,11 +1457,17 @@ Decoded payloads do not always include their own frequency or signal fields, so
 Skannr fills the live row frequency from the current hop when needed and parses
 numeric RSSI/SNR/noise values from rtl_433 strings when present. Subject History
 keys a decoded source by model, ID, channel, and protocol when available, with a
-hash fallback for sparse payloads. Reports add a population row plus per-subject
-rows for TPMS/security-like devices and repeated decoded subjects. The language
-is conservative: Skannr can report TPMS/security/remote/contact activity
-clusters, but it does not claim that a garage opened or closed unless a decoder
-payload explicitly contains that state.
+hash fallback for sparse payloads. Subject History also retains compact pattern
+evidence such as hour and weekday histograms, day/night buckets, per-frequency
+counts, recent observation samples, and repeat-gap timing. For TPMS-like
+decodes, Skannr also retains normalized pressure, temperature, battery/status,
+position, compact TPMS samples, and per-sensor ranges when `rtl_433` exposes
+those fields. Reports add a population row, per-subject rows for
+TPMS/security-like devices and repeated decoded subjects, and conservative
+short-window TPMS cluster rows that may indicate vehicle/pass-through activity.
+The language is conservative: Skannr can report TPMS/security/remote/contact
+activity clusters, but it does not claim that a garage opened or closed unless a
+decoder payload explicitly contains that state.
 
 Alerts for RTL-433 are configurable but disabled by default:
 
@@ -1514,10 +1483,10 @@ alerts:
     protocols: []
 ```
 
-One RTL-SDR dongle normally cannot run RTL-433, ADS-B decoding, and RTL-SDR
-power scanning at the same time. Skannr coordinates the configured
-`device_index` values: starting an RTL-backed collector stops only other
-Skannr-managed RTL-backed collectors that are running on the same index. If
+One RTL-SDR dongle normally cannot run RTL-433 and ADS-B decoding at the
+same time. Skannr coordinates the configured `device_index` values: starting
+an RTL-backed collector stops only other Skannr-managed RTL-backed collectors
+that are running on the same index. If
 ADS-B uses `device_index: 0` and RTL-433 uses `device_index: 1`, both can run
 together. If both are left at `0`, Skannr keeps the existing single-dongle
 handoff behavior. Linux device indexes can change across hardware changes or
@@ -1526,7 +1495,7 @@ boot order, so verify the host's RTL-SDR order before assigning collectors.
 ## ADS-B
 
 `ADS-B` is a decoder-backed listen collector. Skannr does not demodulate
-1090 MHz ADS-B directly; it starts `dump1090-mutability` by default, points it
+1090 MHz ADS-B directly; it starts the first available `dump1090`/`readsb` decoder by default, points it
 at a runtime JSON output directory, reads the decoder's `aircraft.json`,
 suppresses unchanged aircraft snapshots, and turns changed aircraft state into
 live rows, Subject History, Insights, Reports, and optional alerts.
@@ -1544,7 +1513,7 @@ enabled: true
 poll_interval_sec: 1
 manage_decoder: true
 device_index: 0
-decoder_command: dump1090-mutability
+decoder_command: ""
 decoder_args:
 - --net
 - --device-index
@@ -1556,7 +1525,7 @@ aircraft_json_paths:
 - /run/dump1090-fa/aircraft.json
 - /run/dump1090-mutability/aircraft.json
 - /run/readsb/aircraft.json
-latitude: 19.6875
+- latitude: 19.6875
 longitude: -155.9583
 nearby_radius_km: 10
 low_altitude_ft: 1500
@@ -1572,10 +1541,11 @@ url: http://127.0.0.1:8080/data/aircraft.json
 When `manage_decoder: true` and `decoder_output_dir` is blank, Skannr writes
 dump1090/readsb JSON files under `runtime/logs/adsb_decoder/`. Skannr's own raw
 event audit remains separate under `runtime/logs/adsb/YYYY-MM-DD.jsonl`. The
-default decoder arguments pass `--device-index {device_index}`. If the local
-decoder variant uses different RTL-SDR selection flags, override
-`decoder_args` in local config and keep `device_index` set so Skannr still knows
-which dongle the managed decoder owns.
+default decoder arguments are selected from the executable: `dump1090*` uses
+`--device-index {device_index}`, while `readsb` uses
+`--device-type rtlsdr --device {device_index}`. If the local decoder
+variant uses different RTL-SDR selection flags, override `decoder_args` in local config and keep
+`device_index` set so Skannr still knows which dongle the managed decoder owns.
 
 What it records:
 
@@ -1588,9 +1558,13 @@ What it records:
 
 Subject History keys aircraft by ICAO hex and keeps first/last seen, update
 count, position count, altitude range, closest distance, maximum speed, path
-span, squawks, callsigns, and latest position/motion. Reports add an ADS-B
-population row plus per-aircraft rows for emergency aircraft, low nearby
-aircraft, or aircraft seen at least `reports.adsb_report_min_seen` times.
+span, squawks, callsigns, latest position/motion, compact local pass spans,
+bounded route samples, and nearby approach/departure context. ADS-B collector
+health keeps decoder state and one-dongle RTL-SDR scheduling guidance. Reports
+add an ADS-B population row, decoder-health guidance when the collector is not
+online, plus per-aircraft rows for emergency aircraft, low nearby aircraft,
+approach/departure-like tracks, repeated local passes, or aircraft seen at
+least `reports.adsb_report_min_seen` times.
 
 Alerts use `alerts.adsb_aircraft`:
 
@@ -1605,10 +1579,9 @@ alerts:
 ```
 
 Emergency squawk/state opens a critical alert. Aircraft at or below
-`low_altitude_ft` and within `nearby_radius_km` open a warning alert. ADS-B can
-run beside RTL-433 or RTL-SDR power scanning when each collector is configured
-for a different `device_index`; otherwise Skannr stops the same-index collector
-before starting the new one.
+`low_altitude_ft` and within `nearby_radius_km` open a warning alert. ADS-B can run beside RTL-433 when each collector is configured for a different
+`device_index`; otherwise Skannr stops the same-index collector before starting
+the new one.
 
 ## Rayhunter
 
@@ -1701,6 +1674,11 @@ packet metadata. The APRS-IS top tab shows live feed events, while Subject
 History and Reports group APRS activity by callsign, object, or weather
 station.
 
+For APRS mobile stations, Subject History retains bounded trip evidence such as
+first/latest positions, route samples, packet samples, movement/span/speed, and
+a pass-through or repeated-presence rollup label. The APRS detail pane exposes
+those samples for ordinary drilldown without expanding the main tables.
+
 For APRS weather stations, Subject History also builds daily aggregates and
 rolls them into weekly, monthly, and yearly Report rows. Those rows summarize
 temperature range/change, average humidity, rain-rate maxima, rain episode
@@ -1748,7 +1726,10 @@ tsunami:
 
 NOAA data feeds the NOAA live tab, Subject History, Reports, and Alerts. NWS
 forecast summaries are context rows and Insights/Reports input; they do not
-open Alerts by themselves. Alerts default to warning/critical for high-severity
+open Alerts by themselves. Retained point forecasts compare the latest summary
+with the previous retained forecast for the same point, exposing temperature,
+precipitation, wind, hazard-text, and deterioration/improvement deltas in
+Reports and detail panes. Alerts default to warning/critical for high-severity
 weather, tsunami warning/watch/advisory/threat products, tornado, hurricane,
 and flash-flood conditions. Tsunami Information Statements remain visible in the
 NOAA feed, Subject History, and Reports, but do not open Alerts by themselves.
@@ -1764,8 +1745,9 @@ numbers, forecast points, and tsunami incidents separate.
 
 Reports also include monthly and yearly NOAA hazard-context rollups. These
 period rows count distinct NOAA subjects, tropical systems, NWS hazard subjects,
-tsunami incidents/messages, forecast-context rows, sources, basins, and retained
-period-over-period subject-count changes. They intentionally avoid treating NHC
+tsunami incidents/messages, forecast-context rows, forecast-change evidence,
+sources, basins, and retained period-over-period subject-count changes. They
+intentionally avoid treating NHC
 package product count or maximum severity as the main longitudinal signal.
 
 ## USGS

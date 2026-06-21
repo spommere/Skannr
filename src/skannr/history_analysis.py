@@ -8,6 +8,7 @@ LLM or a database.
 from datetime import datetime
 
 from .bus import local_now
+from .identity_policy import bluetooth_property_like_name
 from .log_utils import now_epoch, record_time_epoch, save_json_atomic, timestamp_epoch
 
 
@@ -769,6 +770,8 @@ class HistoryAnalyzer:
             if not text:
                 continue
             if text.lower().replace("-", ":") == mac:
+                continue
+            if bluetooth_property_like_name(text):
                 continue
             useful.append(text)
         return sorted(set(useful))

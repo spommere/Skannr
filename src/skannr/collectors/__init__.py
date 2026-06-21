@@ -11,7 +11,6 @@ from .lan_identify import LANIdentifyCollector
 from .noaa import NOAACollector
 from .pws import PWSCollector
 from .rtl433 import RTL433Collector
-from .rtlsdr import RTLSDRCollector
 from .rayhunter import RayhunterCollector
 from .swpc import SWPCCollector
 from .usgs import USGSCollector
@@ -31,7 +30,6 @@ COLLECTOR_CLASS_BY_KEY = {
     "wifi_monitor": WiFiMonitorCollector,
     "ble": BLECollector,
     "bt_classic": BluetoothClassicCollector,
-    "rtlsdr": RTLSDRCollector,
     "rtl433": RTL433Collector,
     "adsb": ADSBCollector,
     "rayhunter": RayhunterCollector,

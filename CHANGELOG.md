@@ -7,6 +7,35 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## Unreleased
+
+- Expanded the configuration reference material: every example YAML under
+  `config.example/collectors/` plus `config.example/skannr.yaml` now has
+  clearer inline parameter comments, `REFERENCE.md` documents the full
+  parameter appendix and option interactions, and `README.md` points operators
+  to the new reference.
+
+## 0.2.8 - 2026-06-15
+
+- Fixed managed `readsb` startup on RTL-SDR devices and kept shared dongle
+  handoff working between managed ADS-B and RTL-433 so one collector can yield
+  cleanly to the other.
+- Hardened derived Subject History refreshes and report rendering when compact
+  evidence mixes scalar and list fields or mixed epoch representations.
+- Restored the live FindingsEngine helper behavior needed for presence
+  expiration, Wi-Fi monitor emission policy, collector warnings, and direct
+  collector event fan-out after restart.
+- Rebalanced Insights for a 1920px viewport and tightened the browser layout
+  budget for Reports, LAN live tables, LAN Identify, and System Status.
+- Removed the standalone RTL-SDR power-scan collector and kept shared RTL-SDR
+  probing for ADS-B and RTL-433 only.
+- Fixed LAN annotation save, clear, and refresh behavior so custom labels stay
+  visible in the LAN table, Subject History, and Reports.
+- Tightened shared managed-decoder recovery so transient RTL-SDR loss does not
+  strand the decoder background tasks.
+- Added regression coverage for the new decoder fallback, compact-history,
+  layout, annotation, and mixed-epoch edge cases.
+
 ## 0.2.7 - 2026-06-13
 
 - Reworked derived-data refresh and retained state so Subject History,

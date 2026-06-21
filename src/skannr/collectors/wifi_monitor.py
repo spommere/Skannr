@@ -247,25 +247,25 @@ class WiFiMonitorCollector(WiFiCollector):
                 asyncio.run_coroutine_threadsafe(
                     self.emit("probe_request", payload), loop
                 )
-            elif dot11.subtype == 8:
-                # Beacon: monitor mode sees the same AP identity as Wi-Fi Scan,
-                # but on whichever channel the hopper is currently sampling.
-                payload = {
-                    "bssid": dot11.addr2,
-                    "vendor_oui": self.vendor_for(dot11.addr2),
-                    "vendor_prefix": self.vendor_prefix_for(dot11.addr2),
-                    "vendor_name": self.vendor_name_for(dot11.addr2),
-                    "ssid": self.get_ssid(packet, Dot11Elt),
-                    "channel": channel,
-                    "encryption": self.get_encryption(packet),
-                    "rssi": rssi,
-                    "timestamp": timestamp,
-                    "timestamp_epoch": timestamp_epoch,
-                    "monitor_interface": iface,
-                }
-                asyncio.run_coroutine_threadsafe(
-                    self.emit("ap_beacon", payload), loop
-                )
+            #elif dot11.subtype == 8:
+            #    # Beacon: monitor mode sees the same AP identity as Wi-Fi Scan,
+            #    # but on whichever channel the hopper is currently sampling.
+            #    payload = {
+            #        "bssid": dot11.addr2,
+            #        "vendor_oui": self.vendor_for(dot11.addr2),
+            #        "vendor_prefix": self.vendor_prefix_for(dot11.addr2),
+            #        "vendor_name": self.vendor_name_for(dot11.addr2),
+            #        "ssid": self.get_ssid(packet, Dot11Elt),
+            #        "channel": channel,
+            #        "encryption": self.get_encryption(packet),
+            #        "rssi": rssi,
+            #        "timestamp": timestamp,
+            #        "timestamp_epoch": timestamp_epoch,
+            #        "monitor_interface": iface,
+            #    }
+            #    asyncio.run_coroutine_threadsafe(
+            #        self.emit("ap_beacon", payload), loop
+            #    )
             elif dot11.subtype in (0, 2):
                 # Association/reassociation requests show client/AP activity but
                 # usually do not include a stable SSID.
@@ -568,7 +568,8 @@ class WiFiMonitorCollector(WiFiCollector):
                 continue
             if "disabled" in line.lower():
                 continue
-            match = re.search(r"(\d+)\s+MHz\s+\[(\d+)\]", line)
+            #match = re.search(r"(\d+)\s+MHz\s+\[(\d+)\]", line)
+            match = re.search(r"(\d+)(?:\.\d+)?\s+MHz\s+\[(\d+)\]", line)
             if not match:
                 continue
             mhz = int(match.group(1))

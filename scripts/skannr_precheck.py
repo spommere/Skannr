@@ -13,6 +13,7 @@ operator edits local YAML.
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -61,14 +62,6 @@ COLLECTORS = [
         "enable_when_pass": True,
     },
     {
-        "key": "rtlsdr",
-        "label": "RTL-SDR power scan",
-        "required": ["rtl_power", "rtl_test"],
-        "hardware": "rtlsdr",
-        "hint": "sudo apt install rtl-sdr librtlsdr-dev",
-        "enable_when_pass": True,
-    },
-    {
         "key": "rtl433",
         "label": "RTL-433 decoder",
         "required": ["rtl_433"],
@@ -82,7 +75,7 @@ COLLECTORS = [
         "label": "ADS-B decoder",
         "required_any": ["dump1090", "dump1090-fa", "dump1090-mutability", "readsb"],
         "hardware": "rtlsdr",
-        "hint": "sudo apt install dump1090-mutability  # or install readsb/dump1090-fa",
+        "hint": "sudo apt install dump1090-mutability  # or install readsb or dump1090-fa",
         "enable_when_pass": True,
     },
     {
@@ -188,6 +181,62 @@ def hardware_probe(name):
     return False, "unknown hardware probe: {}".format(name)
 
 
+def wireless_interfaces():
+    directory = "/sys/class/net"
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return []
+    interfaces = []
+    for name in names:
+        path = os.path.join(directory, name)
+        if os.path.isdir(os.path.join(path, "wireless")):
+            interfaces.append(name)
+        elif name.startswith(("wlan", "wlp", "wlx")):
+            interfaces.append(name)
+    return sorted(set(interfaces), key=interface_sort_key)
+
+
+def interface_sort_key(name):
+    match = re.match(r"^([a-zA-Z]+)([0-9]+)$", str(name or ""))
+    if match:
+        return (match.group(1), int(match.group(2)), name)
+    return (str(name or ""), -1, str(name or ""))
+
+
+def monitor_mode_interfaces():
+    try:
+        output = subprocess.check_output(
+            ["iw", "dev"],
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            timeout=5,
+        )
+    except Exception:
+        return []
+
+    interfaces = []
+    current = None
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line.startswith("Interface "):
+            current = line.split(None, 1)[1].strip()
+        elif line == "type monitor" and current:
+            interfaces.append(current)
+    return sorted(set(interfaces), key=interface_sort_key)
+
+
+def wifi_interface_suggestions(key):
+    wireless = wireless_interfaces()
+    monitors = monitor_mode_interfaces()
+    if key == "wifi":
+        managed = [name for name in wireless if name not in monitors]
+        return managed[:1]
+    if key == "wifi_monitor":
+        return monitors[:1]
+    return []
+
+
 def probe_entry(entry, by_key, check_python=False):
     if entry.get("same_as"):
         base = by_key[entry["same_as"]]
@@ -238,11 +287,14 @@ def probe_entry(entry, by_key, check_python=False):
         status = "pass"
         enabled = bool(entry.get("enable_when_pass"))
 
+    suggested_interfaces = wifi_interface_suggestions(entry["key"])
+
     return {
         "key": entry["key"],
         "label": entry["label"],
         "status": status,
         "enabled": enabled,
+        "suggested_interfaces": suggested_interfaces,
         "found": sorted(set(found)),
         "missing": missing,
         "recommended_missing": recommended,
@@ -288,6 +340,7 @@ def write_precheck(path, results):
             "    label: {}".format(yaml_scalar(result["label"])),
             "    status: {}".format(result["status"]),
             "    enabled: {}".format("true" if result["enabled"] else "false"),
+            "    suggested_interfaces: {}".format(yaml_list(result.get("suggested_interfaces", []))),
             "    found: {}".format(yaml_list(result.get("found", []))),
             "    missing: {}".format(yaml_list(result.get("missing", []))),
             "    recommended_missing: {}".format(yaml_list(result.get("recommended_missing", []))),
@@ -302,18 +355,60 @@ def write_precheck(path, results):
     path.write_text("\n".join(lines) + "\n")
 
 
-def parse_precheck_enabled(path):
-    enabled = {}
+def parse_yaml_list(value):
+    text = value.strip()
+    if not text.startswith("[") or not text.endswith("]"):
+        return []
+    body = text[1:-1].strip()
+    if not body:
+        return []
+    values = []
+    current = []
+    in_quote = False
+    escape = False
+    for char in body:
+        if escape:
+            current.append(char)
+            escape = False
+        elif char == "\\":
+            escape = True
+        elif char == '"':
+            in_quote = not in_quote
+        elif char == "," and not in_quote:
+            values.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    values.append("".join(current).strip())
+    return [item for item in values if item]
+
+
+def parse_precheck(path):
+    parsed = {}
     current = None
     for raw in path.read_text().splitlines():
         line = raw.rstrip()
         if line.startswith("  ") and line.endswith(":") and not line.startswith("    "):
             current = line.strip()[:-1]
+            parsed.setdefault(current, {})
             continue
-        if current and line.strip().startswith("enabled:"):
-            value = line.split(":", 1)[1].strip().lower()
-            enabled[current] = value in {"true", "yes", "1"}
-    return enabled
+        if not current or not line.startswith("    ") or ":" not in line:
+            continue
+        key, value = line.strip().split(":", 1)
+        value = value.strip()
+        if key == "enabled":
+            parsed[current][key] = value.lower() in {"true", "yes", "1"}
+        elif key == "suggested_interfaces":
+            parsed[current][key] = parse_yaml_list(value)
+    return parsed
+
+
+def parse_precheck_enabled(path):
+    return {
+        key: value.get("enabled", False)
+        for key, value in parse_precheck(path).items()
+        if "enabled" in value
+    }
 
 
 def set_enabled_in_file(path, enabled):
@@ -332,17 +427,45 @@ def set_enabled_in_file(path, enabled):
     path.write_text("\n".join(output) + "\n")
 
 
+def set_list_in_file(path, key, values):
+    text = path.read_text()
+    lines = text.splitlines()
+    changed = False
+    output = []
+    replacement = "{}: {}".format(key, yaml_list(values))
+    for line in lines:
+        if not changed and line.startswith("{}:".format(key)):
+            output.append(replacement)
+            changed = True
+        else:
+            output.append(line)
+    if not changed:
+        output.append(replacement)
+    path.write_text("\n".join(output) + "\n")
+
+
+def apply_interface_suggestions(path, key, result):
+    if key not in {"wifi", "wifi_monitor"}:
+        return False
+    if "suggested_interfaces" not in result:
+        return False
+    set_list_in_file(path, "interfaces", result.get("suggested_interfaces") or [])
+    return True
+
+
 def apply_precheck(precheck_path, collector_dir):
-    enabled = parse_precheck_enabled(precheck_path)
+    parsed = parse_precheck(precheck_path)
     applied = []
     missing = []
-    for key, value in sorted(enabled.items()):
+    for key, result in sorted(parsed.items()):
         path = collector_dir / "{}.yaml".format(key)
         if not path.exists():
             missing.append(key)
             continue
-        set_enabled_in_file(path, value)
-        applied.append((key, value))
+        if "enabled" in result:
+            set_enabled_in_file(path, result["enabled"])
+        interfaces_applied = apply_interface_suggestions(path, key, result)
+        applied.append((key, result.get("enabled"), interfaces_applied))
     return applied, missing
 
 
@@ -366,6 +489,10 @@ def print_report(results, title="Skannr collector precheck:"):
             bits.append("hardware {}: {}".format(
                 result["hardware"],
                 "found" if result.get("hardware_found") else "not found",
+            ))
+        if result.get("suggested_interfaces"):
+            bits.append("suggested interfaces: {}".format(
+                ", ".join(result.get("suggested_interfaces") or [])
             ))
         if not bits:
             bits.append("no external software probe")
@@ -405,8 +532,10 @@ def main():
             print("precheck file not found: {}".format(precheck_path), file=sys.stderr)
             return 1
         applied, missing = apply_precheck(precheck_path, Path(args.collector_dir))
-        for key, enabled in applied:
-            print("applied precheck: {} enabled={}".format(key, "true" if enabled else "false"))
+        for key, enabled, interfaces_applied in applied:
+            enabled_text = "unchanged" if enabled is None else "true" if enabled else "false"
+            suffix = "; interfaces updated" if interfaces_applied else ""
+            print("applied precheck: {} enabled={}{}".format(key, enabled_text, suffix))
         for key in missing:
             print("precheck entry has no collector config: {}".format(key), file=sys.stderr)
         return 0

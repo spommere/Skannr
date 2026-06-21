@@ -1,11 +1,4 @@
 const TABLE_SCHEMAS = {
-  rtlsdrSignals: [
-    (item) => item.frequency_mhz,
-    (item) => item.power_dbm,
-    (item) => item.above_floor_db,
-    (item) => item.first_seen || "",
-    (item) => item.last_seen || ""
-  ],
   btClassicDevices: [
     (item) => detailLink(item.mac || "", "bluetooth-device", item.mac || ""),
     (item) => bluetoothDisplayName(item.name, item.mac),
@@ -159,6 +152,14 @@ function renderSchemaTable(id, items, schemaName, options) {
   renderTable(id, items, (item) => schemaCells(schemaName, item), options);
 }
 
+function tableColumnClass(options, index) {
+  if (!options) return "";
+  const keys = Array.isArray(options.columnKeys) ? options.columnKeys : [];
+  const prefix = options.columnClassPrefix || "table-col";
+  if (keys[index]) return `${prefix}-${keys[index]}`;
+  return options.columnClassPrefix ? `${prefix}-${index + 1}` : "";
+}
+
 function renderTable(id, items, cellBuilder, options) {
   const tbody = document.getElementById(id);
   if (!tbody) return;
@@ -170,8 +171,10 @@ function renderTable(id, items, cellBuilder, options) {
     : items.slice(-maxRows).reverse();
   ordered.forEach((item) => {
     const tr = document.createElement("tr");
-    cellBuilder(item).forEach((value) => {
+    cellBuilder(item).forEach((value, index) => {
       const td = document.createElement("td");
+      const columnClass = tableColumnClass(options, index);
+      if (columnClass) td.className = columnClass;
       appendTableCellValue(td, value);
       tr.appendChild(td);
     });
@@ -183,21 +186,32 @@ function renderHistoryTable(id, items, cellBuilder, searchInput) {
   const tbody = document.getElementById(id);
   tbody.innerHTML = "";
   const maxRows = uiNumber("max_history_rows");
-  const rows = [];
-  for (const item of items) {
-    const cells = cellBuilder(item);
-    if (!rowMatchesSearch(cells, searchInput)) continue;
-    rows.push(cells);
-    if (rows.length >= maxRows) break;
-  }
-  rows.forEach((cells) => {
-    const tr = document.createElement("tr");
-    cells.forEach((value) => {
-      const td = document.createElement("td");
-      appendTableCellValue(td, value);
-      tr.appendChild(td);
+  let rendered = 0;
+  const groups = typeof groupedByRecency === "function"
+    ? groupedByRecency(items || [])
+    : [{label: "", items: items || []}];
+  groups.forEach((group) => {
+    const rows = [];
+    for (const item of group.items || []) {
+      if (rendered + rows.length >= maxRows) break;
+      const cells = cellBuilder(item);
+      if (!rowMatchesSearch(cells, searchInput)) continue;
+      rows.push(cells);
+    }
+    if (!rows.length) return;
+    if (typeof appendTableGroupRow === "function" && group.label) {
+      appendTableGroupRow(tbody, group.label, rows.length, "table-group-row recency-group-row");
+    }
+    rows.forEach((cells) => {
+      const tr = document.createElement("tr");
+      cells.forEach((value) => {
+        const td = document.createElement("td");
+        appendTableCellValue(td, value);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+      rendered += 1;
     });
-    tbody.appendChild(tr);
   });
 }
 

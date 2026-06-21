@@ -148,6 +148,19 @@ def clean_noaa_data(data):
         "forecast_count",
         "previous_event_count",
         "event_count_delta",
+        "previous_forecast_generated_epoch",
+        "previous_current_temperature_f",
+        "previous_temperature_min_f",
+        "previous_temperature_max_f",
+        "previous_max_precip_probability",
+        "previous_next_precip_probability",
+        "previous_max_wind_mph",
+        "current_temperature_delta_f",
+        "temperature_min_delta_f",
+        "temperature_max_delta_f",
+        "max_precip_probability_delta",
+        "next_precip_probability_delta",
+        "max_wind_delta_mph",
     }
     bool_keys = {"internet_fed", "precip_likely_soon"}
     list_keys = {
@@ -166,6 +179,7 @@ def clean_noaa_data(data):
         "hazard_severities",
         "tsunami_incidents",
         "sources",
+        "forecast_delta_findings",
     }
     dict_list_keys = {"nhc_products"}
     long_text_keys = {"description", "instruction", "summary"}

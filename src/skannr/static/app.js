@@ -1,7 +1,6 @@
 const socket = createLocalEventSocket();
 const CLIENT_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const rows = {
-  signals: new Map(),
   ble: new Map(),
   btClassic: new Map(),
   bleIdentify: [],
@@ -12,6 +11,8 @@ const rows = {
   pws: [],
   adsb: [],
   rtl433: [],
+  bleDiagnostic: "",
+  bleScanDetail: "",
   rayhunter: [],
   lan: [],
   lanIdentify: [],
@@ -26,7 +27,6 @@ let COLLECTOR_SUBTABS = [
   {value: "wifi", label: "Wi-Fi Scan"},
   {value: "wifi_monitor", label: "Wi-Fi Monitor"},
   {value: "bluetooth", label: "Bluetooth"},
-  {value: "rtlsdr", label: "RTL-SDR"},
   {value: "rtl433", label: "RTL-433"},
   {value: "adsb", label: "ADS-B"},
   {value: "rayhunter", label: "Rayhunter"},
@@ -324,6 +324,10 @@ const wifiSearch = document.getElementById("wifi-search");
 if (wifiSearch) {
   wifiSearch.addEventListener("input", renderWifiTables);
 }
+const wifiMonitorSearch = document.getElementById("wifi-monitor-search");
+if (wifiMonitorSearch) {
+  wifiMonitorSearch.addEventListener("input", renderWifiMonitorTable);
+}
 const bleSearch = document.getElementById("ble-search");
 if (bleSearch) {
   bleSearch.addEventListener("input", renderBleTable);
@@ -559,7 +563,6 @@ function updateBrowserTitle() {
 function handleEvent(event) {
   if (event.collector === "alerts") renderAlertEvent(event);
   if (event.collector === "findings") renderFindingEvent(event);
-  if (event.collector === "rtlsdr") renderRtlsdrEvent(event);
   if (event.collector === "ble") renderBleEvent(event);
   if (event.collector === "ble_identify") renderBleIdentifyEvent(event);
   if (event.collector === "bt_classic") renderBtClassicEvent(event);
@@ -683,6 +686,18 @@ function renderGlobalAlerts() {
   container.appendChild(item);
 }
 
+const ALERT_TABLE_COLUMN_CLASSES = [
+  "alert-col-level",
+  "alert-col-source",
+  "alert-col-subject",
+  "alert-col-summary",
+  "alert-col-details",
+  "alert-col-first-seen",
+  "alert-col-last-seen",
+  "alert-col-count",
+  "alert-col-state"
+];
+
 function renderAlertsTable() {
   const tbody = document.getElementById("alerts-list");
   const status = document.getElementById("alerts-status");
@@ -713,12 +728,14 @@ function renderAlertsTable() {
       alert.last_seen,
       alert.count,
       alert.acked ? `ACK ${alert.acked_at || ""}` : "Unacknowledged"
-    ].forEach((value) => {
+    ].forEach((value, index) => {
       const td = document.createElement("td");
+      td.className = ALERT_TABLE_COLUMN_CLASSES[index] || "";
       appendTableCellValue(td, value);
       tr.appendChild(td);
     });
     const actionCell = document.createElement("td");
+    actionCell.className = "alert-col-action";
     if (!alert.acked) {
       const button = document.createElement("button");
       button.type = "button";
@@ -904,49 +921,113 @@ function renderInsights() {
   updateTabCounts();
   const tbody = document.getElementById("insights-list");
   if (!tbody) return;
-  renderInsightsHeader();
+  const columns = insightColumns({});
+  const table = document.getElementById("insights-table");
+  if (table) table.classList.toggle("with-source", showInsightSourceColumn());
+  renderInsightsHeader(columns);
   tbody.innerHTML = "";
   rows.insights.filter(insightMatchesFilters).filter(insightMatchesSearch).slice(0, uiNumber("max_rendered_findings")).forEach((insight) => {
     const tr = document.createElement("tr");
-    insightCells(insight).forEach((value) => {
+    insightColumns(insight).forEach((column) => {
       const td = document.createElement("td");
-      td.textContent = value;
+      td.className = `insight-col-${column.key}`;
+      td.textContent = column.value;
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
   });
 }
 
-function renderInsightsHeader() {
+function renderInsightsHeader(columns) {
   const head = document.getElementById("insights-head");
   if (!head) return;
   const tr = document.createElement("tr");
-  const labels = ["Time", "Severity"];
-  if (showInsightSourceColumn()) labels.push("Source");
-  labels.push("Activity", "Category", "Insight", "Details");
-  labels.forEach((label) => {
+  (columns || insightColumns({})).forEach((column) => {
     const th = document.createElement("th");
-    th.textContent = label;
+    th.className = `insight-col-${column.key}`;
+    th.textContent = column.label;
     tr.appendChild(th);
   });
   head.innerHTML = "";
   head.appendChild(tr);
 }
 
-function insightCells(insight) {
-  const cells = [
-      insight.timestamp || "",
-      insight.severity || ""
-    ];
-  if (showInsightSourceColumn()) cells.push(sourceLabel(insight.source));
-  cells.push(
-      activityLabel(insight),
-      insight.category || "",
-      insight.title || "",
-      insightDetails(insight)
+function insightColumns(insight) {
+  const columns = [
+    {key: "time", label: "Time", value: insight.timestamp || ""},
+    {key: "severity-category", label: "Severity / Category", value: insightSeverityCategory(insight)}
+  ];
+  if (showInsightSourceColumn()) columns.push({key: "source", label: "Source", value: sourceLabel(insight.source)});
+  columns.push(
+    {key: "activity", label: "Activity", value: activityLabel(insight)},
+    {key: "insight", label: "Insight", value: insight.title || ""},
+    {key: "details", label: "Details", value: insightDetails(insight)}
   );
-  return cells;
+  return columns;
 }
+
+function insightCells(insight) {
+  return insightColumns(insight).map((column) => column.value);
+}
+
+function insightSeverityCategory(insight) {
+  return [insight.severity || "", insight.category || ""].filter(Boolean).join(" / ");
+}
+
+
+function recencyBucketForItem(item) {
+  const timestampMs = recordTimestampMs(item, "last_seen") || recordTimestampMs(item, "timestamp");
+  if (!timestampMs) return {key: "older", label: "Seen 24+ hours ago"};
+  const ageMs = Date.now() - timestampMs;
+  if (ageMs <= 60 * 60000) return {key: "hour", label: "Seen within last hour"};
+  if (ageMs <= 24 * 60 * 60000) return {key: "day", label: "Seen within last 24 hours"};
+  return {key: "older", label: "Seen 24+ hours ago"};
+}
+
+function groupedByRecency(items) {
+  const groups = [
+    {key: "hour", label: "Seen within last hour", items: []},
+    {key: "day", label: "Seen within last 24 hours", items: []},
+    {key: "older", label: "Seen 24+ hours ago", items: []},
+  ];
+  const byKey = new Map(groups.map((group) => [group.key, group]));
+  (items || []).forEach((item) => {
+    const bucket = recencyBucketForItem(item);
+    (byKey.get(bucket.key) || byKey.get("older")).items.push(item);
+  });
+  return groups;
+}
+
+function appendTableGroupRow(tbody, label, count, className) {
+  if (!tbody) return;
+  const columnCount = tbody.closest("table")?.querySelectorAll("thead th").length || 1;
+  const tr = document.createElement("tr");
+  tr.className = className || "table-group-row";
+  const td = document.createElement("td");
+  td.colSpan = columnCount;
+  td.textContent = count === undefined ? label : `${label} (${count})`;
+  tr.appendChild(td);
+  tbody.appendChild(tr);
+}
+
+function collectorHealthGroup(item) {
+  const state = String((item || {}).state || "").toUpperCase();
+  if (state === "ONLINE") return "online";
+  if (state === "DISABLED") return "disabled";
+  return "offline";
+}
+
+function collectorHealthGroups(statuses) {
+  const groups = [
+    {key: "online", label: "ONLINE", items: []},
+    {key: "offline", label: "OFFLINE / STOPPED", items: []},
+    {key: "disabled", label: "DISABLED", items: []},
+  ];
+  const byKey = new Map(groups.map((group) => [group.key, group]));
+  (statuses || []).forEach((item) => byKey.get(collectorHealthGroup(item)).items.push(item));
+  return groups;
+}
+
 
 function renderReports(reportBundle) {
   // Search input events can call render paths directly in older loaded pages.
@@ -1009,10 +1090,14 @@ function renderReportSection(kind, reports, maxRendered, alreadyRendered) {
   }
   if (table) table.hidden = !canRender;
   let rendered = alreadyRendered || 0;
-  items.forEach((report) => {
-    if (rendered >= maxRendered) return;
-    tbody.appendChild(buildReportRow(report));
-    rendered += 1;
+  groupedByRecency(items).forEach((group) => {
+    if (!group.items.length || rendered >= maxRendered) return;
+    appendTableGroupRow(tbody, group.label, group.items.length, "table-group-row recency-group-row");
+    group.items.forEach((report) => {
+      if (rendered >= maxRendered) return;
+      tbody.appendChild(buildReportRow(report));
+      rendered += 1;
+    });
   });
   return rendered;
 }
@@ -1044,7 +1129,7 @@ function reportRowMatchesSearch(row, needle) {
 function reportIsPresenceReport(report) {
   const type = String((report || {}).type || "").toLowerCase();
   const evidence = (report || {}).evidence || {};
-  const findings = (evidence.findings || []).join(" ").toLowerCase();
+  const findings = valueList(evidence.findings).join(" ").toLowerCase();
   const text = `${type} ${findings}`;
   return text.includes("presence") ||
     text.includes("recurring") ||
@@ -1076,18 +1161,16 @@ function renderReportsHeader() {
 
 function reportColumns(report) {
   const columns = [
-    {key: "score", label: "Score", value: report.score || 0}
+    {key: "subject", label: "Subject", value: report.subject || ""},
+    {key: "report", label: "Report", value: report.title || ""},
+    {key: "score", label: "Score", value: report.score || 0},
+    {key: "confidence", label: "Confidence", value: report.confidence || ""}
   ];
   const reasonValue = compactList(report.reason_tags || [], 6);
-  columns.push(
-    {key: "confidence", label: "Confidence", value: report.confidence || ""}
-  );
   if (activeReportColumnOptions.showReasons) {
     columns.push({key: "reasons", label: "Reasons", value: reasonValue});
   }
   columns.push(
-    {key: "report", label: "Report", value: report.title || ""},
-    {key: "subject", label: "Subject", value: report.subject || ""},
     {key: "evidence", label: "Evidence", value: reportEvidenceText(report)},
     {key: "last-seen", label: "Last Seen", value: report.last_seen || ""}
   );
@@ -1936,7 +2019,7 @@ function derivedHistoryHasRows() {
   const bluetooth = history.bluetooth || history.ble || {};
   const directSubjects = Array.isArray(history.subjects)
     ? history.subjects.filter((item) =>
-      ["aprsis", "rayhunter", "rtlsdr", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"].includes(String(item.collector || ""))
+      ["aprsis", "rayhunter", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"].includes(String(item.collector || ""))
     )
     : [];
   return Boolean(
@@ -1982,7 +2065,6 @@ function subjectCollectorKeys() {
     "wifi_monitor",
     "ble",
     "bt_classic",
-    "rtlsdr",
     "adsb",
     "rayhunter",
     "aprsis",
@@ -2613,7 +2695,6 @@ function updateTabCounts() {
   setTabCount("wifi", rows.aps.size);
   setTabCount("wifi_monitor", rows.monitorEvents.length);
   setTabCount("bluetooth", bluetoothTabRowCount());
-  setTabCount("rtlsdr", rows.signals.size);
   setTabCount("rtl433", rows.rtl433.length);
   setTabCount("adsb", rows.adsb.length);
   setTabCount("rayhunter", rows.rayhunter.length);
@@ -2668,7 +2749,7 @@ function subjectHistoryRowCount(source) {
   if (sourceKey === "bluetooth") return displayBluetooth;
   if (sourceKey && sourceKey !== "all") return countForDirectSource(sourceKey);
   return displayAps + displayClients + displayBluetooth +
-    ["aprsis", "rayhunter", "rtlsdr", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"]
+    ["aprsis", "rayhunter", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"]
       .reduce((total, collector) => total + countForDirectSource(collector), 0);
 }
 
@@ -2855,10 +2936,6 @@ function rtl433StartRequestedDetail(overrides) {
 
 function collectorControlPayload(key, action) {
   const payload = {key, action};
-  if (key === "rtlsdr" && action === "start") {
-    const overrides = rtlsdrOverridesFromInputs();
-    if (Object.keys(overrides).length) payload.overrides = overrides;
-  }
   if (key === "rtl433" && action === "start") {
     const overrides = rtl433OverridesFromInputs();
     if (Object.keys(overrides).length) payload.overrides = overrides;
@@ -2892,28 +2969,6 @@ function rtl433FrequencyTextToMhz(value) {
   else if (unit === "khz") number /= 1000;
   else if (unit === "ghz" || unit === "g") number *= 1000;
   return Number(number.toFixed(6));
-}
-
-function rtlsdrOverridesFromInputs() {
-  const mapping = [
-    ["rtlsdr-start", "scan_start_mhz"],
-    ["rtlsdr-end", "scan_end_mhz"],
-    ["rtlsdr-step", "step_khz"],
-    ["rtlsdr-threshold", "threshold_db"]
-  ];
-  const overrides = {};
-  mapping.forEach(([id, key]) => {
-    const input = document.getElementById(id);
-    if (!input) return;
-    const value = String(input.value || "").trim();
-    if (value === "") return;
-    const number = Number(value);
-    if (Number.isFinite(number)) overrides[key] = number;
-  });
-  const gain = document.getElementById("rtlsdr-gain");
-  const gainValue = gain ? String(gain.value || "").trim() : "";
-  if (gainValue !== "") overrides.gain = gainValue;
-  return overrides;
 }
 
 function showBluetoothSubtab(name) {
@@ -2959,7 +3014,6 @@ function applyDashboardMetadata(metadata) {
     ...(metadata.bluetooth_uuid_names || {})
   };
   configureAutoDerivedRefresh();
-  applyRtlsdrDefaults((metadata.collectors || {}).rtlsdr || {});
   applyRtl433Defaults((metadata.collectors || {}).rtl433 || {});
 }
 
@@ -2967,14 +3021,6 @@ function applyAppVersion(version) {
   const node = document.getElementById("app-version");
   if (!node) return;
   node.textContent = version ? `v${version}` : "";
-}
-
-function applyRtlsdrDefaults(config) {
-  setInputValue("rtlsdr-start", config.scan_start_mhz);
-  setInputValue("rtlsdr-end", config.scan_end_mhz);
-  setInputValue("rtlsdr-step", config.step_khz);
-  setInputValue("rtlsdr-gain", config.gain);
-  setInputValue("rtlsdr-threshold", config.threshold_db);
 }
 
 function applyRtl433Defaults(config) {
@@ -3001,44 +3047,30 @@ function uiNumber(key) {
   return 1;
 }
 
-function renderRtlsdrEvent(event) {
-  document.getElementById("rtlsdr-status").textContent = event.type;
-  if (event.type === "scanner_started") {
-    setCollectorBanner("rtlsdr", "ONLINE", `${event.data.range} | gain=${event.data.gain}`);
-  }
-  if (event.type === "baseline_ready") {
-    const baseline = document.getElementById("rtlsdr-baseline-state");
-    if (baseline) {
-      baseline.textContent = `Detection active (${event.data.bins} bins)`;
-      baseline.className = "status-strip ok";
-    }
-  }
-  if (event.type === "signal_detected") {
-    const item = {
-      ...event.data,
-      first_seen: event.timestamp,
-      first_seen_epoch: event.timestamp_epoch,
-      last_seen: event.timestamp,
-      last_seen_epoch: event.timestamp_epoch
-    };
-    rows.signals.set(item.frequency_mhz, item);
-    prependList("rtlsdr-events", `${event.timestamp} detected ${item.frequency_mhz} MHz +${item.above_floor_db} dB`);
-  }
-  if (event.type === "signal_lost") {
-    rows.signals.delete(event.data.frequency_mhz);
-    prependList("rtlsdr-events", `${event.timestamp} lost ${event.data.frequency_mhz} MHz`);
-  }
-  renderSchemaTable("rtlsdr-signals", [...rows.signals.values()], "rtlsdrSignals");
-  updateTabCounts();
-}
-
 function renderBleEvent(event) {
   document.getElementById("ble-status").textContent = event.type;
   if (event.type === "collector_offline" || event.type === "collector_retrying") {
-    setCollectorBanner("ble", event.type, eventStatusDetail("ble", event.data.adapter, event.data.reason || event.data.warning || ""));
+    const method = event.data.scan_method ? `method=${event.data.scan_method}` : "";
+    const fallback = event.data.fallback_active ? "bluetoothctl fallback active" : "";
+    const reason = event.data.reason || event.data.warning || "";
+    rows.bleScanDetail = [method, fallback].filter(Boolean).join(" | ");
+    setCollectorBanner("ble", event.type, eventStatusDetail("ble", event.data.adapter, [rows.bleScanDetail, reason].filter(Boolean).join(" | ")));
   }
   if (event.type === "scanner_started") {
-    setCollectorBanner("ble", "ONLINE", eventStatusDetail("ble", event.data.adapter, ""));
+    const method = event.data.scan_method ? `method=${event.data.scan_method}` : "";
+    const fallback = event.data.fallback_active ? "bluetoothctl fallback active" : "";
+    const diagnostics = event.data.diagnostics || "";
+    rows.bleScanDetail = [method, fallback, diagnostics].filter(Boolean).join(" | ");
+    setCollectorBanner("ble", "ONLINE", eventStatusDetail("ble", event.data.adapter, rows.bleScanDetail));
+  }
+  if (event.type === "scan_empty") {
+    rows.bleDiagnostic = bleEmptyScanDetail(event.data || {});
+    rows.bleScanDetail = [
+      event.data.scan_method ? `method=${event.data.scan_method}` : "",
+      event.data.fallback_active ? "bluetoothctl fallback active" : ""
+    ].filter(Boolean).join(" | ");
+    setCollectorBanner("ble", "collector_retrying", rows.bleDiagnostic);
+    scheduleLiveRender("ble", renderBleTable);
   }
   if (!["device_seen", "device_updated"].includes(event.type)) return;
   const data = event.data;
@@ -3047,6 +3079,14 @@ function renderBleEvent(event) {
   const merged = {
     ...current,
     ...data,
+    name: data.name || current.name || "",
+    rssi: data.rssi !== undefined && data.rssi !== null ? data.rssi : current.rssi,
+    manufacturer: data.manufacturer || current.manufacturer || null,
+    service_uuids: Array.isArray(data.service_uuids) && data.service_uuids.length ? data.service_uuids : (current.service_uuids || []),
+    findmy_accessory: data.findmy_accessory !== undefined ? data.findmy_accessory : current.findmy_accessory,
+    findmy_status: data.findmy_status || current.findmy_status || "",
+    findmy_hint: data.findmy_hint || current.findmy_hint || "",
+    findmy_label: data.findmy_label || current.findmy_label || "",
     last_seen: event.timestamp,
     last_seen_epoch: event.timestamp_epoch
   };
@@ -3054,6 +3094,25 @@ function renderBleEvent(event) {
   pruneLiveScanRows();
   scheduleLiveRender("ble", renderBleTable);
   maybeRefreshEmptyDerivedViews("Bluetooth scan");
+}
+
+function bleEmptyScanDetail(data) {
+  const parts = [
+    data.adapter ? `adapter ${data.adapter}` : "adapter unknown",
+    data.scan_method ? `method=${data.scan_method}` : "",
+    data.fallback_active ? "bluetoothctl fallback active" : "",
+    `${data.empty_scan_windows || 0} empty scan window(s)`,
+    data.bluez_warmup ? `BlueZ warmup ${data.bluez_warmup}` : "BlueZ warmup unknown"
+  ];
+  if (data.bluez_warmup_returncode !== undefined) {
+    parts.push(`rc ${data.bluez_warmup_returncode}`);
+  }
+  if (data.bluez_cached_devices !== undefined) {
+    parts.push(`BlueZ cache ${data.bluez_cached_devices} device(s)`);
+  }
+  if (data.bluez_warmup_error) parts.push(data.bluez_warmup_error);
+  if (data.diagnostics) parts.push(data.diagnostics);
+  return parts.filter(Boolean).join("; ");
 }
 
 function renderBleTable() {
@@ -3070,7 +3129,9 @@ function renderBleTable() {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
     td.colSpan = 6;
-    td.textContent = "No recently seen BLE devices";
+    td.textContent = rows.bleDiagnostic
+      ? `No recently seen BLE devices; ${rows.bleDiagnostic}`
+      : "No recently seen BLE devices";
     tr.appendChild(td);
     tbody.appendChild(tr);
     return;
@@ -3078,17 +3139,19 @@ function renderBleTable() {
   devices.forEach((item) => {
     const tr = document.createElement("tr");
     [
-      detailLink(item.mac || "", "bluetooth-device", item.mac || ""),
-      bleDeviceIdentity(item),
-      formatSignal(item.rssi),
-      bluetoothServiceList(item.service_uuids),
-      item.last_seen || ""
-    ].forEach((value) => {
+      ["ble-col-mac", detailLink(item.mac || "", "bluetooth-device", item.mac || "")],
+      ["ble-col-identity", bleDeviceIdentity(item)],
+      ["ble-col-rssi", formatSignal(item.rssi)],
+      ["ble-col-services", bluetoothServiceList(item.service_uuids)],
+      ["ble-col-last-seen", item.last_seen || ""]
+    ].forEach(([className, value]) => {
       const td = document.createElement("td");
+      td.className = className;
       appendTableCellValue(td, value || "");
       tr.appendChild(td);
     });
     const actionCell = document.createElement("td");
+    actionCell.className = "ble-col-action";
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = "Identify";
@@ -3338,7 +3401,12 @@ function bluetoothManufacturerIdentity(item) {
 
 function bluetoothDisplayName(name, mac) {
   const value = String(name || "").trim();
-  if (!value || bluetoothNameLooksLikeAddress(value, mac) || bluetoothNameLooksLikeCommandError(value)) return "";
+  if (
+    !value ||
+    bluetoothNameLooksLikeAddress(value, mac) ||
+    bluetoothNameLooksLikeCommandError(value) ||
+    bluetoothNameLooksLikeProperty(value)
+  ) return "";
   return value;
 }
 
@@ -3354,6 +3422,12 @@ function bluetoothNameLooksLikeAddress(name, mac) {
 
 function bluetoothNameLooksLikeCommandError(name) {
   return /^command:?\s+/i.test(String(name || "").trim());
+}
+
+function bluetoothNameLooksLikeProperty(name) {
+  const value = String(name || "").trim();
+  if (!value) return false;
+  return /^(rssi|uuids?|tx\s*power|txpower|manufacturer(?:\s+data)?|service(?:\s+data)?|appearance|class|icon|alias|name|legacy\s*pairing|paired|bonded|trusted|blocked|connected)\s*:/i.test(value);
 }
 
 function renderWifiEvent(event) {
@@ -3420,8 +3494,13 @@ function renderWifiMonitorEvent(event) {
 }
 
 function renderWifiMonitorTable() {
-  renderSchemaTable("wifi-monitor-events", rows.monitorEvents, "wifiMonitorEvents");
+  const events = rows.monitorEvents.filter(wifiMonitorEventMatchesSearch);
+  renderSchemaTable("wifi-monitor-events", events, "wifiMonitorEvents");
   updateTabCounts();
+}
+
+function wifiMonitorEventMatchesSearch(item) {
+  return rowMatchesSearch(schemaCells("wifiMonitorEvents", item), wifiMonitorSearch);
 }
 
 function renderAprsisEvent(event) {
@@ -4844,7 +4923,11 @@ function upsertLanRow(row) {
 
 function renderLanTable() {
   const events = rows.lan.filter(lanEventMatchesSearch);
-  renderSchemaTable("lan-events", events, "lanEvents", {preserveOrder: true});
+  renderSchemaTable("lan-events", events, "lanEvents", {
+    preserveOrder: true,
+    columnClassPrefix: "lan-event-col",
+    columnKeys: ["time", "type", "subject", "vendor", "identity", "interface", "source", "gateway", "change", "action"]
+  });
   renderLanIdentifyTable();
   updateTabCounts();
 }
@@ -4856,25 +4939,25 @@ function lanEventMatchesSearch(item) {
     item.subject_key,
     item.mac,
     item.ip,
-    (item.ips || []).join(" "),
+    valueList(item.ips).join(" "),
     item.hostname,
-    (item.hostnames || []).join(" "),
+    valueList(item.hostnames).join(" "),
     item.vendor_name,
     item.vendor_prefix,
     item.interface,
-    (item.interfaces || []).join(" "),
+    valueList(item.interfaces).join(" "),
     item.state,
-    (item.states || []).join(" "),
-    (item.sources || []).join(" "),
-    (item.mac_aliases || []).join(" "),
-    (item.services || []).join(" "),
-    (item.locations || []).join(" "),
-    (item.servers || []).join(" "),
-    (item.messages || []).join(" "),
+    valueList(item.states).join(" "),
+    valueList(item.sources).join(" "),
+    valueList(item.mac_aliases).join(" "),
+    valueList(item.services).join(" "),
+    valueList(item.locations).join(" "),
+    valueList(item.servers).join(" "),
+    valueList(item.messages).join(" "),
     item.gateway_ip,
-    (item.gateway_ips || []).join(" "),
+    valueList(item.gateway_ips).join(" "),
     item.family,
-    (item.families || []).join(" "),
+    valueList(item.families).join(" "),
     item.change_type
   ], lanSearch);
 }
@@ -4964,7 +5047,11 @@ function renderLanIdentifyEvent(event) {
 
 function renderLanIdentifyTable() {
   const events = rows.lanIdentify.filter(lanIdentifyMatchesSearch);
-  renderSchemaTable("lan-identify-results", events, "lanIdentifyResults", {preserveOrder: true});
+  renderSchemaTable("lan-identify-results", events, "lanIdentifyResults", {
+    preserveOrder: true,
+    columnClassPrefix: "lan-identify-col",
+    columnKeys: ["time", "target", "result", "ports", "http", "hints", "errors"]
+  });
 }
 
 function lanIdentifyMatchesSearch(item) {
@@ -4973,14 +5060,14 @@ function lanIdentifyMatchesSearch(item) {
     item.target,
     item.ip,
     item.mac,
-    (item.open_ports || []).join(" "),
-    (item.service_banners || []).join(" "),
-    (item.http_urls || []).join(" "),
-    (item.http_titles || []).join(" "),
-    (item.http_headers || []).join(" "),
-    (item.http_scripts || []).join(" "),
-    (item.http_hints || []).join(" "),
-    (item.identify_errors || []).join(" ")
+    valueList(item.open_ports).join(" "),
+    valueList(item.service_banners).join(" "),
+    valueList(item.http_urls).join(" "),
+    valueList(item.http_titles).join(" "),
+    valueList(item.http_headers).join(" "),
+    valueList(item.http_scripts).join(" "),
+    valueList(item.http_hints).join(" "),
+    valueList(item.identify_errors).join(" ")
   ], lanSearch);
 }
 
@@ -5023,8 +5110,9 @@ function setWifiMonitorPlan(text, state) {
 }
 
 function formatChannelList(values) {
-  if (!values || !values.length) return "none";
-  return values.join(", ");
+  const items = valueList(values);
+  if (!items.length) return "none";
+  return items.join(", ");
 }
 
 function renderWifiTables() {
@@ -5038,7 +5126,14 @@ function renderWifiTables() {
 }
 
 function annotationText(item) {
-  return String(((item || {}).annotation || {}).custom_name || (item || {}).custom_name || "").trim();
+  const data = (item && item.data && typeof item.data === "object") ? item.data : {};
+  return String(
+    ((item || {}).annotation || {}).custom_name ||
+    (item || {}).custom_name ||
+    ((data || {}).annotation || {}).custom_name ||
+    (data || {}).custom_name ||
+    ""
+  ).trim();
 }
 
 function annotatedLabel(item, subject) {
@@ -5087,11 +5182,111 @@ function saveSubjectAnnotation(subject, customName) {
       custom_name: customName || ""
     })
   })
-    .then(() => {
+    .then((payload) => {
+      applySavedSubjectAnnotation(subject, payload.annotation || null);
+      applySavedReportAnnotation(subject, payload.annotation || null);
       setHistoryStatus(customName ? "Subject annotation saved" : "Subject annotation cleared", "ok");
-      return loadDerivedViews();
+      return payload;
     })
     .catch((error) => setHistoryStatus(`Subject annotation failed: ${error}`, "alert"));
+}
+
+function applySavedSubjectAnnotation(subject, annotation) {
+  if (!latestDeviceHistory || !Array.isArray(latestDeviceHistory.subjects)) return;
+  let changed = false;
+  latestDeviceHistory.subjects.forEach((item) => {
+    if (!subjectAnnotationTargetMatches(item, subject)) return;
+    if (annotation && annotation.custom_name) {
+      item.annotation = annotation;
+      item.custom_name = annotation.custom_name;
+    } else {
+      delete item.annotation;
+      delete item.custom_name;
+      if (item.data && typeof item.data === "object") {
+        delete item.data.annotation;
+        delete item.data.custom_name;
+      }
+    }
+    changed = true;
+  });
+  if (changed) renderDeviceHistory(latestDeviceHistory);
+}
+
+function subjectAnnotationTargetMatches(item, subject) {
+  if (!item || !subject) return false;
+  return String(item.collector || "").toLowerCase() === String(subject.collector || "").toLowerCase()
+    && String(item.subject_type || "").toLowerCase() === String(subject.subject_type || "").toLowerCase()
+    && String(item.subject_id || "") === String(subject.subject_id || "");
+}
+
+function applySavedReportAnnotation(subject, annotation) {
+  if (!latestReports || !Array.isArray(latestReports.reports)) return;
+  let changed = false;
+  latestReports.reports.forEach((report) => {
+    if (!reportMatchesAnnotationTarget(report, subject)) return;
+    const evidence = (report.evidence && typeof report.evidence === "object") ? report.evidence : null;
+    if (annotation && annotation.custom_name) {
+      const original = originalReportSubject(report, subject);
+      report.annotation = annotation;
+      report.custom_name = annotation.custom_name;
+      report.subject = annotatedReportSubject(annotation.custom_name, original);
+      if (evidence) {
+        evidence.annotation = annotation;
+        evidence.custom_name = annotation.custom_name;
+      }
+    } else {
+      report.subject = originalReportSubject(report, subject);
+      delete report.annotation;
+      delete report.custom_name;
+      if (evidence) {
+        delete evidence.annotation;
+        delete evidence.custom_name;
+      }
+    }
+    changed = true;
+  });
+  if (changed) renderReports(latestReports);
+}
+
+function reportMatchesAnnotationTarget(report, subject) {
+  if (!report || !subject) return false;
+  const source = String(report.source || "").toLowerCase();
+  const collector = String(subject.collector || "").toLowerCase();
+  if (source !== collector) return false;
+  const evidence = (report.evidence && typeof report.evidence === "object") ? report.evidence : {};
+  if (collector === "lan") {
+    return String(evidence.subject_key || evidence.mac || evidence.ip || "") === String(subject.subject_id || "");
+  }
+  if (collector === "bluetooth") {
+    return normalizedMacText(evidence.mac || "") === normalizedMacText(subject.subject_id || "");
+  }
+  if (collector === "wifi") {
+    return String(evidence.bssid || evidence.ssid || "") === String(subject.subject_id || "");
+  }
+  return false;
+}
+
+function originalReportSubject(report, subject) {
+  const current = String((report || {}).subject || "").trim();
+  const custom = annotationText(report);
+  if (custom && current.startsWith(`${custom} (`) && current.endsWith(")")) {
+    return current.slice(custom.length + 2, -1);
+  }
+  return current || String((subject || {}).subject || (subject || {}).subject_id || "").trim();
+}
+
+function annotatedReportSubject(customName, original) {
+  const custom = String(customName || "").trim();
+  const base = String(original || "").trim();
+  if (!custom) return base;
+  if (base.startsWith(`${custom} (`) && base.endsWith(")")) return base;
+  return base ? `${custom} (${base})` : custom;
+}
+
+function normalizedMacText(value) {
+  const compact = String(value || "").replace(/[^0-9a-fA-F]/g, "");
+  if (compact.length !== 12) return String(value || "").trim().toUpperCase();
+  return compact.match(/../g).join(":").toUpperCase();
 }
 
 function wifiClientHistoryLabel(item) {
@@ -5150,7 +5345,6 @@ function renderDeviceHistory(history) {
   const wifiClientSubjects = wifiSubjects.filter((item) => ["wifi_client", "wifi_client_group"].includes(String(item.subject_type || "")));
   const aprsisSubjects = historySubjectsFor(history, "aprsis");
   const rayhunterSubjects = historySubjectsFor(history, "rayhunter");
-  const rtlsdrSubjects = historySubjectsFor(history, "rtlsdr");
   const rtl433Subjects = historySubjectsFor(history, "rtl433");
   const adsbSubjects = historySubjectsFor(history, "adsb");
   const noaaSubjects = historySubjectsFor(history, "noaa");
@@ -5177,10 +5371,7 @@ function renderDeviceHistory(history) {
     item.first_seen || "",
     item.last_seen || "",
     signalRange(item),
-    item.seen_count || 0,
-    item.update_count || 0,
-    item.lost_count || 0,
-    item.classic_seen_count || 0,
+    `${item.seen_count || 0} / ${item.update_count || 0}`,
     sessionCount(item),
     item.grouped_randomized ? "" : subjectAnnotationButton({
       collector: "bluetooth",
@@ -5207,14 +5398,6 @@ function renderDeviceHistory(history) {
     subjectData(item).warning_count || 0,
     subjectData(item).events_in_window || 0,
     subjectData(item).recording_id || ""
-  ], historySearch);
-  renderHistoryTable("history-rtlsdr-subjects", rtlsdrSubjects, (item) => [
-    item.subject || "",
-    subjectTypeLabel(item),
-    item.first_seen || "",
-    item.last_seen || "",
-    rtlsdrSubjectActivity(item),
-    rtlsdrSubjectSignal(item)
   ], historySearch);
   renderHistoryTable("history-rtl433-subjects", rtl433Subjects, (item) => [
     detailLink(item.subject || "", "rtl433-subject", subjectData(item).subject_key || item.subject_id || ""),
@@ -5285,11 +5468,11 @@ function renderDeviceHistory(history) {
     lanSubjectInterfaceState(item),
     lanSubjectActivity(item),
     subjectAnnotationButton({
+      ...item,
       collector: "lan",
       subject_type: item.subject_type || "",
       subject_id: item.subject_id || "",
-      subject: item.subject || item.subject_id || "LAN subject",
-      annotation: item.annotation
+      subject: item.subject || item.subject_id || "LAN subject"
     })
   ], historySearch);
   updateTabCounts();
@@ -5311,7 +5494,7 @@ function wifiApSubjectHistoryCells(item) {
     item.first_seen || "",
     item.last_seen || "",
     channelFreqList(data.channels),
-    (data.encryption || []).join(", "),
+    valueList(data.encryption).join(", "),
     signalRange(data),
     data.observations || 0,
     isSsid ? "" : subjectAnnotationButton({
@@ -5358,7 +5541,7 @@ function updateDeviceHistoryStatus(history) {
   const subjectCounts = history.subject_counts || {};
   const subjects = Array.isArray(history.subjects) ? history.subjects : [];
   const directSubjects = subjects.filter((item) =>
-    ["aprsis", "rayhunter", "rtlsdr", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"].includes(String(item.collector || ""))
+    ["aprsis", "rayhunter", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"].includes(String(item.collector || ""))
   );
   const window = history.window || {};
   const refreshedAt = history.generated_at || history.refreshed_at;
@@ -5400,7 +5583,7 @@ function subjectData(item) {
 
 function subjectTypeLabel(item) {
   return String((item || {}).subject_type || "")
-    .replace(/^(aprsis|rayhunter|rtlsdr|rtl433|adsb|wifi|bluetooth)_/, "")
+    .replace(/^(aprsis|rayhunter|rtl433|adsb|wifi|bluetooth)_/, "")
     .replace(/^pws_/, "")
     .replace(/^swpc_/, "")
     .replace(/_/g, " ");
@@ -5470,24 +5653,6 @@ function aprsisServerText(data) {
   const address = String(item.server_address || "").trim();
   if (name && address) return `${name} (${address})`;
   return name || address;
-}
-
-function rtlsdrSubjectActivity(item) {
-  const data = subjectData(item);
-  return [
-    data.frequency_mhz ? `${data.frequency_mhz} MHz` : "",
-    data.signal_count ? `${data.signal_count} signal(s)` : "",
-    data.active ? "active" : ""
-  ].filter(Boolean).join("; ");
-}
-
-function rtlsdrSubjectSignal(item) {
-  const data = subjectData(item);
-  return [
-    data.power_dbm !== undefined ? `${data.power_dbm} dBm` : "",
-    data.above_floor_db !== undefined ? `+${data.above_floor_db} dB` : "",
-    data.reason || ""
-  ].filter(Boolean).join("; ");
 }
 
 function rtl433SubjectActivity(item) {
@@ -5753,7 +5918,18 @@ function buildAprsisSubjectDetail(key) {
       ]),
       detailSection("Position / Activity", [
         ["Position", aprsisSubjectPosition(subject)],
+        ["Trip", aprsisTripText(data)],
         ["Weather / Motion", aprsisSubjectActivity(subject)]
+      ]),
+      detailSection("Route Samples", [
+        ["First Position", aprsisPositionTimeText(data.first_position_at, data.first_latitude, data.first_longitude)],
+        ["Last Position", aprsisPositionTimeText(data.last_position_at, data.last_latitude ?? data.latitude, data.last_longitude ?? data.longitude)],
+        ["Recent Positions", compactList(data.position_samples || [], 8)]
+      ]),
+      detailSection("Packet Samples", [
+        ["Latest Payload", data.payload],
+        ["Latest Raw", data.raw],
+        ["Recent Packets", compactList(data.packet_samples || [], 6)]
       ]),
       detailSection("Weather", [
         ["Latest", normalizeAprsWeatherSummary(data.weather_summary)],
@@ -5837,6 +6013,8 @@ function buildNoaaSubjectDetail(key) {
         ["Precipitation", noaaForecastPrecipText(data)],
         ["Wind", noaaForecastWindText(data)],
         ["Next Precip", noaaForecastNextPrecipText(data)],
+        ["Changes", noaaForecastDeltaText(data)],
+        ["Previous Forecast", data.previous_forecast_generated],
         ["Period", timeRangeText(data.first_period_start, data.last_period_end)]
       ]),
       detailSection("Source", [
@@ -6005,7 +6183,8 @@ function buildAdsbSubjectDetail(key) {
         ["Position Source", data.position_source || ""],
         ["State / Motion", adsbStateMotionText(data)],
         ["Distance", adsbDistanceText(data)],
-        ["Path Span", data.path_span_km !== undefined ? `${data.path_span_km} km` : ""]
+        ["Path Span", data.path_span_km !== undefined ? `${data.path_span_km} km` : ""],
+        ["Approach Context", adsbApproachText(data)]
       ]),
       detailSection("Observed", [
         ["First Seen", (subject || {}).first_seen || data.first_seen],
@@ -6013,7 +6192,10 @@ function buildAdsbSubjectDetail(key) {
         ["Updates", data.seen_count],
         ["Positions", data.position_count],
         ["Messages", data.messages],
-        ["RSSI", data.rssi_dbfs !== undefined ? `${data.rssi_dbfs} dBFS` : ""]
+        ["RSSI", data.rssi_dbfs !== undefined ? `${data.rssi_dbfs} dBFS` : ""],
+        ["Local Passes", data.session_count || data.pass_count],
+        ["Pass Spans", compactList(data.session_spans || [], 6)],
+        ["Route Samples", compactList(data.route_samples || [], 6)]
       ]),
       detailSection("Source", [
         ["Decoder", data.decoder],
@@ -6048,12 +6230,21 @@ function buildRtl433SubjectDetail(key) {
         ["Frequency Plan", data.frequency_plan],
         ["Event Time", displayTimestamp(data, "event_time") || data.event_time]
       ]),
+      rtl433TpmsDetailSection(data),
       detailSection("Observed", [
         ["First Seen", (subject || {}).first_seen || data.first_seen],
         ["Last Seen", (subject || {}).last_seen || data.last_seen],
         ["Events", data.event_count || data.seen_count],
         ["Bursts", data.burst_count],
         ["Sample Times", compactList(data.sample_times || [], 8)]
+      ]),
+      detailSection("Patterns", [
+        ["Day / Night", counterMapText(data.day_night_counts, "")],
+        ["Hours", counterMapText(data.hour_histogram, "h")],
+        ["Weekdays", counterMapText(data.weekday_histogram, "")],
+        ["Frequencies", counterMapText(data.frequency_counts, " MHz")],
+        ["Burst Gaps", rtl433BurstGapText(data)],
+        ["Recent Observations", rtl433RecentObservationsText(data.recent_observations)]
       ]),
       detailSection("Decoded Fields", [
         ["Latest Fields", rtl433DetailsText(data)],
@@ -6062,6 +6253,59 @@ function buildRtl433SubjectDetail(key) {
       reportsSection(reports)
     ].filter(Boolean)
   };
+}
+
+
+function rtl433TpmsDetailSection(data) {
+  if (String((data || {}).category || "").toLowerCase() !== "tpms") return null;
+  return detailSection("TPMS", [
+    ["Interpretation", data.tpms_interpretation],
+    ["Pressure", rtl433TpmsPressureText(data)],
+    ["Temperature", rtl433TpmsTemperatureText(data)],
+    ["Battery", data.battery_status || compactList(data.tpms_battery_statuses || [], 6)],
+    ["Status", data.tpms_status || compactList(data.tpms_statuses || [], 6)],
+    ["Position", data.tpms_position],
+    ["Samples", rtl433TpmsSamplesText(data.tpms_samples)]
+  ]);
+}
+
+function rtl433TpmsPressureText(data) {
+  const item = data || {};
+  const parts = [];
+  if (item.pressure_psi !== undefined) parts.push(`${item.pressure_psi} psi`);
+  if (item.pressure_psi_min !== undefined || item.pressure_psi_max !== undefined) {
+    parts.push(`range ${valueOrDash(item.pressure_psi_min)}-${valueOrDash(item.pressure_psi_max)} psi`);
+  }
+  if (item.pressure_kpa !== undefined) parts.push(`${item.pressure_kpa} kPa`);
+  return parts.join("; ");
+}
+
+function rtl433TpmsTemperatureText(data) {
+  const item = data || {};
+  const parts = [];
+  if (item.temperature_f !== undefined) parts.push(`${item.temperature_f} F`);
+  if (item.temperature_f_min !== undefined || item.temperature_f_max !== undefined) {
+    parts.push(`range ${valueOrDash(item.temperature_f_min)}-${valueOrDash(item.temperature_f_max)} F`);
+  }
+  if (item.temperature_c !== undefined) parts.push(`${item.temperature_c} C`);
+  return parts.join("; ");
+}
+
+function rtl433TpmsSamplesText(samples) {
+  return compactList((samples || []).map((sample) => {
+    const parts = [
+      sample.time || "",
+      sample.pressure_psi !== undefined ? `${sample.pressure_psi} psi` : "",
+      sample.temperature_f !== undefined ? `${sample.temperature_f} F` : "",
+      sample.battery_status ? `battery ${sample.battery_status}` : "",
+      sample.tpms_status ? `status ${sample.tpms_status}` : ""
+    ].filter(Boolean);
+    return parts.join(" | ");
+  }), 8);
+}
+
+function valueOrDash(value) {
+  return value === undefined || value === null || value === "" ? "?" : value;
 }
 
 function rtl433RawDetailText(raw) {
@@ -6105,8 +6349,9 @@ function buildLanSubjectDetail(key) {
         ["Changes", data.change_count],
         ["Latest Change", data.change_type]
       ]),
+      data.grouped_randomized ? groupMembersTable(data, "lan") : null,
       reportsSection(reports)
-    ]
+    ].filter(Boolean)
   };
 }
 
@@ -6123,6 +6368,7 @@ function buildBluetoothDetail(mac) {
       detailSection("Identity", [
         ["Annotation", annotationText(device)],
         ["MAC", device.mac],
+        ["Type", bluetoothDeviceType(device)],
         ["Transport", valueList(device.transports).join(", ")],
         ["Identity", bleDeviceIdentity(device)],
         ["Find My", device.findmy_accessory ? (device.findmy_label || "Apple Find My accessory") : ""],
@@ -6137,16 +6383,30 @@ function buildBluetoothDetail(mac) {
         ["First Seen", device.first_seen],
         ["Last Seen", device.last_seen],
         ["Signal", signalRange(device)],
-        ["BLE Seen", device.seen_count],
-        ["BLE Updates", device.update_count],
-        ["BLE Lost", device.lost_count],
-        ["Classic Seen", device.classic_seen_count],
+        ["BLE Seen", Number(device.seen_count || 0)],
+        ["BLE Updates", Number(device.update_count || 0)],
+        ["BLE Lost", Number(device.lost_count || 0)],
+        ["Classic Seen", Number(device.classic_seen_count || 0)],
         ["Sessions", sessionCount(device)],
         ["Insights", device.finding_count]
       ]),
+      device.grouped_randomized ? groupMembersTable(device, "bluetooth") : null,
       reportsSection(reports)
-    ]
+    ].filter(Boolean)
   };
+}
+
+function bluetoothDeviceType(device) {
+  const item = device || {};
+  const transports = valueList(item.transports).map((value) => String(value || "").toLowerCase());
+  const types = [];
+  if (transports.some((value) => value.includes("ble")) || Number(item.seen_count || 0) || Number(item.update_count || 0) || Number(item.lost_count || 0)) {
+    types.push("BLE");
+  }
+  if (transports.some((value) => value.includes("classic")) || Number(item.classic_seen_count || 0)) {
+    types.push("Classic");
+  }
+  return types.length ? types.join(" + ") : "Unknown";
 }
 
 function findmyPayloadText(device) {
@@ -6240,8 +6500,9 @@ function buildWifiClientDetail(mac) {
         ["Last Seen", client.last_seen],
         ["Findings", client.finding_count || 0]
       ]),
+      client.grouped_randomized ? groupMembersTable(client, "wifi") : null,
       reportsSection(reports)
-    ]
+    ].filter(Boolean)
   };
 }
 
@@ -6372,6 +6633,91 @@ function detailApTable(aps) {
   return section;
 }
 
+function groupMembersTable(item, source) {
+  const members = groupMembers(item);
+  if (!members.length) return detailMessage("No bounded member evidence is available for this grouped row.");
+  const section = document.createElement("section");
+  section.className = "detail-section";
+  const heading = document.createElement("h3");
+  heading.textContent = "Grouped Members";
+  section.appendChild(heading);
+  const table = document.createElement("table");
+  table.className = "detail-table detail-group-members";
+  table.innerHTML = "<thead><tr><th>MAC</th><th>Identity</th><th>First Seen</th><th>Last Seen</th><th>Counts</th><th>Signal</th><th>State</th></tr></thead>";
+  const tbody = document.createElement("tbody");
+  members.slice(0, 24).forEach((member) => {
+    const tr = document.createElement("tr");
+    [
+      member.mac || "",
+      groupMemberIdentityText(member, source),
+      member.first_seen || "",
+      member.last_seen || "",
+      groupMemberCountsText(member, source),
+      signalRange(member),
+      groupMemberStateText(member, source)
+    ].forEach((value) => {
+      const td = document.createElement("td");
+      appendTableCellValue(td, value);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  section.appendChild(table);
+  return section;
+}
+
+function groupMembers(item) {
+  return Array.isArray((item || {}).group_members) ? (item || {}).group_members : [];
+}
+
+function groupMemberIdentityText(member, source) {
+  if (source === "wifi") {
+    return [member.identity || "", ssidList(member.ssids || [], true)].filter(Boolean).join("; ");
+  }
+  if (source === "bluetooth") {
+    return [member.identity || "", compactList(member.names || [], 4), bluetoothServiceList(member.service_uuids || [])].filter(Boolean).join("; ");
+  }
+  if (source === "lan") {
+    return [member.identity || "", compactList(member.ips || [], 4), compactList(member.sources || [], 4)].filter(Boolean).join("; ");
+  }
+  return member.identity || "";
+}
+
+function groupMemberCountsText(member, source) {
+  if (source === "wifi") {
+    return [
+      member.probe_count ? `${member.probe_count} probe` : "",
+      member.association_count ? `${member.association_count} assoc` : "",
+      member.deauth_count ? `${member.deauth_count} deauth` : "",
+      member.disassoc_count ? `${member.disassoc_count} disassoc` : ""
+    ].filter(Boolean).join("; ");
+  }
+  if (source === "bluetooth") {
+    return [
+      member.seen_count ? `${member.seen_count} seen` : "",
+      member.update_count ? `${member.update_count} upd` : "",
+      member.lost_count ? `${member.lost_count} lost` : "",
+      member.classic_seen_count ? `${member.classic_seen_count} classic` : "",
+      member.session_count ? `${member.session_count} sess` : ""
+    ].filter(Boolean).join("; ");
+  }
+  if (source === "lan") {
+    return [
+      member.observation_count ? `${member.observation_count} obs` : "",
+      member.identify_count ? `${member.identify_count} ident` : "",
+      member.change_count ? `${member.change_count} change` : ""
+    ].filter(Boolean).join("; ");
+  }
+  return "";
+}
+
+function groupMemberStateText(member, source) {
+  if (source === "bluetooth" && member.active_session) return "active session";
+  if (source === "lan") return compactList(member.interfaces || [], 4);
+  return "";
+}
+
 function reportsSection(reports) {
   const section = document.createElement("section");
   section.className = "detail-section";
@@ -6427,12 +6773,12 @@ function reportMatchesDetail(report, type, key) {
   const normalizedKey = String(key || "").toLowerCase();
   if (type === "bluetooth-device") {
     return String(evidence.mac || "").toLowerCase() === normalizedKey ||
-      (evidence.sample_macs || []).some((mac) => String(mac).toLowerCase() === normalizedKey);
+      valueList(evidence.sample_macs).some((mac) => String(mac).toLowerCase() === normalizedKey);
   }
   if (type === "wifi-bssid") {
     const ap = findWifiHistoryAp(key);
     return String(evidence.bssid || "").toLowerCase() === normalizedKey ||
-      (evidence.bssids || []).some((bssid) => String(bssid).toLowerCase() === normalizedKey) ||
+      valueList(evidence.bssids).some((bssid) => String(bssid).toLowerCase() === normalizedKey) ||
       (ap && reportType === "wifi_ssid_profile" && evidence.ssid &&
         String(evidence.ssid || "(blank)").toLowerCase() ===
           String(ap.ssid || "(blank)").toLowerCase());
@@ -6498,7 +6844,7 @@ function reportMatchesDetail(report, type, key) {
     return String(evidence.subject_key || "").toLowerCase() === normalizedKey ||
       String(evidence.mac || "").toLowerCase() === normalizedKey ||
       String(evidence.gateway_ip || "").toLowerCase() === normalizedKey ||
-      (evidence.gateway_ips || []).some((item) => String(item || "").toLowerCase() === normalizedKey) ||
+      valueList(evidence.gateway_ips).some((item) => String(item || "").toLowerCase() === normalizedKey) ||
       String((report || {}).subject || "").toLowerCase().includes(normalizedKey);
   }
   return false;
@@ -6533,16 +6879,24 @@ function findWifiHistoryClient(mac) {
   const wifi = (latestDeviceHistory || {}).wifi || {};
   const historyClients = wifi.clients || [];
   const clients = historyClients.length ? historyClients : rows.monitorEvents;
-  return clients.find((client) =>
-    String(client.mac || client.client_mac || client.transmitter_mac || "").toLowerCase() === normalized
-  );
+  return clients.find((client) => {
+    const data = client || {};
+    return String(data.mac || data.client_mac || data.transmitter_mac || "").toLowerCase() === normalized ||
+      String(data.group_key || "").toLowerCase() === normalized ||
+      valueList(data.sample_macs).some((item) => String(item || "").toLowerCase() === normalized) ||
+      groupMembers(data).some((item) => String(item.mac || "").toLowerCase() === normalized);
+  });
 }
 
 function findBluetoothHistoryDevice(mac) {
   const normalized = String(mac || "").toLowerCase();
-  return bluetoothHistoryDevices().find((device) =>
-    String(device.mac || "").toLowerCase() === normalized
-  );
+  return bluetoothHistoryDevices().find((device) => {
+    const data = device || {};
+    return String(data.mac || "").toLowerCase() === normalized ||
+      String(data.group_key || "").toLowerCase() === normalized ||
+      valueList(data.sample_macs).some((item) => String(item || "").toLowerCase() === normalized) ||
+      groupMembers(data).some((item) => String(item.mac || "").toLowerCase() === normalized);
+  });
 }
 
 function aprsisHistorySubjects() {
@@ -6678,12 +7032,14 @@ function findLanHistorySubject(key) {
       String(data.subject_key || "").toLowerCase() === normalized ||
       String(data.mac || "").toLowerCase() === normalized ||
       String(data.gateway_ip || "").toLowerCase() === normalized ||
-      (data.gateway_ips || []).some((item) => String(item || "").toLowerCase() === normalized);
+      valueList(data.gateway_ips).some((item) => String(item || "").toLowerCase() === normalized) ||
+      valueList(data.sample_macs).some((item) => String(item || "").toLowerCase() === normalized) ||
+      groupMembers(data).some((item) => String(item.mac || "").toLowerCase() === normalized);
   });
 }
 
 function uniqueValues(values) {
-  return [...new Set((values || [])
+  return [...new Set(valueList(values)
     .map((value) => String(value || "").trim())
     .filter(Boolean))].sort();
 }
@@ -6704,8 +7060,9 @@ function setHistoryStatus(text, state) {
 }
 
 function ssidList(ssids, randomized) {
-  const values = (ssids || []).slice(0, uiNumber("max_history_ssids"));
-  const suffix = (ssids || []).length > values.length ? ` +${(ssids || []).length - values.length}` : "";
+  const items = valueList(ssids);
+  const values = items.slice(0, uiNumber("max_history_ssids"));
+  const suffix = items.length > values.length ? ` +${items.length - values.length}` : "";
   const prefix = randomized ? "randomized MAC | " : "";
   return `${prefix}${values.join(", ")}${suffix}`;
 }
@@ -6751,7 +7108,7 @@ function channelFreq(channel, explicitBand) {
 }
 
 function channelFreqList(channels) {
-  return (channels || []).map((channel) => channelFreq(channel)).join(", ");
+  return valueList(channels).map((channel) => channelFreq(channel)).join(", ");
 }
 
 function bandForChannel(channel) {
@@ -6947,7 +7304,9 @@ function reportDedupeContext(report) {
 function dedupeEvidenceValue(item, context) {
   const value = String((item || {}).value || "");
   if (!value) return "";
-  const separator = (item || {}).label === "Findings" ? "," : ";";
+  const label = String((item || {}).label || "");
+  if (["Pattern", "Observed", "Activity"].includes(label)) return value;
+  const separator = label === "Findings" ? "," : ";";
   const segments = value.split(separator).map((part) => part.trim()).filter(Boolean);
   if (segments.length <= 1) {
     return evidenceSegmentAlreadyShown(value, context) ? "" : value;
@@ -7068,11 +7427,10 @@ function wifiApReportEvidenceItems(evidence) {
   if (evidence.vendors && evidence.vendors.length) {
     parts.push({label: "Vendors", value: compactList(evidence.vendors, 4)});
   }
-  const activity = [
-    presencePatternText(evidence),
-    reportSessionSummaryText(evidence)
-  ].filter(Boolean).join("; ");
-  if (activity) parts.push({label: "Activity", value: activity});
+  const pattern = presencePatternText(evidence);
+  if (pattern) parts.push({label: "Pattern", value: pattern});
+  const observed = reportSessionSummaryText(evidence);
+  if (observed) parts.push({label: "Observed", value: observed});
   return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
 }
 
@@ -7127,17 +7485,32 @@ function adsbReportEvidenceItems(evidence, type) {
     evidence.min_distance_km !== undefined ? `${evidence.min_distance_km} km closest` : "",
     evidence.path_span_km !== undefined ? `path ${evidence.path_span_km} km` : "",
     evidence.position_count ? `${evidence.position_count} position(s)` : "",
-    evidence.position_source ? `source ${evidence.position_source}` : ""
+    evidence.position_source ? `source ${evidence.position_source}` : "",
+    adsbApproachText(evidence)
   ].filter(Boolean).join("; ");
   if (position) parts.push({label: "Position", value: position});
   const motion = [
     evidence.speed_kt !== undefined ? `${evidence.speed_kt} kt` : "",
     evidence.track_deg !== undefined ? `track ${evidence.track_deg} deg` : "",
-    evidence.seen_count ? `${evidence.seen_count} update(s)` : ""
+    evidence.seen_count ? `${evidence.seen_count} update(s)` : "",
+    evidence.session_count ? `${evidence.session_count} local pass(es)` : "",
+    evidence.session_spans && evidence.session_spans.length ? `passes ${compactList(evidence.session_spans, 4)}` : "",
+    evidence.route_samples && evidence.route_samples.length ? `route ${compactList(evidence.route_samples, 4)}` : ""
   ].filter(Boolean).join("; ");
   if (motion) parts.push({label: "Motion", value: motion});
   if (evidence.observed) parts.push({label: "Observed", value: evidence.observed});
   return parts.length ? parts : genericEvidenceItems(evidence, "");
+}
+
+
+function adsbApproachText(item) {
+  const data = item || {};
+  const context = data.approach_context || "";
+  const parts = [context];
+  if (data.approach_distance_km !== undefined) parts.push(`${data.approach_distance_km} km`);
+  if (data.approach_altitude_ft !== undefined) parts.push(`${data.approach_altitude_ft} ft`);
+  if (data.approach_vertical_rate_fpm !== undefined) parts.push(`${data.approach_vertical_rate_fpm} fpm`);
+  return parts.filter(Boolean).join("; ");
 }
 
 function adsbPopulationReportEvidenceItems(evidence) {
@@ -7196,13 +7569,9 @@ function aprsisReportEvidenceItems(evidence) {
   const findings = findingsText(evidence.findings, "", false);
   if (findings) parts.push({label: "Findings", value: findings});
   const activity = aprsisReportActivityText(evidence);
+  if (activity) parts.push({label: "Activity", value: activity});
   const observed = timeRangeText(evidence.first_seen, evidence.last_seen);
-  if (activity || observed) {
-    parts.push({
-      label: "Activity",
-      value: [activity, observed ? `observed ${observed}` : ""].filter(Boolean).join("; ")
-    });
-  }
+  if (observed) parts.push({label: "Observed", value: observed});
   const route = [
     evidence.via_path ? `via ${evidence.via_path}` : "",
     evidence.q_construct || "",
@@ -7210,10 +7579,14 @@ function aprsisReportEvidenceItems(evidence) {
     aprsisAdditionalSamples(evidence.sample_igates, evidence.igate, "igates", 4)
   ].filter(Boolean).join("; ");
   const position = aprsisReportPositionText(evidence);
+  const trip = aprsisTripText(evidence);
+  const packets = aprsisPacketSamplesText(evidence);
   const weather = aprsisReportWeatherText(evidence);
   const place = [
     position,
-    weather
+    trip,
+    weather,
+    packets
   ].filter(Boolean).join("; ");
   if (place) parts.push({label: isWeatherStation ? "Weather" : "Position", value: place});
   const feedRole = aprsisDistinctFeedRole(evidence.feed_name, evidence.feed_role);
@@ -7309,6 +7682,28 @@ function aprsisReportActivityText(evidence) {
   return parts.join("; ");
 }
 
+function aprsisTripText(data) {
+  const parts = [];
+  if (data.trip_rollup) parts.push(data.trip_rollup);
+  const span = numericEvidence(data.position_span_km);
+  const movement = numericEvidence(data.movement_km);
+  const maxSpeed = numericEvidence(data.max_speed_kmh);
+  if (span !== null && span > 0) parts.push(`span ${span.toFixed(2)} km`);
+  if (movement !== null && movement > 0) parts.push(`first/latest ${movement.toFixed(2)} km`);
+  if (maxSpeed !== null && maxSpeed > 0) parts.push(`max ${maxSpeed.toFixed(1)} km/h`);
+  return parts.join("; ");
+}
+
+function aprsisPositionTimeText(time, latitude, longitude) {
+  const position = formatLatLon(latitude, longitude);
+  return [time || "", position].filter(Boolean).join("; ");
+}
+
+function aprsisPacketSamplesText(evidence) {
+  const samples = Array.isArray(evidence.packet_samples) ? evidence.packet_samples : [];
+  return samples.length ? `packets ${compactList(samples, 3)}` : "";
+}
+
 function aprsisReportPositionText(evidence) {
   const parts = [];
   const first = formatLatLon(evidence.first_latitude, evidence.first_longitude);
@@ -7330,6 +7725,9 @@ function aprsisReportPositionText(evidence) {
   if (step !== null && step > 0) parts.push(`max step ${step.toFixed(2)} km`);
   const motion = aprsisMotionEvidenceText(evidence);
   if (motion) parts.push(motion);
+  if (evidence.first_position_at || evidence.last_position_at) {
+    parts.push(timeRangeText(evidence.first_position_at, evidence.last_position_at));
+  }
   const maxSpeed = numericEvidence(evidence.max_speed_kmh);
   if (maxSpeed !== null && maxSpeed > 0) parts.push(`max ${maxSpeed.toFixed(1)} km/h`);
   return parts.join("; ");
@@ -7447,8 +7845,7 @@ function noaaReportEvidenceItems(evidence) {
     evidence.certainty ? `certainty ${evidence.certainty}` : "",
     evidence.status || "",
     evidence.message_type ? `message ${evidence.message_type}` : "",
-    updateEvidenceText(evidence.updated, evidence.update_count),
-    timeRangeText(evidence.first_seen, evidence.last_seen)
+    updateEvidenceText(evidence.updated, evidence.update_count)
   ].filter(Boolean).join("; ");
   if (event) parts.push({label: "Event", value: event});
   const packageInfo = [
@@ -7476,6 +7873,8 @@ function noaaReportEvidenceItems(evidence) {
     evidence.ends ? `ends ${evidence.ends}` : ""
   ].filter(Boolean).join("; ");
   if (timing) parts.push({label: "Timing", value: timing});
+  const observed = timeRangeText(evidence.first_seen, evidence.last_seen);
+  if (observed) parts.push({label: "Observed", value: observed});
   const source = [
     evidence.area_desc ? `area ${evidence.area_desc}` : "",
     evidence.source || "",
@@ -7541,9 +7940,34 @@ function noaaForecastEvidenceText(data) {
     noaaForecastTemperatureText(data),
     noaaForecastPrecipText(data),
     noaaForecastWindText(data),
+    noaaForecastDeltaText(data),
     data.forecast_window_hours ? `${data.forecast_window_hours}h window` : "",
     data.forecast_hour_count ? `${data.forecast_hour_count} period(s)` : ""
   ].filter(Boolean).join("; ");
+}
+
+
+function noaaForecastDeltaText(data) {
+  const item = data || {};
+  const findings = valueList(item.forecast_delta_findings);
+  const parts = [];
+  if (item.forecast_change_direction) parts.push(item.forecast_change_direction);
+  if (item.forecast_delta_summary) parts.push(item.forecast_delta_summary);
+  else if (findings.length) parts.push(compactList(findings, 6));
+  const temp = noaaDeltaValueText(item.current_temperature_delta_f, "F current temp");
+  const tempMin = noaaDeltaValueText(item.temperature_min_delta_f, "F low");
+  const tempMax = noaaDeltaValueText(item.temperature_max_delta_f, "F high");
+  const rain = noaaDeltaValueText(item.max_precip_probability_delta, "% max precip");
+  const nextRain = noaaDeltaValueText(item.next_precip_probability_delta, "% next precip");
+  const wind = noaaDeltaValueText(item.max_wind_delta_mph, "mph wind");
+  [temp, tempMin, tempMax, rain, nextRain, wind].filter(Boolean).forEach((value) => parts.push(value));
+  return parts.join("; ");
+}
+
+function noaaDeltaValueText(value, label) {
+  const number = numericEvidence(value);
+  if (number === null || number === 0) return "";
+  return `${number > 0 ? "+" : ""}${number.toFixed(Math.abs(number) % 1 ? 1 : 0)} ${label}`;
 }
 
 function noaaForecastTemperatureText(data) {
@@ -7623,7 +8047,6 @@ function usgsReportEvidenceItems(evidence) {
     evidence.event_id ? `ID ${evidence.event_id}` : "",
     evidence.event_time ? `time ${evidence.event_time}` : "",
     updateEvidenceText(evidence.updated, evidence.update_count),
-    timeRangeText(evidence.first_seen, evidence.last_seen),
     evidence.feed_label || evidence.feed || "",
     evidence.scope ? `scope ${evidence.scope}` : "",
     evidence.global_major ? "global major" : "",
@@ -7644,6 +8067,8 @@ function usgsReportEvidenceItems(evidence) {
     evidence.tsunami ? "tsunami flag" : ""
   ].filter(Boolean).join("; ");
   if (shaking) parts.push({label: "Shaking", value: shaking});
+  const observed = timeRangeText(evidence.first_seen, evidence.last_seen);
+  if (observed) parts.push({label: "Observed", value: observed});
   if (evidence.detail_url) {
     parts.push({
       label: "Detail",
@@ -7730,10 +8155,11 @@ function swpcReportEvidenceItems(evidence) {
     evidence.peak_time ? `peak ${evidence.peak_time}` : "",
     evidence.end_time ? `end ${evidence.end_time}` : "",
     evidence.issue_time ? `issued ${evidence.issue_time}` : "",
-    updateEvidenceText("", evidence.update_count),
-    timeRangeText(evidence.first_seen, evidence.last_seen)
+    updateEvidenceText("", evidence.update_count)
   ].filter(Boolean).join("; ");
   if (timing) parts.push({label: "Timing", value: timing});
+  const observed = timeRangeText(evidence.first_seen, evidence.last_seen);
+  if (observed) parts.push({label: "Observed", value: observed});
   const source = [
     evidence.source || "",
     evidence.source_url || ""
@@ -7813,10 +8239,11 @@ function pwsReportEvidenceItems(evidence) {
   if (evidence.location) parts.push({label: "Location", value: evidence.location});
   const sample = [
     evidence.sample_time || "",
-    evidence.observations ? `${evidence.observations} observation(s)` : "",
-    timeRangeText(evidence.first_seen, evidence.last_seen)
+    evidence.observations ? `${evidence.observations} observation(s)` : ""
   ].filter(Boolean).join("; ");
   if (sample) parts.push({label: "Sample", value: sample});
+  const observed = timeRangeText(evidence.first_seen, evidence.last_seen);
+  if (observed) parts.push({label: "Observed", value: observed});
   const weather = [
     evidence.weather || "",
     evidence.wind || "",
@@ -7887,12 +8314,15 @@ function rtl433ReportEvidenceItems(evidence, type) {
   if (type === "rtl433_device_profile") {
     return rtl433DeviceProfileReportEvidenceItems(evidence);
   }
+  if (type === "rtl433_tpms_cluster") {
+    return rtl433TpmsClusterReportEvidenceItems(evidence);
+  }
   return genericEvidenceItems(evidence, "");
 }
 
 function rtl433DeviceProfileReportEvidenceItems(evidence) {
   const parts = [];
-  const profileFindings = (evidence.findings || []).filter((item) => {
+  const profileFindings = valueList(evidence.findings).filter((item) => {
     const text = String(item || "").toLowerCase();
     return !text.includes("decode event") && !text.includes("clustered transmission");
   });
@@ -7906,19 +8336,163 @@ function rtl433DeviceProfileReportEvidenceItems(evidence) {
     evidence.category || ""
   ].filter(Boolean).join("; ");
   if (identity) parts.push({label: "Identity", value: identity});
+  const pattern = [
+    rtl433WeekdayEvidenceText(evidence.weekday_histogram, 3),
+    rtl433HourEvidenceText(evidence.hour_histogram, 3),
+    rtl433DayNightEvidenceText(evidence.day_night_counts)
+  ].filter(Boolean).join("; ");
+  if (pattern) parts.push({label: "Pattern", value: pattern});
+  const observed = rtl433ObservedText(evidence);
+  if (observed) parts.push({label: "Observed", value: observed});
   const activity = [
     evidence.events ? `${evidence.events} event(s)` : "",
-    evidence.bursts ? `${evidence.bursts} clustered repeat(s)` : ""
+    evidence.bursts ? `${evidence.bursts} clustered repeat(s)` : "",
+    rtl433BurstGapText(evidence)
   ].filter(Boolean).join("; ");
   if (activity) parts.push({label: "Activity", value: activity});
+  const tpms = rtl433TpmsEvidenceText(evidence);
+  if (tpms) parts.push({label: "TPMS", value: tpms});
   const rf = [
-    evidence.latest_signal || "",
-    evidence.frequencies_mhz && evidence.frequencies_mhz.length ? `freqs ${compactList(evidence.frequencies_mhz, 6)}` : ""
+    rtl433BandText(evidence.latest_frequency_mhz || (Array.isArray(evidence.frequencies_mhz) ? evidence.frequencies_mhz[0] : null)),
+    rtl433SignalWithoutFrequency(evidence.latest_signal)
   ].filter(Boolean).join("; ");
   if (rf) parts.push({label: "RF", value: rf});
   const fields = rtl433LatestFieldsText(evidence.latest_fields);
   if (fields) parts.push({label: "Fields", value: fields});
   return parts.length ? parts : genericEvidenceItems(evidence, "");
+}
+
+
+function counterMapText(map, suffix) {
+  if (!map || typeof map !== "object" || Array.isArray(map)) return "";
+  const rows = Object.keys(map).map((key) => `${key}${suffix || ""}: ${map[key]}`);
+  return rows.length ? compactList(rows, 12) : "";
+}
+
+
+function rtl433TpmsEvidenceText(evidence) {
+  if (String((evidence || {}).category || "").toLowerCase() !== "tpms") return "";
+  return [
+    rtl433TpmsPressureText(evidence),
+    rtl433TpmsTemperatureText(evidence),
+    evidence.battery_status ? `battery ${evidence.battery_status}` : "",
+    evidence.tpms_status ? `status ${evidence.tpms_status}` : "",
+    evidence.tpms_position ? `position ${evidence.tpms_position}` : "",
+    rtl433BandText(evidence.latest_frequency_mhz || (Array.isArray(evidence.frequencies_mhz) ? evidence.frequencies_mhz[0] : null)),
+    evidence.tpms_samples && evidence.tpms_samples.length ? `samples ${rtl433TpmsSamplesText(evidence.tpms_samples)}` : ""
+  ].filter(Boolean).join("; ");
+}
+
+function rtl433BandText(frequency) {
+  const value = Number(frequency);
+  return Number.isFinite(value) ? `${Math.round(value)} MHz band` : "";
+}
+
+function rtl433SignalWithoutFrequency(text) {
+  return String(text || "")
+    .replace(/^\s*[-\d.]+\s*MHz\s*,?\s*/i, "")
+    .trim();
+}
+
+function rtl433TpmsClusterReportEvidenceItems(evidence) {
+  const parts = [];
+  const findings = findingsText(evidence.findings, "", false);
+  if (findings) parts.push({label: "Findings", value: findings});
+  const sensors = valueList(evidence.sensors);
+  const identity = [
+    evidence.sensor_count ? `${evidence.sensor_count} sensor ID(s)` : "",
+    sensors.length ? compactList(sensors, 8) : ""
+  ].filter(Boolean).join("; ");
+  if (identity) parts.push({label: "Sensors", value: identity});
+  if (evidence.interpretation) parts.push({label: "Interpretation", value: evidence.interpretation});
+  if (evidence.pressure_samples && evidence.pressure_samples.length) {
+    parts.push({label: "Pressure", value: compactList(evidence.pressure_samples, 8)});
+  }
+  const rf = counterMapText(evidence.frequency_counts, " MHz");
+  if (rf) parts.push({label: "RF", value: rf});
+  return withCommonEvidenceItems(parts.length ? parts : genericEvidenceItems(evidence, ""), evidence);
+}
+
+function rtl433BurstGapText(data) {
+  const avg = numericEvidence((data || {}).burst_gap_avg_sec);
+  const min = numericEvidence((data || {}).burst_gap_min_sec);
+  const max = numericEvidence((data || {}).burst_gap_max_sec);
+  if (avg === null && min === null && max === null) return "";
+  const parts = [];
+  if (avg !== null) parts.push(`avg ${avg.toFixed(1)}s`);
+  if (min !== null && max !== null) parts.push(`range ${min.toFixed(1)}-${max.toFixed(1)}s`);
+  return `repeat gap ${parts.join(", ")}`;
+}
+
+function rtl433RecentObservationsText(observations) {
+  const rows = (Array.isArray(observations) ? observations : []).map((item) => {
+    const parts = [
+      item.time || "",
+      item.rssi_db !== undefined ? `RSSI ${item.rssi_db}` : "",
+      item.snr_db !== undefined ? `SNR ${item.snr_db}` : "",
+      item.id ? `ID ${item.id}` : "",
+      item.channel ? `channel ${item.channel}` : ""
+    ].filter(Boolean);
+    return parts.join(", ");
+  });
+  return rows.length ? compactList(rows, 8) : "";
+}
+
+function rtl433RecentObservationsSummaryText(observations) {
+  return rtl433RecentObservationsText(observations);
+}
+
+function rtl433ObservedText(evidence) {
+  const item = evidence || {};
+  const observed = timeRangeText(item.first_seen, item.last_seen) || String(item.observed || "").trim();
+  const recent = rtl433RecentObservationsSummaryText(item.recent_observations);
+  return [observed, recent ? `recently ${recent}` : ""].filter(Boolean).join("; ");
+}
+
+function rtl433InterpretationText(evidence) {
+  return String((evidence || {}).tpms_interpretation || "").trim();
+}
+
+function rtl433DayNightEvidenceText(counts) {
+  if (!counts || typeof counts !== "object" || Array.isArray(counts)) return "";
+  const day = Number(counts.day || 0);
+  const night = Number(counts.night || 0);
+  if (night && !day) return "nighttime only";
+  if (day && !night) return "daytime only";
+  if (day || night) return "seen during the day and at night";
+  return "";
+}
+
+function rtl433HourLabel(value) {
+  const hour = Number(value);
+  if (!Number.isFinite(hour)) return String(value || "");
+  const suffix = hour < 12 ? "am" : "pm";
+  const display = hour % 12 || 12;
+  return `${display}${suffix}`;
+}
+
+function rtl433ListJoin(items) {
+  const values = (items || []).filter(Boolean);
+  if (!values.length) return "";
+  if (values.length === 1) return values[0];
+  if (values.length === 2) return `${values[0]} and ${values[1]}`;
+  return `${values.slice(0, -1).join(", ")}, and ${values[values.length - 1]}`;
+}
+
+function rtl433HourEvidenceText(map, limit = 3) {
+  if (!map || typeof map !== "object" || Array.isArray(map)) return "";
+  const rows = Object.keys(map)
+    .slice(0, limit)
+    .map((key) => rtl433HourLabel(key));
+  return rows.length ? `usually active ${rtl433ListJoin(rows)}` : "";
+}
+
+function rtl433WeekdayEvidenceText(map, limit = 3) {
+  if (!map || typeof map !== "object" || Array.isArray(map)) return "";
+  const rows = Object.keys(map)
+    .slice(0, limit)
+    .map((key) => String(key));
+  return rows.length ? `seen ${rtl433ListJoin(rows)}` : "";
 }
 
 function rtl433LatestFieldsText(fields) {
@@ -8189,15 +8763,15 @@ function presencePatternText(evidence) {
 }
 
 function findingsText(findings, signal, includeSignal) {
-  if (!findings || !findings.length) return "";
-  const parts = [compactList(findings, 5)];
+  const items = valueList(findings);
+  if (!items.length) return "";
+  const parts = [compactList(items, 5)];
   if (includeSignal && signal) parts.push(signal);
   return parts.filter(Boolean).join("; ");
 }
 
 function findingsMentionStrongSignal(findings) {
-  if (!findings || !findings.length) return false;
-  return findings.some((item) => {
+  return valueList(findings).some((item) => {
     const text = String(item || "").toLowerCase();
     return text.includes("strong") && text.includes("signal");
   });
@@ -8244,7 +8818,7 @@ function timeRangeText(first, last) {
 }
 
 function compactList(values, limit) {
-  const items = Array.isArray(values) ? values.filter((item) => item !== "" && item !== null && item !== undefined) : [];
+  const items = valueList(values);
   if (!items.length) return "";
   const shown = items.slice(0, limit);
   const suffix = items.length > shown.length ? ` +${items.length - shown.length}` : "";
@@ -8342,57 +8916,65 @@ function renderCollectorHealth(statuses) {
   latestCollectorStatuses.forEach((item) => {
     updateCollectorTabStatus(item);
     if (item.key === "rtl433") updateRtl433FrequencyStateFromStatus(item);
-    const tr = document.createElement("tr");
-    [
-      item.name,
-      collectorDisplayState(item),
-      hardwareSummary(item),
-      softwareSummary(item.key),
-      item.events_this_session,
-      item.last_event || "",
-      displayWarning(item)
-    ].forEach((value) => {
-      const td = document.createElement("td");
-      td.textContent = value;
-      tr.appendChild(td);
+  });
+  collectorHealthGroups(latestCollectorStatuses).forEach((group) => {
+    if (!group.items.length) return;
+    appendTableGroupRow(tbody, group.label, group.items.length, "table-group-row collector-state-group-row");
+    group.items.forEach((item) => {
+      const tr = document.createElement("tr");
+      [
+        ["name", item.name],
+        ["state", collectorDisplayState(item)],
+        ["hardware", hardwareSummary(item)],
+        ["software", softwareSummary(item.key)],
+        ["events", item.events_this_session],
+        ["last-event", item.last_event || ""],
+        ["warning", displayWarning(item)]
+      ].forEach(([key, value]) => {
+        const td = document.createElement("td");
+        td.className = `collector-health-col-${key}`;
+        td.textContent = value;
+        tr.appendChild(td);
+      });
+      const control = document.createElement("td");
+      control.className = "collector-health-col-control";
+      const state = String(item.state || "");
+      const disabled = state === "DISABLED";
+      const running = state === "ONLINE" || state === "RETRYING" || state === "DETECTING";
+      const stopped = state === "STOPPED" || state === "OFFLINE";
+      if (!disabled && !running) {
+        const start = document.createElement("button");
+        start.textContent = "Start";
+        start.addEventListener("click", () => {
+          const payload = collectorControlPayload(item.key, "start");
+          const detail = item.key === "rtl433"
+            ? rtl433StartRequestedDetail(payload.overrides || {})
+            : "Start requested";
+          setCollectorBanner(item.key, "STARTING", detail);
+          if (item.key === "rtl433" && payload.overrides && payload.overrides.frequency_plan) {
+            updateRtl433FrequencyState({
+              clear_frequency_state: true,
+              frequency_summary: payload.overrides.frequency_plan,
+              submitted_plan: payload.overrides.frequency_plan,
+              tune_pending: true
+            });
+          }
+          socket.emit("collector_control", payload);
+        });
+        control.appendChild(start);
+      }
+      if (!disabled && !stopped) {
+        const stop = document.createElement("button");
+        stop.textContent = "Stop";
+        stop.addEventListener("click", () => {
+          setCollectorBanner(item.key, "STOPPING", "Stop requested");
+          socket.emit("collector_control", collectorControlPayload(item.key, "stop"));
+        });
+        control.appendChild(stop);
+      }
+      tr.appendChild(control);
+      tbody.appendChild(tr);
     });
-    const control = document.createElement("td");
-    const state = String(item.state || "");
-    const disabled = state === "DISABLED";
-    const running = state === "ONLINE" || state === "RETRYING" || state === "DETECTING";
-    const stopped = state === "STOPPED" || state === "OFFLINE";
-    if (!disabled && !running) {
-      const start = document.createElement("button");
-      start.textContent = "Start";
-      start.addEventListener("click", () => {
-        const payload = collectorControlPayload(item.key, "start");
-        const detail = item.key === "rtl433"
-          ? rtl433StartRequestedDetail(payload.overrides || {})
-          : "Start requested";
-        setCollectorBanner(item.key, "STARTING", detail);
-        if (item.key === "rtl433" && payload.overrides && payload.overrides.frequency_plan) {
-          updateRtl433FrequencyState({
-            clear_frequency_state: true,
-            frequency_summary: payload.overrides.frequency_plan,
-            submitted_plan: payload.overrides.frequency_plan,
-            tune_pending: true
-          });
-        }
-        socket.emit("collector_control", payload);
-      });
-      control.appendChild(start);
-    }
-    if (!disabled && !stopped) {
-      const stop = document.createElement("button");
-      stop.textContent = "Stop";
-      stop.addEventListener("click", () => {
-        setCollectorBanner(item.key, "STOPPING", "Stop requested");
-        socket.emit("collector_control", collectorControlPayload(item.key, "stop"));
-      });
-      control.appendChild(stop);
-    }
-    tr.appendChild(control);
-    tbody.appendChild(tr);
   });
   maybeRefreshEmptyDerivedViews("collector events");
 }
@@ -8401,7 +8983,6 @@ function renderCollectorTabStatusDots() {
   const statusByKey = new Map((latestCollectorStatuses || []).map((item) => [item.key, item]));
   setTabStatusDots("wifi", [statusByKey.get("wifi")]);
   setTabStatusDots("wifi_monitor", [statusByKey.get("wifi_monitor")]);
-  setTabStatusDots("rtlsdr", [statusByKey.get("rtlsdr")]);
   setTabStatusDots("rtl433", [statusByKey.get("rtl433")]);
   setTabStatusDots("adsb", [statusByKey.get("adsb")]);
   setTabStatusDots("rayhunter", [statusByKey.get("rayhunter")]);
@@ -8443,7 +9024,7 @@ function updateCollectorTabStatus(item) {
   }
   updateCollectorActionButtons(item);
   if (hasActiveTransientCollectorBanner(item.key)) return;
-  setCollectorBanner(item.key, visualState, collectorStatusDetail(item));
+  setCollectorBanner(item.key, visualState, collectorStatusDetailForBanner(item));
 }
 
 function collectorDisplayState(item) {
@@ -8458,6 +9039,14 @@ function updateCollectorActionButtons(item) {
   const stop = document.getElementById("bt-classic-stop");
   if (start) start.style.display = running ? "none" : "";
   if (stop) stop.style.display = running ? "" : "none";
+}
+
+function collectorStatusDetailForBanner(item) {
+  const detail = collectorStatusDetail(item);
+  if ((item || {}).key === "ble" && rows.bleScanDetail) {
+    return [detail, rows.bleScanDetail].filter(Boolean).join(" | ");
+  }
+  return detail;
 }
 
 function collectorStatusDetail(item) {
@@ -8704,12 +9293,6 @@ function softwareSummary(key) {
     return [
       executableStatus("iw", detected.iw),
       packageStatus("scapy", detected.scapy)
-    ].filter(Boolean).join(", ");
-  }
-  if (key === "rtlsdr") {
-    return [
-      executableStatus("rtl_power", detected.rtl_power),
-      executableStatus("rtl_test", detected.rtl_test)
     ].filter(Boolean).join(", ");
   }
   if (key === "rtl433") {

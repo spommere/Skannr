@@ -6,11 +6,18 @@ source_group: bluetooth
 source_group_label: Bluetooth
 acquisition_mode: scan
 enabled: true
+
+# Classic Bluetooth inquiry is slower/noisier than BLE advertisement scanning,
+# so this collector is enabled but not auto-started by default.
 auto_start: false
 validation_timeout_sec: 10
-# Optional ordered list. When empty, Skannr ranks available BlueZ adapters and
-# tends to choose external USB adapters before built-in radios.
+
+# Adapter selection. Empty means Skannr ranks available BlueZ adapters and tends
+# to choose external USB adapters before built-in radios.
 adapters: []
+
+# scan_timeout_sec is the length of each inquiry. scan_interval_sec is the delay
+# between completed inquiries. device_timeout_sec controls live-row aging.
 scan_interval_sec: 30
 scan_timeout_sec: 20
 device_timeout_sec: 180

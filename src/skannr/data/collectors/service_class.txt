@@ -1,0 +1,68 @@
+0x1000	Service Discovery Server
+0x1001	Browse Group Descriptor
+0x1101	Serial Port
+0x1102	LAN Access Using PPP
+0x1103	Dialup Networking
+0x1104	IrMC Sync
+0x1105	OBEX Object Push
+0x1106	OBEX File Transfer
+0x1107	IrMC Sync Command
+0x1108	Headset
+0x1109	Cordless Telephony
+0x110A	Audio Source
+0x110B	Audio Sink
+0x110C	A/V Remote Control Target
+0x110D	Advanced Audio Distribution
+0x110E	A/V Remote Control
+0x110F	A/V Remote Control Controller
+0x1110	Intercom
+0x1111	Fax
+0x1112	Headset - Audio Gateway (AG)
+0x1113	WAP
+0x1114	WAP Client
+0x1115	PANU
+0x1116	NAP
+0x1117	GN
+0x1118	Direct Printing
+0x1119	Reference Printing
+0x111A	Basic Imaging Profile
+0x111B	Imaging Responder
+0x111C	Imaging Automatic Archive
+0x111D	Imaging Referenced Objects
+0x111E	Handsfree
+0x111F	Handsfree Audio Gateway
+0x1120	Direct Printing Reference
+0x1121	Reflected UI
+0x1122	Basic Printing
+0x1123	Printing Status
+0x1124	Human Interface Device
+0x1125	Hardcopy Cable Replacement
+0x1126	HCR Print
+0x1127	HCR Scan
+0x1128	Common ISDN Access
+0x112D	SIM Access
+0x112E	Phonebook Access - PCE
+0x112F	Phonebook Access - PSE
+0x1130	Phonebook Access
+0x1131	Headset - HS
+0x1132	Message Access Server
+0x1133	Message Notification Server
+0x1134	Message Access Profile
+0x1135	GNSS
+0x1136	GNSS Server
+0x1200	PnP Information
+0x1201	Generic Networking
+0x1202	Generic File Transfer
+0x1203	Generic Audio
+0x1204	Generic Telephony
+0x1205	UPNP Service
+0x1206	UPNP IP Service
+0x1300	ESDP UPNP IP PAN
+0x1301	ESDP UPNP IP LAP
+0x1302	ESDP UPNP L2CAP
+0x1303	Video Source
+0x1304	Video Sink
+0x1305	Video Distribution
+0x1400	HDP
+0x1401	HDP Source
+0x1402	HDP Sink

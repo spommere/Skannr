@@ -1,5 +1,7 @@
 """Shared stable-subject policy for low-identity randomized devices."""
 
+import re
+
 
 def list_values(value):
     """Return a compact list for scalar/list evidence fields."""
@@ -16,6 +18,39 @@ def normalized_mac(value):
     if len(compact) != 12:
         return ""
     return ":".join(compact[index : index + 2] for index in range(0, 12, 2)).lower()
+
+
+def bluetooth_property_like_name(value):
+    """Return True for BlueZ property text that should never be identity."""
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return False
+    lowered = text.lower()
+    prefixes = (
+        "rssi:",
+        "uuids:",
+        "uuid:",
+        "txpower:",
+        "tx power:",
+        "manufacturerdata",
+        "manufacturer data:",
+        "servicedata",
+        "service data:",
+        "appearance:",
+        "class:",
+        "icon:",
+        "alias:",
+        "name:",
+        "legacypairing:",
+        "paired:",
+        "bonded:",
+        "trusted:",
+        "blocked:",
+        "connected:",
+    )
+    if lowered.startswith(prefixes):
+        return True
+    return lowered.startswith("manufacturer ") and ":" in lowered
 
 
 def locally_administered_mac(value):
@@ -61,14 +96,81 @@ def meaningful_bluetooth_names(record):
             continue
         if text.lower().replace("-", ":") == mac:
             continue
+        if bluetooth_property_like_name(text):
+            continue
         if generated_bluetooth_group_label(text):
             continue
         useful.append(text)
     return sorted(set(useful))
 
 
+KNOWN_BLUETOOTH_MANUFACTURER_CODES = {
+    "0x004c": "Apple",
+}
+
+
+_BLUETOOTH_MANUFACTURER_CODE_RE = re.compile(r"0x[0-9a-f]{4,}", re.IGNORECASE)
+
+
+def bluetooth_manufacturer_code(value):
+    """Extract a normalized Bluetooth manufacturer code like 0x004c."""
+    if isinstance(value, dict):
+        candidates = [
+            value.get("manufacturer_name"),
+            value.get("manufacturer"),
+            value.get("vendor_name"),
+        ]
+    else:
+        candidates = [value]
+    for candidate in candidates:
+        match = _BLUETOOTH_MANUFACTURER_CODE_RE.search(str(candidate or ""))
+        if match:
+            return match.group(0).lower()
+    return ""
+
+
+def bluetooth_manufacturer_code_only(value):
+    """Return True when a manufacturer label is only a numeric company id."""
+    text = str(value or "").strip()
+    return bool(text) and bool(_BLUETOOTH_MANUFACTURER_CODE_RE.fullmatch(text))
+
+
+def cleaned_bluetooth_manufacturer_text(value):
+    """Return manufacturer text with trailing company-id codes removed."""
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return ""
+    text = re.sub(r"\s*\(0x[0-9a-f]{4,}\)\s*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*\[0x[0-9a-f]{4,}\]\s*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+0x[0-9a-f]{4,}\s*$", "", text, flags=re.IGNORECASE)
+    return text.strip(' ,;-')
+
+
+def bluetooth_visible_manufacturer_label(value):
+    """Return a human-facing Bluetooth manufacturer label or empty string."""
+    if isinstance(value, dict):
+        candidates = [
+            value.get("manufacturer_name"),
+            value.get("vendor_name"),
+            value.get("manufacturer"),
+        ]
+    else:
+        candidates = [value]
+    for candidate in candidates:
+        text = cleaned_bluetooth_manufacturer_text(candidate)
+        if text and not bluetooth_manufacturer_code_only(text):
+            return text
+    code = bluetooth_manufacturer_code(value)
+    if code:
+        return KNOWN_BLUETOOTH_MANUFACTURER_CODES.get(code, "")
+    return ""
+
+
 def bluetooth_manufacturer_label(record):
     """Return the best available Bluetooth manufacturer label."""
+    visible = bluetooth_visible_manufacturer_label(record)
+    if visible:
+        return visible
     return str(
         (record or {}).get("manufacturer_name")
         or (record or {}).get("manufacturer")
@@ -160,8 +262,9 @@ def bluetooth_group_label(record):
         return "Apple Find My accessory randomized devices"
     if kind == "name":
         return "{} randomized Bluetooth devices".format(label)
-    if label and label != "Unknown":
-        return "{} randomized Bluetooth devices".format(label)
+    display = bluetooth_visible_manufacturer_label(record) or bluetooth_visible_manufacturer_label(label)
+    if display:
+        return "{} randomized Bluetooth devices".format(display)
     return "Randomized Bluetooth devices"
 
 

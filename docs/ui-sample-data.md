@@ -12,7 +12,6 @@ The source logs contained representative events for these Skannr collectors and 
 | Wi-Fi monitor | probe, association, deauthentication/disassociation style client observations |
 | Bluetooth LE | advertisements, manufacturer/service identity, Apple manufacturer-only and Find My accessory buckets |
 | LAN | ARP/neighbor/host observations, identified hosts, low-identity private MAC grouping |
-| RTL-SDR | tuned frequency activity and signal observations |
 | RTL-433 | decoded device events, tuned frequency, RSSI/SNR/noise, frequency-plan metadata |
 | ADS-B | aircraft subjects and track summaries |
 | APRS-IS | station subjects and packet summaries |
@@ -30,7 +29,6 @@ These rows are intended for screenshots or docs that explain the live collector 
 | Bluetooth LE | 2026-06-12 09:14:15 | `Apple Find My accessory group` | device group | RSSI -68 dBm | 12 private addresses with Find My identity fingerprint |
 | Bluetooth LE | 2026-06-12 09:14:18 | `Example Beacon 7` | device | RSSI -59 dBm | services `180F`, manufacturer Example Labs, annotation `warehouse sensor` |
 | LAN | 2026-06-12 09:14:22 | `sample-host-4` | host | `192.0.2.44` | MAC `02:11:22:33:44:04`, mDNS name `sample-host-4.local` |
-| RTL-SDR | 2026-06-12 09:14:30 | `162.550 MHz` | signal | tuned 162.550 MHz; RSSI -32 dB | plan `162.5-162.6:25:10`, collector `rtlsdr-0` |
 | RTL-433 | 2026-06-12 09:14:35 | `Springfield-SoilId 1234` | device | tuned 915.000 MHz; RSSI -11.2 dB; SNR 10.7 dB | moisture 38%, temperature 21.4 C, protocol 142 |
 | ADS-B | 2026-06-12 09:14:41 | `ABC123` | aircraft | altitude 7,800 ft; speed 214 kt | callsign `SKN123`, distance 12.4 km, heading 281 deg |
 | APRS-IS | 2026-06-12 09:14:50 | `N0CALL-7` | station | packet path `WIDE1-1,WIDE2-1` | comment `Example mobile station`, distance 4.8 km |
@@ -71,8 +69,8 @@ Subject History should show durable subjects. For collectors that produce many r
 
 Reports are the higher-level intelligence product. They should be regenerated from Subject History and Insights, not independently re-parse collector-specific special cases. The current UI renders cross-subject patterns and subject reports in separate sections with the same columns. The `Report` cell shows source on the first line and report title on the next line. The `Subject` cell shows the hyperlinked subject on the first line and the summary below it.
 
-| Score | Confidence | Reasons | Report | Subject | Evidence | Last Seen |
-| ---: | --- | --- | --- | --- | --- | --- |
+| Subject | Report | Score | Confidence | Reasons | Evidence | Last Seen |
+| --- | --- | ---: | --- | --- | --- | --- |
 | 90 | High | randomized, population | Wi-Fi/BLE<br>Cross-subject pattern | `Randomized nearby devices`<br>Wi-Fi and BLE both show high randomized-device activity; grouped identities prevent noisy per-MAC rows. | Pattern: many private Wi-Fi and BLE identities; Observed: 4934 Wi-Fi clients, 312 Bluetooth devices | 2026-06-12 09:14:15 |
 | 82 | High | identity, private-address | Bluetooth<br>Bluetooth identity | `Apple Find My accessory group`<br>Find My identity was observed across multiple private addresses and should be treated separately from generic Apple advertisements. | Identity: Apple Find My accessory; Activity: 19 private addresses; Signal: -82 to -55 dBm | 2026-06-12 09:14:15 |
 | 76 | Medium | recurring, rf | RTL-433<br>RF device | `Springfield-SoilId 1234`<br>Soil sensor decoded on tuned 915.000 MHz with stable model/id fields. | RF: tuned 915.000 MHz, RSSI -11.2 dB, SNR 10.7 dB; Decoded: moisture 38%, temperature 21.4 C | 2026-06-12 09:14:35 |

@@ -7,14 +7,19 @@ enabled: false
 
 # Personal Weather Station (PWS) uses Ambient Weather's current device API.
 # Store real keys only in local config/collectors/pws.yaml on each Skannr host.
+
+# API polling controls. poll_interval_sec is the normal Ambient refresh cadence,
+# request_timeout_sec is the HTTP timeout, and user_agent is sent with requests.
 poll_interval_sec: 60
 request_timeout_sec: 15
 user_agent: "Skannr PWS collector"
 
-# Optional stable station label shown in Skannr, for example GW0154.
+# Optional stable station label shown in Skannr, for example GW0154. Leave blank
+# to use identifiers returned by the API.
 station_id: ""
 
-# Optional filters if the Ambient account returns multiple devices.
+# Optional filters if the Ambient account returns multiple devices. Uncomment one
+# or both in local config to pin this collector to a specific station.
 # mac_address: ""
 # device_name: ""
 

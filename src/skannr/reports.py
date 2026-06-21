@@ -25,6 +25,10 @@ from .collectors.swpc import (
     xray_class_to_flux,
 )
 from .collectors.usgs import clean_usgs_data
+from .identity_policy import (
+    bluetooth_manufacturer_label,
+    bluetooth_visible_manufacturer_label,
+)
 from .log_utils import (
     format_epoch,
     now_epoch,
@@ -593,6 +597,10 @@ class ReportsBuilder:
             findings.append("Weather station in configured area")
         if position_count:
             findings.append("Position in configured area")
+            if data.get("trip_rollup") == "pass-through path":
+                findings.append("Pass-through APRS path")
+            elif data.get("trip_rollup") == "repeated local presence":
+                findings.append("Repeated local APRS presence")
             if (
                 bool(data.get("movement_detected"))
                 or movement_span >= float(self.config["aprs_mobile_min_distance_km"])
@@ -669,6 +677,8 @@ class ReportsBuilder:
         movement = self.aprsis_movement_text(data)
         if movement:
             parts.append(movement)
+        if data.get("trip_rollup"):
+            parts.append(data.get("trip_rollup"))
         motion = self.aprsis_motion_text(data)
         if motion:
             parts.append(motion)
@@ -921,6 +931,10 @@ class ReportsBuilder:
             "first_longitude": data.get("first_longitude"),
             "last_latitude": data.get("last_latitude"),
             "last_longitude": data.get("last_longitude"),
+            "first_position_at": data.get("first_position_at") or "",
+            "first_position_epoch": data.get("first_position_epoch"),
+            "last_position_at": data.get("last_position_at") or "",
+            "last_position_epoch": data.get("last_position_epoch"),
             "latitude": data.get("latitude"),
             "longitude": data.get("longitude"),
             "position_span_km": data.get("position_span_km"),
@@ -929,6 +943,11 @@ class ReportsBuilder:
             "speed_kmh": data.get("speed_kmh"),
             "max_speed_kmh": data.get("max_speed_kmh"),
             "course_deg": data.get("course_deg"),
+            "trip_rollup": data.get("trip_rollup") or "",
+            "position_samples": data.get("position_samples") or [],
+            "packet_samples": data.get("packet_samples") or [],
+            "payload": data.get("payload") or "",
+            "raw": data.get("raw") or "",
             "weather_summary": self.aprsis_weather_summary_display(
                 data.get("weather_summary")
             ),
@@ -1538,6 +1557,22 @@ class ReportsBuilder:
                 "next_precip_probability": data.get("next_precip_probability"),
                 "next_precip_forecast": data.get("next_precip_forecast") or "",
                 "max_wind_mph": data.get("max_wind_mph"),
+                "forecast_delta_findings": data.get("forecast_delta_findings") or [],
+                "forecast_delta_summary": data.get("forecast_delta_summary") or "",
+                "forecast_change_direction": data.get("forecast_change_direction") or "",
+                "previous_forecast_generated": data.get("previous_forecast_generated") or "",
+                "previous_current_temperature_f": data.get("previous_current_temperature_f"),
+                "previous_temperature_min_f": data.get("previous_temperature_min_f"),
+                "previous_temperature_max_f": data.get("previous_temperature_max_f"),
+                "previous_max_precip_probability": data.get("previous_max_precip_probability"),
+                "previous_next_precip_probability": data.get("previous_next_precip_probability"),
+                "previous_max_wind_mph": data.get("previous_max_wind_mph"),
+                "current_temperature_delta_f": data.get("current_temperature_delta_f"),
+                "temperature_min_delta_f": data.get("temperature_min_delta_f"),
+                "temperature_max_delta_f": data.get("temperature_max_delta_f"),
+                "max_precip_probability_delta": data.get("max_precip_probability_delta"),
+                "next_precip_probability_delta": data.get("next_precip_probability_delta"),
+                "max_wind_delta_mph": data.get("max_wind_delta_mph"),
                 "first_period_start": data.get("first_period_start") or "",
                 "last_period_end": data.get("last_period_end") or "",
                 "update_count": data.get("update_count") or 0,
@@ -1579,6 +1614,12 @@ class ReportsBuilder:
             findings.append("Point forecast context")
             if data.get("precip_likely_soon"):
                 findings.append("Precipitation likely soon")
+            for finding in data.get("forecast_delta_findings") or []:
+                findings.append(finding)
+            if data.get("forecast_change_direction") == "deteriorating":
+                findings.append("Forecast deterioration")
+            elif data.get("forecast_change_direction") == "improving":
+                findings.append("Forecast improvement")
             max_wind = self.to_number(data.get("max_wind_mph"))
             if max_wind is not None and max_wind >= 25:
                 findings.append("Breezy forecast")
@@ -1735,6 +1776,10 @@ class ReportsBuilder:
             score += 10
         if "Breezy forecast" in findings:
             score += 5
+        if "Forecast deterioration" in findings:
+            score += 10
+        if any(str(item or "").startswith("Forecast hazard text added") for item in findings):
+            score += 8
         if str(data.get("urgency") or "").lower() == "immediate":
             score += 15
         return self.score_with_recency(score, last_seen_epoch, cap=98)
@@ -1766,6 +1811,12 @@ class ReportsBuilder:
             and data.get("alert_kind") == "tsunami"
             and "message {}".format(data.get("message_number")),
             data.get("headline")
+            if data.get("alert_kind") == "forecast"
+            else "",
+            data.get("forecast_delta_summary")
+            if data.get("alert_kind") == "forecast"
+            else "",
+            data.get("forecast_change_direction")
             if data.get("alert_kind") == "forecast"
             else "",
             data.get("headline")
@@ -3209,7 +3260,16 @@ class ReportsBuilder:
             for event in events or []
             if (event or {}).get("type") == "adsb_aircraft_summary"
         ]
+        collector_entries = [
+            (clean_adsb_data((event or {}).get("data") or {}), event)
+            for event in events or []
+            if (event or {}).get("type") == "adsb_collector_summary"
+        ]
         reports = []
+        for data, event in collector_entries:
+            report = self.adsb_collector_report(data, event, timestamp)
+            if report:
+                reports.append(report)
         if aircraft:
             positioned = sum(1 for item in aircraft if item.get("position_count"))
             low_nearby = [item for item in aircraft if self.adsb_is_low_nearby(item)]
@@ -3280,6 +3340,10 @@ class ReportsBuilder:
             path_span = number_or_none(data.get("path_span_km"))
             if path_span and path_span >= 1:
                 findings.append("Moved through area")
+            if data.get("session_count") and self.to_int(data.get("session_count")) > 1:
+                findings.append("Multiple local passes")
+            if data.get("approach_context"):
+                findings.append(data.get("approach_context"))
             reports.append(
                 self.report(
                     timestamp,
@@ -3309,6 +3373,14 @@ class ReportsBuilder:
                         "path_span_km": data.get("path_span_km"),
                         "seen_count": seen,
                         "position_count": data.get("position_count"),
+                        "session_count": data.get("session_count"),
+                        "pass_count": data.get("pass_count"),
+                        "session_spans": data.get("session_spans") or [],
+                        "route_samples": data.get("route_samples") or [],
+                        "approach_context": data.get("approach_context") or "",
+                        "approach_distance_km": data.get("approach_distance_km"),
+                        "approach_altitude_ft": data.get("approach_altitude_ft"),
+                        "approach_vertical_rate_fpm": data.get("approach_vertical_rate_fpm"),
                         "observed": self.adsb_observed_text(data),
                         "last_seen": data.get("last_seen_epoch"),
                         "findings": findings,
@@ -3321,6 +3393,39 @@ class ReportsBuilder:
                 )
             )
         return reports
+
+    def adsb_collector_report(self, data, event, timestamp):
+        """Return ADS-B decoder health guidance when the collector is not simply online."""
+        state = str(data.get("collector_state") or "").upper()
+        if state == "ONLINE":
+            return None
+        last_seen = data.get("last_seen") or event.get("timestamp") or ""
+        last_seen_epoch = self.to_number(data.get("last_seen_epoch")) or record_time_epoch(event, "timestamp")
+        reason = data.get("reason") or data.get("decoder_health") or "ADS-B decoder is not online."
+        evidence = self.clean_evidence({
+            "findings": ["ADS-B decoder health issue"],
+            "collector_state": state,
+            "reason": reason,
+            "decoder": data.get("decoder") or "",
+            "source": data.get("source") or "",
+            "device_index": data.get("device_index"),
+            "decoder_health": data.get("decoder_health") or "",
+            "rtlsdr_scheduling": data.get("rtlsdr_scheduling") or "",
+            "last_seen": last_seen,
+            "last_seen_epoch": last_seen_epoch,
+        })
+        return self.report(
+            timestamp,
+            "warning",
+            "adsb",
+            "adsb_decoder_health",
+            "ADS-B decoder health",
+            reason,
+            evidence,
+            self.score_with_recency(70, last_seen_epoch),
+            last_seen,
+            subject="ADS-B decoder",
+        )
 
     def adsb_is_low_nearby(self, data):
         """Return True when an aircraft is low and near the observer."""
@@ -3354,6 +3459,10 @@ class ReportsBuilder:
             parts.append("path span {:.1f} km".format(number_or_none(data.get("path_span_km"))))
         if data.get("seen_count"):
             parts.append("{} update(s)".format(data.get("seen_count")))
+        if data.get("session_count"):
+            parts.append("{} local pass(es)".format(data.get("session_count")))
+        if data.get("approach_context"):
+            parts.append(data.get("approach_context"))
         return "; ".join(parts) + "."
 
     def adsb_observed_text(self, data):
@@ -3410,6 +3519,9 @@ class ReportsBuilder:
                     report_scope="population",
                 )
             )
+            cluster_report = self.rtl433_tpms_cluster_report(devices, timestamp)
+            if cluster_report:
+                reports.append(cluster_report)
         min_events = int(self.config.get("rtl433_report_min_events", 2))
         for data in devices:
             count = self.to_int(data.get("event_count")) or 0
@@ -3421,6 +3533,16 @@ class ReportsBuilder:
                 findings.append("{} decode event(s)".format(count))
             if self.to_int(data.get("burst_count")):
                 findings.append("Clustered transmissions")
+            if category == "tpms":
+                if data.get("tpms_interpretation"):
+                    findings.append(data.get("tpms_interpretation"))
+                if count >= 2:
+                    findings.append("Repeated TPMS sensor ID")
+            day_night = data.get("day_night_counts") or {}
+            if day_night.get("night") and not day_night.get("day"):
+                findings.append("Night-only decodes")
+            elif day_night.get("night") and day_night.get("day"):
+                findings.append("Day/night decodes")
             reports.append(
                 self.report(
                     timestamp,
@@ -3439,12 +3561,39 @@ class ReportsBuilder:
                         "events": count,
                         "bursts": data.get("burst_count") or 0,
                         "frequencies_mhz": data.get("frequencies_mhz") or [],
+                        "frequency_counts": data.get("frequency_counts") or {},
                         "latest_signal": self.rtl433_signal_text(data),
                         "observed": self.observed_text(data),
+                        "first_seen": data.get("first_seen") or "",
+                        "first_seen_epoch": data.get("first_seen_epoch"),
+                        "last_seen": data.get("last_seen") or "",
+                        "last_seen_epoch": data.get("last_seen_epoch"),
                         "sample_times": data.get("sample_times") or [],
+                        "hour_histogram": data.get("hour_histogram") or {},
+                        "weekday_histogram": data.get("weekday_histogram") or {},
+                        "day_night_counts": data.get("day_night_counts") or {},
+                        "burst_gaps_sec": data.get("burst_gaps_sec") or [],
+                        "burst_gap_min_sec": data.get("burst_gap_min_sec"),
+                        "burst_gap_max_sec": data.get("burst_gap_max_sec"),
+                        "burst_gap_avg_sec": data.get("burst_gap_avg_sec"),
+                        "recent_observations": data.get("recent_observations") or [],
+                        "pressure_psi": data.get("pressure_psi"),
+                        "pressure_psi_min": data.get("pressure_psi_min"),
+                        "pressure_psi_max": data.get("pressure_psi_max"),
+                        "pressure_kpa": data.get("pressure_kpa"),
+                        "temperature_f": data.get("temperature_f"),
+                        "temperature_f_min": data.get("temperature_f_min"),
+                        "temperature_f_max": data.get("temperature_f_max"),
+                        "temperature_c": data.get("temperature_c"),
+                        "battery_status": data.get("battery_status") or "",
+                        "tpms_status": data.get("tpms_status") or "",
+                        "tpms_position": data.get("tpms_position") or "",
+                        "tpms_interpretation": data.get("tpms_interpretation") or "",
+                        "tpms_samples": data.get("tpms_samples") or [],
+                        "tpms_statuses": data.get("tpms_statuses") or [],
+                        "tpms_battery_statuses": data.get("tpms_battery_statuses") or [],
                         "latest_fields": data.get("latest_raw") or {},
                         "findings": findings,
-                        "last_seen": data.get("last_seen_epoch"),
                     },
                     66 if category in ("tpms", "security") else 28,
                     data.get("last_seen") or "",
@@ -3452,6 +3601,68 @@ class ReportsBuilder:
                 )
             )
         return reports
+
+    def rtl433_tpms_cluster_report(self, devices, timestamp):
+        """Return a conservative TPMS cluster report for nearby pass-through review."""
+        tpms = [item for item in devices or [] if (item.get("category") or "") == "tpms"]
+        if len(tpms) < 2:
+            return None
+        recent = [
+            item for item in tpms
+            if number_or_none(item.get("last_seen_epoch")) is not None
+        ]
+        if len(recent) < 2:
+            return None
+        recent.sort(key=lambda item: number_or_none(item.get("last_seen_epoch")) or 0, reverse=True)
+        latest = number_or_none(recent[0].get("last_seen_epoch")) or 0
+        clustered = [
+            item for item in recent
+            if latest - (number_or_none(item.get("last_seen_epoch")) or 0) <= 600
+        ]
+        if len(clustered) < 2:
+            return None
+        sensors = [self.rtl433_label(item) for item in clustered[:8]]
+        summary = "{} TPMS sensor IDs seen within 10 minutes; possible vehicle/pass-through cluster.".format(len(clustered))
+        evidence = self.clean_evidence({
+            "findings": ["Short-window TPMS cluster", "Possible vehicle/pass-through activity"],
+            "sensor_count": len(clustered),
+            "sensors": sensors,
+            "pressure_samples": [
+                "{} {} psi".format(self.rtl433_label(item), item.get("pressure_psi"))
+                for item in clustered[:8]
+                if item.get("pressure_psi") not in (None, "")
+            ],
+            "frequency_counts": self.rtl433_merge_counter_maps(
+                item.get("frequency_counts") or {} for item in clustered
+            ),
+            "first_seen": min(number_or_none(item.get("last_seen_epoch")) or latest for item in clustered),
+            "last_seen": latest,
+            "interpretation": "possible vehicle/pass-through TPMS cluster",
+        })
+        return self.report(
+            timestamp,
+            "warning",
+            "rtl433",
+            "rtl433_tpms_cluster",
+            "TPMS vehicle/pass-through cluster",
+            summary,
+            evidence,
+            min(82, 60 + len(clustered) * 4),
+            clustered[0].get("last_seen") or "",
+            subject="TPMS cluster",
+            report_scope="population",
+        )
+
+    def rtl433_merge_counter_maps(self, maps):
+        """Merge string counter maps for compact cluster evidence."""
+        counts = Counter()
+        for mapping in maps or []:
+            for key, value in (mapping or {}).items():
+                try:
+                    counts[str(key)] += int(value)
+                except (TypeError, ValueError):
+                    continue
+        return dict(counts.most_common(8))
 
     def rtl433_label(self, data):
         """Return compact rtl_433 report subject label."""
@@ -3477,10 +3688,22 @@ class ReportsBuilder:
         parts = [self.rtl433_label(data)]
         category = data.get("category") or "device"
         parts.append(self.rtl433_category_label(category))
+        interpretation = data.get("tpms_interpretation") or ""
+        if interpretation:
+            parts.append(interpretation)
+        pattern = self.rtl433_pattern_text(data)
+        if pattern:
+            parts.append(pattern)
         if data.get("event_count"):
             parts.append("{} event(s)".format(data.get("event_count")))
         if data.get("burst_count"):
             parts.append("{} clustered repeat(s)".format(data.get("burst_count")))
+        gap = self.rtl433_repeat_gap_text(data)
+        if gap:
+            parts.append(gap)
+        tpms = self.rtl433_tpms_text(data, include_interpretation=False)
+        if tpms:
+            parts.append(tpms)
         signal = self.rtl433_signal_text(data)
         if signal:
             parts.append(signal)
@@ -3491,16 +3714,124 @@ class ReportsBuilder:
             parts.append("state not inferred unless decoded payload provides it")
         return "; ".join(parts) + "."
 
+
+    def rtl433_tpms_text(self, data, include_interpretation=True):
+        """Return compact TPMS pressure/status text when available."""
+        if (data.get("category") or "") != "tpms":
+            return ""
+        parts = []
+        if data.get("pressure_psi") not in (None, ""):
+            parts.append("pressure {} psi".format(data.get("pressure_psi")))
+        elif data.get("pressure_kpa") not in (None, ""):
+            parts.append("pressure {} kPa".format(data.get("pressure_kpa")))
+        if data.get("temperature_f") not in (None, ""):
+            parts.append("temp {} F".format(data.get("temperature_f")))
+        if data.get("battery_status"):
+            parts.append("battery {}".format(data.get("battery_status")))
+        if data.get("tpms_status"):
+            parts.append("status {}".format(data.get("tpms_status")))
+        if include_interpretation and data.get("tpms_interpretation"):
+            parts.append(data.get("tpms_interpretation"))
+        return "; ".join(parts)
+
+    def rtl433_pattern_text(self, data):
+        """Return compact rtl_433 presence-pattern text."""
+        parts = []
+        weekday_histogram = data.get("weekday_histogram") or {}
+        if weekday_histogram:
+            summary = self.rtl433_weekday_summary(weekday_histogram, limit=3)
+            if summary:
+                parts.append(summary)
+        hour_histogram = data.get("hour_histogram") or {}
+        if hour_histogram:
+            summary = self.rtl433_hour_summary(hour_histogram, limit=3)
+            if summary:
+                parts.append(summary)
+        day_night = data.get("day_night_counts") or {}
+        if day_night:
+            summary = self.rtl433_day_night_summary(day_night)
+            if summary:
+                parts.append(summary)
+        return "; ".join(parts)
+
+    def rtl433_day_night_summary(self, counts):
+        """Return human-readable day/night activity summary."""
+        day = int(counts.get("day") or 0)
+        night = int(counts.get("night") or 0)
+        if night and not day:
+            return "nighttime only"
+        if day and not night:
+            return "daytime only"
+        if day or night:
+            return "seen during the day and at night"
+        return ""
+
+    def rtl433_hour_summary(self, values, limit=3):
+        """Return a plain-language summary of the most common hours."""
+        rows = []
+        for key, _value in list(values.items())[:limit]:
+            try:
+                hour = int(key)
+                label = self.rtl433_hour_label(hour)
+            except Exception:
+                label = str(key)
+            rows.append(label)
+        if not rows:
+            return ""
+        return "usually active {}".format(self.rtl433_join_list(rows))
+
+    def rtl433_weekday_summary(self, values, limit=3):
+        """Return a plain-language summary of the active weekdays."""
+        rows = []
+        for key, _value in list(values.items())[:limit]:
+            rows.append(str(key))
+        if not rows:
+            return ""
+        return "seen {}".format(self.rtl433_join_list(rows))
+
+    def rtl433_hour_label(self, hour):
+        """Return 12-hour clock labels for report text."""
+        suffix = "am" if hour < 12 else "pm"
+        display = hour % 12 or 12
+        return "{}{}".format(display, suffix)
+
+    def rtl433_repeat_gap_text(self, data):
+        """Return repeat-gap wording for the subject summary."""
+        value = data.get("burst_gap_avg_sec")
+        if value in (None, ""):
+            return ""
+        return "avg repeat gap {}s".format(value)
+
+    def rtl433_join_list(self, values):
+        """Join a short list in plain English."""
+        items = [str(value) for value in values if value]
+        if not items:
+            return ""
+        if len(items) == 1:
+            return items[0]
+        if len(items) == 2:
+            return "{} and {}".format(items[0], items[1])
+        return "{}, and {}".format(", ".join(items[:-1]), items[-1])
+
     def rtl433_signal_text(self, data):
         """Return compact latest rtl_433 RF signal text."""
         parts = []
-        if data.get("latest_frequency_mhz") not in (None, ""):
-            parts.append("{} MHz".format(data.get("latest_frequency_mhz")))
+        band = self.rtl433_band_label(data.get("latest_frequency_mhz"))
+        if band:
+            parts.append(band)
         if data.get("latest_rssi_db") not in (None, ""):
             parts.append("RSSI {}".format(data.get("latest_rssi_db")))
         if data.get("latest_snr_db") not in (None, ""):
             parts.append("SNR {}".format(data.get("latest_snr_db")))
         return ", ".join(parts)
+
+    def rtl433_band_label(self, frequency):
+        """Return a rounded reporting band label for rtl_433 decodes."""
+        try:
+            value = float(frequency)
+        except Exception:
+            return ""
+        return "{} MHz band".format(int(round(value)))
 
     def observed_text(self, data):
         """Return a retained first/latest observation range."""
@@ -4037,12 +4368,7 @@ class ReportsBuilder:
             [float(session.get("duration_sec") or 0) for session in sessions] or [0]
         )
         signal_max = self.to_number(device.get("signal_max"))
-        manufacturer = (
-            device.get("manufacturer_name")
-            or device.get("manufacturer")
-            or device.get("vendor_name")
-            or ""
-        )
+        manufacturer = bluetooth_manufacturer_label(device)
         return {
             "device": device,
             "mac": mac,
@@ -4150,7 +4476,13 @@ class ReportsBuilder:
         """Return a concise label for a BLE private-address fingerprint."""
         bucket, names, services = cluster_key
         bucket_kind, bucket_label = bucket
-        parts = [bucket_label or "Unknown"]
+        if bucket_kind == "findmy":
+            base = bucket_label or "Apple Find My accessory"
+        elif bucket_kind == "manufacturer":
+            base = bluetooth_visible_manufacturer_label(bucket_label) or "Unknown manufacturer"
+        else:
+            base = bucket_label or "Unknown"
+        parts = [base]
         if names:
             parts.append("/".join(names))
         if services and bucket_kind != "findmy":
@@ -4177,16 +4509,18 @@ class ReportsBuilder:
         ]
         if names:
             parts.append(names[0])
-        if mac:
-            parts.append(mac)
-        manufacturer = (
-            device.get("manufacturer_name")
-            or device.get("manufacturer")
-            or device.get("vendor_name")
-            or ""
-        )
-        if manufacturer:
+        manufacturer = bluetooth_visible_manufacturer_label(device)
+        if parts:
+            if mac:
+                parts.append(mac)
+            if manufacturer:
+                parts.append(manufacturer)
+        elif manufacturer:
             parts.append(manufacturer)
+            if mac:
+                parts.append(mac)
+        elif mac:
+            parts.append(mac)
         return self.annotated_subject(device, " - ".join(parts))
 
     def bluetooth_cluster_subject(self, label, count):
@@ -5520,7 +5854,7 @@ class ReportsBuilder:
         return datetime.fromtimestamp(epoch).strftime("%a")
 
     def bluetooth_label(self, device, mac):
-        """Prefer a known name, then manufacturer, then MAC."""
+        """Prefer a known name, then a visible manufacturer, then MAC."""
         names = [
             name
             for name in (device.get("names") or [])
@@ -5528,11 +5862,7 @@ class ReportsBuilder:
         ]
         if names:
             return "{} ({})".format(", ".join(names[:2]), mac)
-        manufacturer = (
-            device.get("manufacturer_name")
-            or device.get("manufacturer")
-            or device.get("vendor_name")
-        )
+        manufacturer = bluetooth_visible_manufacturer_label(device)
         if manufacturer:
             return "{} ({})".format(manufacturer, mac)
         return mac

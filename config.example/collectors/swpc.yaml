@@ -8,16 +8,24 @@ enabled: false
 # NOAA Space Weather Prediction Center public feeds. This collector is
 # event-oriented: it fetches small products, derives compact SWPC events, and
 # does not retain raw X-ray/Kp time-series samples.
+
+# HTTP polling controls. poll_interval_sec is the normal product refresh cadence,
+# request_timeout_sec is the per-request timeout, and user_agent is sent with
+# requests.
 poll_interval_sec: 300
 request_timeout_sec: 15
 user_agent: "Skannr SWPC collector"
 
+# Product switches. Disable products here when you want fewer SWPC subfeeds while
+# leaving the collector itself enabled.
 products:
   alerts: true
   noaa_scales: true
   xray_flux: true
   planetary_k: true
 
+# Public SWPC product URLs. Override only when testing mirrors or changed SWPC
+# endpoints.
 urls:
   alerts: "https://services.swpc.noaa.gov/products/alerts.json"
   noaa_scales: "https://services.swpc.noaa.gov/products/noaa-scales.json"
@@ -32,6 +40,8 @@ feed_min_solar_radiation_storm: S1
 feed_min_geomagnetic_storm: G1
 feed_min_kp: 5
 
+# Collector-level alert helper thresholds. Keep these aligned with skannr.yaml
+# alert thresholds unless deliberately testing different live/feed behavior.
 alert_min_xray_class: X1.0
 alert_min_radio_blackout: R3
 alert_min_solar_radiation_storm: S3

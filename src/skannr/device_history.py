@@ -29,9 +29,10 @@ from .log_utils import (
 )
 from .identity_policy import (
     bluetooth_group_label,
+    bluetooth_grouping_candidate,
     bluetooth_identity_bucket,
     bluetooth_manufacturer_label,
-    bluetooth_grouping_candidate,
+    bluetooth_property_like_name,
     low_identity_bluetooth_record,
     low_identity_wifi_client,
 )
@@ -740,6 +741,7 @@ class DeviceHistoryBuilder:
                 "randomized_group_count": 0,
                 "device_count": 0,
                 "sample_macs": [],
+                "group_members": [],
                 "ssids": [],
                 "sources": [],
                 "first_seen": record.get("first_seen"),
@@ -760,6 +762,7 @@ class DeviceHistoryBuilder:
         group["randomized_group_count"] = int(group.get("randomized_group_count") or 0) + count
         group["device_count"] = int(group.get("device_count") or 0) + count
         self.merge_group_samples(group, record, "sample_macs", record.get("sample_macs") or [record.get("mac")], self.GROUP_SAMPLE_MAC_LIMIT)
+        self.merge_group_members(group, record, "wifi")
         self.merge_group_samples(group, record, "ssids", record.get("ssids") or [], self.GROUP_SAMPLE_VALUE_LIMIT)
         self.merge_group_samples(group, record, "sources", record.get("sources") or [], 12)
         self.increment_group_counts(
@@ -839,6 +842,7 @@ class DeviceHistoryBuilder:
                 "findmy_accessory": bool(record.get("findmy_accessory")),
                 "transports": [],
                 "sample_macs": [],
+                "group_members": [],
                 "service_uuids": [],
                 "names": [],
                 "first_seen": record.get("first_seen"),
@@ -881,6 +885,7 @@ class DeviceHistoryBuilder:
         group["session_count"] = int(group.get("session_count") or 0) + self.record_session_count(record)
         group["active_session"] = bool(group.get("active_session")) or bool(record.get("active_session"))
         self.merge_group_samples(group, record, "sample_macs", record.get("sample_macs") or [record.get("mac")], self.GROUP_SAMPLE_MAC_LIMIT)
+        self.merge_group_members(group, record, "bluetooth")
         self.merge_group_samples(group, record, "service_uuids", record.get("service_uuids") or [], 32)
         self.merge_group_samples(group, record, "names", record.get("names") or [], 12)
         self.merge_group_samples(group, record, "transports", record.get("transports") or [], 8)
@@ -891,6 +896,89 @@ class DeviceHistoryBuilder:
         self.update_storage_group_time_bounds(group, record)
         self.update_storage_group_signal_bounds(group, record)
         return group
+
+
+    def merge_group_members(self, group, record, source, limit=24):
+        """Retain bounded per-member evidence for grouped privacy rows."""
+        members = group.setdefault("group_members", [])
+        source_members = record.get("group_members")
+        if isinstance(source_members, list) and source_members:
+            candidates = source_members
+        else:
+            candidates = [self.group_member_summary(record, source)]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            member = {key: value for key, value in candidate.items() if value not in (None, "", [], {})}
+            mac = str(member.get("mac") or "").strip().lower()
+            if not mac:
+                continue
+            existing = next((item for item in members if str(item.get("mac") or "").lower() == mac), None)
+            if existing:
+                self.merge_group_member_summary(existing, member)
+                continue
+            if len(members) < limit:
+                members.append(member)
+
+    def group_member_summary(self, record, source):
+        """Return one compact per-MAC member summary for a grouped row."""
+        member = {
+            "mac": record.get("mac") or "",
+            "first_seen": record.get("first_seen") or "",
+            "first_seen_epoch": record.get("first_seen_epoch"),
+            "last_seen": record.get("last_seen") or "",
+            "last_seen_epoch": record.get("last_seen_epoch"),
+            "signal_min": record.get("signal_min"),
+            "signal_max": record.get("signal_max"),
+        }
+        if source == "wifi":
+            member.update({
+                "identity": record.get("vendor_name") or record.get("vendor_prefix") or "",
+                "ssids": (record.get("ssids") or [])[:8],
+                "probe_count": record.get("probe_count") or 0,
+                "association_count": record.get("association_count") or 0,
+                "deauth_count": record.get("deauth_count") or 0,
+                "disassoc_count": record.get("disassoc_count") or 0,
+            })
+        elif source == "bluetooth":
+            names = record.get("names") or ([record.get("name")] if record.get("name") else [])
+            member.update({
+                "identity": names[0] if names else (record.get("manufacturer") or record.get("manufacturer_name") or ""),
+                "names": names[:6],
+                "service_uuids": (record.get("service_uuids") or [])[:8],
+                "seen_count": record.get("seen_count") or 0,
+                "update_count": record.get("update_count") or 0,
+                "lost_count": record.get("lost_count") or 0,
+                "classic_seen_count": record.get("classic_seen_count") or 0,
+                "session_count": record.get("session_count") or self.record_session_count(record),
+                "active_session": bool(record.get("active_session")),
+            })
+        return member
+
+    def merge_group_member_summary(self, target, source):
+        """Merge repeated compact member summaries from persisted aggregates."""
+        for time_key in ("first_seen", "last_seen"):
+            epoch_key = "{}_epoch".format(time_key)
+            old_epoch = record_time_epoch(target, time_key)
+            new_epoch = source.get(epoch_key)
+            if time_key == "first_seen" and new_epoch and (not old_epoch or new_epoch < old_epoch):
+                target[time_key] = source.get(time_key) or target.get(time_key)
+                target[epoch_key] = new_epoch
+            if time_key == "last_seen" and new_epoch and (not old_epoch or new_epoch >= old_epoch):
+                target[time_key] = source.get(time_key) or target.get(time_key)
+                target[epoch_key] = new_epoch
+        for field in ("signal_min", "signal_max"):
+            values = [value for value in (target.get(field), source.get(field)) if isinstance(value, (int, float))]
+            if values:
+                target[field] = min(values) if field == "signal_min" else max(values)
+        for field in ("probe_count", "association_count", "deauth_count", "disassoc_count", "seen_count", "update_count", "lost_count", "classic_seen_count", "session_count"):
+            if source.get(field) is not None:
+                target[field] = int(target.get(field) or 0) + int(source.get(field) or 0)
+        target["active_session"] = bool(target.get("active_session")) or bool(source.get("active_session"))
+        for field in ("ssids", "names", "service_uuids"):
+            self.merge_group_samples(target, source, field, source.get(field) or [], 8)
+        if source.get("identity") and not target.get("identity"):
+            target["identity"] = source.get("identity")
 
     def group_record_count(self, record):
         """Return represented identity count for an individual or aggregate row."""
@@ -1779,6 +1867,8 @@ class DeviceHistoryBuilder:
             "failed to connect",
         )
         if any(fragment in lowered for fragment in bad_fragments):
+            return ""
+        if bluetooth_property_like_name(text):
             return ""
         return text
 

@@ -8,7 +8,7 @@ import os
 import shutil
 import urllib.request
 
-from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE, STATE_RETRYING
+from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE
 
 
 ADSB_FIELD_MAX = 160
@@ -68,9 +68,18 @@ def clean_adsb_data(data):
         "min_distance_km",
         "max_ground_speed_kt",
         "path_span_km",
+        "route_sample_count",
+        "pass_count",
+        "session_count",
+        "approach_distance_km",
+        "approach_altitude_ft",
+        "approach_vertical_rate_fpm",
+        "decoder_exit_status",
+        "device_index",
+        "poll_interval_sec",
     }
     bool_keys = {"emergency"}
-    list_keys = {"sample_callsigns", "sample_squawks"}
+    list_keys = {"sample_callsigns", "sample_squawks", "route_samples", "session_spans"}
     for key, value in data.items():
         if value in (None, "", []):
             continue
@@ -112,7 +121,7 @@ class ADSBCollector(BaseCollector):
         """Return decoder and configured aircraft JSON availability."""
         paths = configured_paths(config)
         return {
-            "dump1090": bool(shutil.which("dump1090") or shutil.which("dump1090-mutability")),
+            "dump1090": bool(shutil.which("dump1090") or shutil.which("dump1090-fa") or shutil.which("dump1090-mutability")),
             "readsb": bool(shutil.which("readsb")),
             "manage_decoder": bool(config.get("manage_decoder", True)),
             "device_index": config.get("device_index", 0),
@@ -132,6 +141,7 @@ class ADSBCollector(BaseCollector):
         self._process = None
         self._stdout_task = None
         self._stderr_task = None
+        self._decoder_command = ""
 
     def detect(self):
         """Verify that an aircraft JSON source is configured and readable."""
@@ -147,45 +157,56 @@ class ADSBCollector(BaseCollector):
         return True
 
     async def start(self):
-        """Poll decoded aircraft state until stopped."""
+        """Poll decoded aircraft state until stopped, retrying managed decoder failures."""
         self._running = True
-        if self.should_manage_decoder():
-            try:
-                await self.start_decoder()
-            except Exception as exc:
-                self.state = STATE_OFFLINE
-                self.warning = "ADS-B decoder start failed: {}".format(exc)
-                await self.emit("collector_offline", {"reason": self.warning}, "warning")
-                return
-        if not self.detect():
-            await self.emit("collector_offline", {"reason": self.warning}, "warning")
-            return
         interval = float(self.config.get("poll_interval_sec", 1))
-        await self.emit(
-            "collector_online",
-            {
-                "source": self._source,
-                "poll_interval_sec": interval,
-                "decoder": "dump1090/readsb",
-                "device_index": self.config.get("device_index", 0),
-            },
-        )
         while self._running:
-            try:
-                rows = await self.run_blocking(self.poll_once)
-                self.state = STATE_ONLINE
-                self.warning = None
-                for data in rows:
-                    await self.emit("adsb_aircraft", data, self.severity_for(data))
-            except Exception as exc:
-                self.state = STATE_RETRYING
-                self.warning = "ADS-B poll failed: {}".format(exc)
-                await self.emit(
-                    "collector_retrying",
-                    {"reason": self.warning, "source": self._source},
-                    "warning",
-                )
-            await asyncio.sleep(interval)
+            if self.should_manage_decoder():
+                try:
+                    await self.start_decoder()
+                except Exception as exc:
+                    await self.retrying("ADS-B decoder start failed: {}".format(exc))
+                    await self.stop_decoder()
+                    continue
+            if not self.detect():
+                await self.retrying(self.warning)
+                await self.stop_decoder()
+                continue
+            await self.emit(
+                "collector_online",
+                {
+                    "source": self._source,
+                    "poll_interval_sec": interval,
+                    "decoder": self.decoder_name(),
+                    "device_index": self.config.get("device_index", 0),
+                },
+            )
+            while self._running:
+                try:
+                    if self.should_manage_decoder() and self._process and self._process.returncode is not None:
+                        raise RuntimeError(
+                            "{} exited with status {}".format(
+                                self.decoder_name(), self._process.returncode
+                            )
+                        )
+                    rows = await self.run_blocking(self.poll_once)
+                    self.state = STATE_ONLINE
+                    self.warning = None
+                    for data in rows:
+                        await self.emit("adsb_aircraft", data, self.severity_for(data))
+                except Exception as exc:
+                    await self.retrying(
+                        "ADS-B poll failed: {}".format(exc),
+                        {"source": self._source},
+                        sleep=False,
+                    )
+                    if self.should_manage_decoder() and self._process and self._process.returncode is not None:
+                        await self.stop_decoder()
+                        await self.retry_sleep()
+                        break
+                await asyncio.sleep(interval)
+            if self.should_manage_decoder():
+                await self.stop_decoder()
 
     async def stop(self):
         """Stop the managed ADS-B decoder before marking collector stopped."""
@@ -249,9 +270,10 @@ class ADSBCollector(BaseCollector):
         command = decoder_command(self.config)
         if not command:
             raise RuntimeError("dump1090/readsb command not found")
+        self._decoder_command = command
         output_dir = decoder_output_dir(self.config)
         os.makedirs(output_dir, exist_ok=True)
-        args = decoder_args(self.config, output_dir)
+        args = decoder_args(self.config, output_dir, command)
         self._source = os.path.join(output_dir, "aircraft.json")
         self._process = await asyncio.create_subprocess_exec(
             command,
@@ -296,6 +318,7 @@ class ADSBCollector(BaseCollector):
         self._process = None
         self._stdout_task = None
         self._stderr_task = None
+        self._decoder_command = ""
 
     async def drain_decoder_pipe(self, pipe, label):
         """Drain decoder output so stdout/stderr never block the process."""
@@ -355,7 +378,7 @@ class ADSBCollector(BaseCollector):
             "messages": adsb_int(item.get("messages")),
             "rssi_dbfs": adsb_float(item.get("rssi")),
             "source": self._source,
-            "decoder": "dump1090/readsb",
+            "decoder": self.decoder_name(),
         }
         if snapshot_now:
             seen = data.get("seen_sec") or 0
@@ -365,6 +388,15 @@ class ADSBCollector(BaseCollector):
                 self._observer[0], self._observer[1], lat, lon
             )
         return clean_adsb_data(data)
+
+    def decoder_name(self):
+        """Return the selected decoder name for events and status rows."""
+        configured = compact_adsb_text(self.config.get("decoder_command"), 300)
+        return (
+            decoder_label(self._decoder_command)
+            or decoder_label(configured)
+            or "external"
+        )
 
     def severity_for(self, data):
         """Return event severity for the live aircraft row."""
@@ -406,29 +438,72 @@ def configured_paths(config):
     return paths
 
 
+ADSB_DECODER_COMMANDS = (
+    "dump1090-mutability",
+    "dump1090-fa",
+    "dump1090",
+    "readsb",
+)
+
+DUMP1090_DECODER_ARGS = (
+    "--net",
+    "--device-index",
+    "{device_index}",
+    "--write-json",
+    "{json_dir}",
+)
+
+READSB_DECODER_ARGS = (
+    "--net",
+    "--device-type",
+    "rtlsdr",
+    "--device",
+    "{device_index}",
+    "--write-json",
+    "{json_dir}",
+)
+
+
 def decoder_command(config):
     """Return the configured or first available ADS-B decoder command."""
-    command = compact_adsb_text(config.get("decoder_command"), 300)
-    if command:
-        return command
-    for candidate in ("dump1090-mutability", "dump1090", "readsb"):
+    configured = compact_adsb_text(config.get("decoder_command"), 300)
+    if configured:
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+        logging.warning(
+            "Configured ADS-B decoder command %s was not found; trying installed fallbacks",
+            configured,
+        )
+    for candidate in ADSB_DECODER_COMMANDS:
         path = shutil.which(candidate)
         if path:
             return path
     return ""
 
 
-def decoder_args(config, output_dir):
+def decoder_label(command):
+    """Return a compact decoder executable label."""
+    text = compact_adsb_text(command, 300)
+    return os.path.basename(text) if text else ""
+
+
+def decoder_uses_readsb_args(command):
+    """Return True for decoders that use readsb-style device arguments."""
+    return decoder_label(command) == "readsb"
+
+
+def decoder_default_args(command):
+    """Return default managed-decoder args for the selected executable."""
+    return READSB_DECODER_ARGS if decoder_uses_readsb_args(command) else DUMP1090_DECODER_ARGS
+
+
+def decoder_args(config, output_dir, command=None):
     """Return decoder arguments, formatting {json_dir} when configured."""
+    command = command or decoder_command(config)
     args = config.get("decoder_args")
-    if args is None:
-        args = [
-            "--net",
-            "--device-index",
-            "{device_index}",
-            "--write-json",
-            "{json_dir}",
-        ]
+    if decoder_args_are_default(args):
+        args = decoder_default_args(command)
     if isinstance(args, str):
         args = args.split()
     formatted = []
@@ -442,6 +517,17 @@ def decoder_args(config, output_dir):
                 )
             )
     return formatted
+
+
+def decoder_args_are_default(args):
+    """Return True when config uses the built-in/legacy default args."""
+    if args in (None, ""):
+        return True
+    if isinstance(args, str):
+        values = tuple(args.split())
+    else:
+        values = tuple(str(item) for item in (args or []))
+    return values in (DUMP1090_DECODER_ARGS, READSB_DECODER_ARGS)
 
 
 def decoder_output_dir(config):

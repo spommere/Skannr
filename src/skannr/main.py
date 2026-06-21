@@ -305,7 +305,7 @@ runtime = {
     "internet_status": None,
 }
 
-RTL_SDR_EXCLUSIVE_COLLECTORS = {"rtlsdr", "rtl433", "adsb"}
+RTL_SDR_EXCLUSIVE_COLLECTORS = {"rtl433", "adsb"}
 
 
 @app.after_request
@@ -490,21 +490,6 @@ def view_metadata():
         "options": view_window_options(config),
         "ui": config.get("ui", {}),
         "collectors": {
-            "rtlsdr": {
-                "scan_start_mhz": config.get("collectors", {})
-                .get("rtlsdr", {})
-                .get("scan_start_mhz"),
-                "scan_end_mhz": config.get("collectors", {})
-                .get("rtlsdr", {})
-                .get("scan_end_mhz"),
-                "step_khz": config.get("collectors", {})
-                .get("rtlsdr", {})
-                .get("step_khz"),
-                "gain": config.get("collectors", {}).get("rtlsdr", {}).get("gain"),
-                "threshold_db": config.get("collectors", {})
-                .get("rtlsdr", {})
-                .get("threshold_db"),
-            },
             "rtl433": {
                 "frequency_plan": config.get("collectors", {})
                 .get("rtl433", {})
@@ -534,13 +519,16 @@ def bluetooth_uuid_names():
     Company identifiers are manufacturer-data IDs and are handled by the BLE
     collector. This lookup covers Bluetooth UUID assigned-number files such as
     member_uuids.txt, where values like 0xFEAF identify a vendor/member UUID
-    advertised in the service UUID list.
+    advertised in the service UUID list. It also accepts Bluetooth classic
+    service class files so older/common 16-bit service UUIDs like 0x110A can
+    be resolved in the BLE UI.
     """
     names = {}
     directories = (DATA_COLLECTORS_DIR, CONFIG_COLLECTORS_DIR)
     for basename in (
         "member_uuids",
         "service_uuids",
+        "service_class",
         "characteristic_uuids",
     ):
         for directory in directories:
@@ -593,10 +581,24 @@ def bluetooth_uuid_names_from_yaml(text):
 
 
 def bluetooth_uuid_names_from_text(text):
-    """Fallback parser for copied SIG text that is only YAML-like."""
+    """Fallback parser for copied SIG text in YAML-like or flat-text formats."""
     names = {}
     current_uuid = None
     for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        flat_match = re.match(
+            r"^(0x[0-9a-fA-F]+|[0-9a-fA-F]{4})\s+(.+?)\s*$",
+            stripped,
+        )
+        if flat_match:
+            short_id = normalize_bluetooth_uuid_key(flat_match.group(1))
+            name = flat_match.group(2).strip()
+            if short_id and name:
+                names[short_id] = name
+            current_uuid = None
+            continue
         uuid_match = re.search(
             r"\b(?:uuid|value):\s*['\"]?(0x[0-9a-fA-F]+|[0-9a-fA-F]{4})",
             line,
@@ -899,49 +901,7 @@ def collector_start_overrides(key, raw):
         if value in (None, ""):
             return {}
         return {"frequency_plan": str(value).strip()}
-    if key != "rtlsdr":
-        return {}
-    overrides = {}
-    numeric_fields = {
-        "scan_start_mhz": float,
-        "scan_end_mhz": float,
-        "step_khz": float,
-        "threshold_db": float,
-    }
-    for field, converter in numeric_fields.items():
-        value = raw.get(field)
-        if value in (None, ""):
-            continue
-        try:
-            parsed = converter(value)
-        except (TypeError, ValueError):
-            logging.warning("Ignoring invalid RTL-SDR override %s=%r", field, value)
-            continue
-        if parsed <= 0 and field != "threshold_db":
-            logging.warning("Ignoring non-positive RTL-SDR override %s=%r", field, value)
-            continue
-        overrides[field] = parsed
-    start_mhz = overrides.get("scan_start_mhz")
-    end_mhz = overrides.get("scan_end_mhz")
-    if start_mhz is not None and end_mhz is not None and end_mhz <= start_mhz:
-        logging.warning(
-            "Ignoring RTL-SDR start/end override where end <= start: %s/%s",
-            start_mhz,
-            end_mhz,
-        )
-        overrides.pop("scan_start_mhz", None)
-        overrides.pop("scan_end_mhz", None)
-    if "gain" in raw and raw.get("gain") not in (None, ""):
-        gain = str(raw.get("gain")).strip()
-        if gain.lower() == "auto":
-            overrides["gain"] = "auto"
-        else:
-            try:
-                float(gain)
-                overrides["gain"] = gain
-            except ValueError:
-                logging.warning("Ignoring invalid RTL-SDR gain override %r", gain)
-    return overrides
+    return {}
 
 
 def collector_by_key(key):
@@ -1345,6 +1305,14 @@ async def handoff_rtl_sdr_collectors(target):
         )
 
 
+ADSB_DECODER_COMMANDS = (
+    "dump1090-mutability",
+    "dump1090-fa",
+    "dump1090",
+    "readsb",
+)
+
+
 def rtl_sdr_ownership_key(key, config):
     """Return the local RTL-SDR device claimed by this collector, if any."""
     if key not in RTL_SDR_EXCLUSIVE_COLLECTORS:
@@ -1354,7 +1322,27 @@ def rtl_sdr_ownership_key(key, config):
             return None
         if str(config.get("url") or "").strip():
             return None
+        if not adsb_decoder_available(config):
+            return None
+    if key == "rtl433" and not rtl433_decoder_available(config):
+        return None
     return "index {}".format(config.get("device_index", 0))
+
+
+def adsb_decoder_available(config):
+    """Return True when managed ADS-B can start a local decoder process."""
+    configured = str(config.get("decoder_command") or "").strip()
+    if configured and shutil.which(configured):
+        return True
+    return any(shutil.which(candidate) for candidate in ADSB_DECODER_COMMANDS)
+
+
+def rtl433_decoder_available(config):
+    """Return True when RTL-433 can start its local decoder process."""
+    configured = str(config.get("command") or "").strip()
+    if configured and shutil.which(configured):
+        return True
+    return bool(shutil.which("rtl_433"))
 
 
 def collector_label(key):
@@ -2205,6 +2193,9 @@ def build_cached_derived_bundle(window_days, mode="cached"):
     generated_at_epoch = now_epoch()
     generated_at = local_now(generated_at_epoch)
     with runtime["derived_cache_lock"]:
+        subject_history = apply_subject_annotations(runtime["subject_history"])
+        device_history = apply_subject_annotations(runtime["device_history"])
+        reports = apply_report_annotations(runtime["reports"])
         bundle = {
             "generated_at": generated_at,
             "generated_at_epoch": generated_at_epoch,
@@ -2213,16 +2204,16 @@ def build_cached_derived_bundle(window_days, mode="cached"):
                 empty_findings_history(window_days), generated_at, generated_at_epoch
             ),
             "subject_history": add_refresh_metadata(
-                runtime["subject_history"], generated_at, generated_at_epoch
+                subject_history, generated_at, generated_at_epoch
             ),
             "device_history": add_refresh_metadata(
-                runtime["device_history"], generated_at, generated_at_epoch
+                device_history, generated_at, generated_at_epoch
             ),
             "history_analysis": add_refresh_metadata(
                 runtime["history_analysis"], generated_at, generated_at_epoch
             ),
             "reports": add_refresh_metadata(
-                runtime["reports"], generated_at, generated_at_epoch
+                reports, generated_at, generated_at_epoch
             ),
         }
     logging.info(
@@ -2874,6 +2865,7 @@ WIFI_CLIENT_BROWSER_KEYS = {
     "last_seen",
     "last_seen_epoch",
     "grouped_randomized",
+    "group_members",
     "mac",
     "probe_count",
     "randomized_group_count",
@@ -2903,6 +2895,7 @@ BLUETOOTH_DEVICE_BROWSER_KEYS = {
     "first_seen_epoch",
     "group_key",
     "grouped_randomized",
+    "group_members",
     "last_seen",
     "last_seen_epoch",
     "lost_count",
@@ -3261,6 +3254,7 @@ def update_randomized_wifi_client_group(group, record):
             "randomized_mac": True,
             "randomized_group_count": 0,
             "sample_macs": [],
+            "group_members": [],
             "ssids": [],
             "first_seen": record.get("first_seen"),
             "first_seen_epoch": record.get("first_seen_epoch"),
@@ -3277,12 +3271,63 @@ def update_randomized_wifi_client_group(group, record):
         }
     group["randomized_group_count"] = int(group.get("randomized_group_count") or 0) + int(record.get("randomized_group_count") or record.get("device_count") or 1)
     append_group_sample_mac(group, record, limit=8)
+    append_browser_group_member(group, record, "wifi")
     group["ssids"] = merge_group_list(group, record, "ssids", 50)
     increment_group_counts(group, record, ("probe_count", "association_count", "deauth_count", "disassoc_count", "finding_count"))
     update_group_time_bounds(group, record)
     update_group_signal_bounds(group, record)
     return group
 
+
+
+def append_browser_group_member(group, record, source, limit=24):
+    """Keep compact per-member details in browser synthetic groups."""
+    members = group.setdefault("group_members", [])
+    source_members = record.get("group_members")
+    candidates = source_members if isinstance(source_members, list) and source_members else [browser_group_member_summary(record, source)]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        member = {key: value for key, value in candidate.items() if value not in (None, "", [], {})}
+        mac = str(member.get("mac") or "").strip().lower()
+        if not mac or any(str(item.get("mac") or "").lower() == mac for item in members):
+            continue
+        if len(members) < limit:
+            members.append(member)
+
+
+def browser_group_member_summary(record, source):
+    """Return one compact browser member summary from a source record."""
+    member = {
+        "mac": record.get("mac") or "",
+        "first_seen": record.get("first_seen") or "",
+        "last_seen": record.get("last_seen") or "",
+        "signal_min": record.get("signal_min"),
+        "signal_max": record.get("signal_max"),
+    }
+    if source == "wifi":
+        member.update({
+            "identity": record.get("vendor_name") or record.get("vendor_prefix") or "",
+            "ssids": (record.get("ssids") or [])[:8],
+            "probe_count": record.get("probe_count") or 0,
+            "association_count": record.get("association_count") or 0,
+            "deauth_count": record.get("deauth_count") or 0,
+            "disassoc_count": record.get("disassoc_count") or 0,
+        })
+    elif source == "bluetooth":
+        names = record.get("names") or ([record.get("name")] if record.get("name") else [])
+        member.update({
+            "identity": names[0] if names else (record.get("manufacturer") or record.get("manufacturer_name") or ""),
+            "names": names[:6],
+            "service_uuids": (record.get("service_uuids") or [])[:8],
+            "seen_count": record.get("seen_count") or 0,
+            "update_count": record.get("update_count") or 0,
+            "lost_count": record.get("lost_count") or 0,
+            "classic_seen_count": record.get("classic_seen_count") or 0,
+            "session_count": record.get("session_count") or 0,
+            "active_session": bool(record.get("active_session")),
+        })
+    return member
 
 def increment_group_counts(group, record, fields):
     """Add numeric counters from one low-identity record into an aggregate row."""
@@ -3424,6 +3469,7 @@ def update_randomized_bluetooth_group(group, record):
             "finding_count": 0,
             "randomized_group_count": 0,
             "sample_macs": [],
+            "group_members": [],
             "service_uuids": [],
         }
 
@@ -3437,6 +3483,7 @@ def update_randomized_bluetooth_group(group, record):
     update_group_time_bounds(group, record)
     update_group_signal_bounds(group, record)
     append_group_sample_mac(group, record, limit=6)
+    append_browser_group_member(group, record, "bluetooth")
     group["service_uuids"] = merge_group_list(group, record, "service_uuids", 12)
     return group
 
@@ -3683,6 +3730,11 @@ def strip_annotation_fields(record):
     if isinstance(record, dict):
         record.pop("annotation", None)
         record.pop("custom_name", None)
+        for nested_key in ("data", "evidence"):
+            nested = record.get(nested_key)
+            if isinstance(nested, dict):
+                nested.pop("annotation", None)
+                nested.pop("custom_name", None)
 
 
 def strip_subject_annotation_fields(summary):
@@ -3723,9 +3775,10 @@ def apply_report_annotations(reports, annotations=None):
     if not isinstance(reports, dict):
         return reports
     annotations = annotations if annotations is not None else load_subject_annotations()
-    if not annotations:
-        return reports
     output = copy.deepcopy(reports)
+    strip_report_annotation_fields(output)
+    if not annotations:
+        return output
     for report in output.get("reports") or []:
         if not isinstance(report, dict):
             continue
@@ -3743,6 +3796,56 @@ def apply_report_annotations(reports, annotations=None):
                 original or report.get("subject") or "",
             )
     return output
+
+
+def strip_report_annotation_fields(reports):
+    """Remove stale report annotation overlays before applying current ones."""
+    for report in (reports or {}).get("reports") or []:
+        if not isinstance(report, dict):
+            continue
+        custom_name = str(
+            ((report.get("annotation") or {}).get("custom_name") if isinstance(report.get("annotation"), dict) else "")
+            or report.get("custom_name")
+            or ""
+        ).strip()
+        subject = str(report.get("subject") or "")
+        if custom_name:
+            prefix = custom_name + " ("
+            if subject.startswith(prefix) and subject.endswith(")"):
+                report["subject"] = subject[len(prefix):-1]
+                subject = report["subject"]
+        original = report_original_subject(report)
+        if original and subject.endswith("({})".format(original)):
+            report["subject"] = original
+        elif report_annotation_source(report) and " (" in subject and subject.endswith(")"):
+            report["subject"] = subject.rsplit(" (", 1)[1][:-1]
+        strip_annotation_fields(report)
+
+
+def report_annotation_source(report):
+    """Return True for report sources that support user subject annotations."""
+    return str((report or {}).get("source") or "").strip().lower() in (
+        "bluetooth",
+        "wifi",
+        "wifi_monitor",
+        "lan",
+    )
+
+
+def report_original_subject(report):
+    """Reconstruct the unannotated report subject when evidence is available."""
+    evidence = report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+    source = str(report.get("source") or "").strip().lower()
+    if source == "bluetooth":
+        return bluetooth_report_original_subject(evidence)
+    if source == "wifi":
+        return wifi_report_original_subject(evidence)
+    if source == "lan":
+        report_type = str(report.get("type") or "").strip().lower()
+        if "gateway" in report_type:
+            return lan_gateway_report_original_subject(evidence)
+        return lan_device_report_original_subject(evidence)
+    return ""
 
 
 def annotation_for_report(report, annotations):
@@ -4054,7 +4157,6 @@ def empty_subject_history(window_days):
         "bluetooth": {"devices": []},
         "aprsis": [],
         "rayhunter": [],
-        "rtlsdr": [],
         "rtl433": [],
         "noaa": [],
         "usgs": [],
@@ -4107,7 +4209,6 @@ def device_history_from_subject_history(subject_history, window_days):
             "schema",
             "aprsis",
             "rayhunter",
-            "rtlsdr",
             "rtl433",
             "noaa",
             "usgs",
