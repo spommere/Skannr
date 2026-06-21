@@ -1,0 +1,43 @@
+This is about the Skannr (or 'skannr') project in /scratch/spomemre/Skannr.
+Although there's a .gitignore, it is NOT a git repo; the upload to github is done on hampi4.  If this is a new session here, take a moment to study the product.
+
+Some rules about documenting progress and versioning:
+
+Today we're at version 0.2.7, meaning I had said "bump version to 0.2.7" at some point, and I'll get to that.
+
+All features or stuff that went into 0.2.7 (and prior version) are documented in CHANGELOG, which is a summarized/condensed version of the 0.2.7 section in VERSION_HISTORY, which contains minor and major changes for features and bug fixes, so basically a lot of detail.
+
+VERSION_PLAN is updated when I want to keep a record of things I want to add to Skannr, and is more losely organized wrt versioning b/c/ I might say "let's do XYZ in 0.3" or so.
+
+So when I want the version to be bumped up to let's say 0.2.8, we do the following:
+- update VERSION
+- summarize/condense the post-0.2.7 stuff from VERSION_HISTORY and add a 0.2.8 section in CHANGELOG
+- create a new 'post-0.2.8 section' in VERSION_HISTORY that will house the stuff we do after the 0.2.8 release.
+
+Generally, when making changes that affect content in README.md and/or DESIGN.md, then make the approproate changes. Occasionally, review code + docs that they match. Update VERSION_HISTORY with the changes we do anytime.
+
+We also have scripts/skannr_regression_test.py and scripts/skannr_admin.py . It's only run outside Codex !
+
+If you're unsure about what to do, ask.
+
+More instructions will likely be added over time.
+
+VERY IMPORTANT FOR TOKEN SAVING PURPOSES: 
+
+1. If you think something, like reading logs from disk (i.e. runtime/logs or other directories I accidentally may point you to) potentially wastes too many tokens, please say so, and I will see to reduce the amount of data to provide.  Having said that, do not run skannr_regression_test.py or skannr_admin.py anymore. If it needs to be run, let me know, and I'll do it outside Codex, and let you know the results.
+
+2. Never read or grep from any files in data/collectors/ directory, those are vendor lookup files in that directory — they are large reference data, not code.
+
+3. you only should read 
+- content in the codex directory (codex.txt, handoff file)
+- the Python code (.py) files under src/
+- yaml files in config.example
+- scripts directory
+- docs directory
+- install.sh
+- requirements directory
+- LICENSE, VERSION*, DESIGN*, README*, CHANGELOG, . Note that this machine is for development only, and it won't run the code. 
+
+The only thing that meeds to run on this machine, is skannr_regression_test.py and skannr_admin.py but I do this outside Codex.
+
+4. You are allowed to write to /scratch/spommere/.codex.
