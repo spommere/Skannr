@@ -1,9 +1,9 @@
-"""Materialized device history built from collector JSONL logs.
+"""Wi-Fi/BLE observation post-processor for Subject History.
 
 Raw logs are the audit trail, but the dashboard should not reread hundreds of
-thousands of raw rows on every startup or Refresh click. This builder folds raw
-events into one durable summary file and then advances that summary from saved
-byte offsets on later refreshes.
+thousands of raw rows on every startup or Refresh click. This post-processor
+folds raw Wi-Fi/BLE events into compact summaries and then advances those
+summaries from saved byte offsets on later refreshes.
 """
 
 import copy
@@ -39,7 +39,7 @@ from .identity_policy import (
 from .oui_lookup import normalize_oui, vendor_name, vendor_prefix
 
 
-class DeviceHistoryBuilder:
+class WiFiBLEPostprocessor:
     """Build a windowed device-history view and maintain durable first_seen data."""
 
     COLLECTORS = ("wifi", "wifi_monitor", "ble", "ble_identify", "bt_classic")

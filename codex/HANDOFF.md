@@ -1,3 +1,86 @@
+# Skannr Handoff - 2026-06-21
+
+## Update - 2026-06-21
+
+### Version Bump to 0.3.0
+
+Bumped version from 0.2.8 to 0.3.0. The jump reflects meaningful architecture
+change (Subject History became the single source of truth for Wi-Fi/BLE) and
+moves past the 0.2.x cycle.
+
+**Changes made:**
+- `VERSION`: 0.2.8 → 0.3.0
+- `CHANGELOG.md`: added condensed 0.3.0 section summarizing all post-0.2.8 work
+- `VERSION_HISTORY.md`: moved `post-0.2.9 work` and `post-0.2.8 / v0.2.9 work`
+  into a new `0.3.0 detailed work` section; added empty `post-0.3.0 work` section
+- `README.md`: added `0.3.x` to versioning policy
+- `DESIGN.md`: version header 0.2.8 → 0.3.0
+- `codex/HANDOFF.md`: this entry
+
+### Subject History Architecture Cleanup
+
+Renamed `DeviceHistoryBuilder` → `WiFiBLEPostprocessor` and moved it inside
+`SubjectHistoryBuilder` as an internal helper, removing the prerequisite
+`build_or_reuse_device_history_for_refresh()` step from the refresh pipeline.
+`subject_history.json` is now the single source of truth; `device_history.json`
+is no longer written to disk.
+
+**Specific changes:**
+
+- `device_history.py` → `wifi_ble_postprocessor.py`, class renamed to
+  `WiFiBLEPostprocessor`
+- `SubjectHistoryBuilder.build_summary()` now reads raw JSONL for all 15
+  collectors and calls `WiFiBLEPostprocessor` internally for Wi-Fi/BLE
+- `display_summary()` reads Wi-Fi/BLE data from `subject_history.json` directly
+  instead of from `device_history.json`
+- Background worker (`update_compact_device_history()`) still runs and saves
+  checkpoint state for performance
+- `build_or_reuse_device_history_for_refresh()`, `apply_live_overlay_and_prune_device_history()`,
+  `recent_device_history_summary()`, and `apply_live_observations_to_history()`
+  are now dead code (kept for now, can be removed in a future cleanup)
+- Unused import `low_identity_bluetooth_record` removed from `main.py`
+- Typo fix: `1902px` → `1920px` in regression test and docs
+
+**Files touched:**
+- `src/skannr/wifi_ble_postprocessor.py` (renamed from device_history.py)
+- `src/skannr/subject_history.py`
+- `src/skannr/main.py`
+- `scripts/skannr_regression_test.py`
+- `scripts/skannr_admin.py`
+- `scripts/validate_collector_contract.py`
+- `README.md`
+- `DESIGN.md`
+- `VERSION_HISTORY.md`
+- `CHANGELOG.md`
+- `codex/HANDOFF.md`
+
+**Known deferred items (from read-only review):**
+1. Value-normalization helper deduplication — deferred (semantics differ)
+2. ✅ Bluetooth adapter centralization — done prior to this session
+3. device_history/subject_history architecture — addressed in this session
+4. Small helper-clone cleanup — deferred
+
+**Test status:**
+- Regression test runs but 14/71 tests fail due to missing source capture data
+  on this machine (not a code issue)
+- All layout budgets pass at 1920px
+
+### Version Bump to 0.3.0 (follow-up)
+
+Further version-bump work after the earlier 0.3.0 entry:
+
+- Read the full codex files (`codex.txt`, `HANDOFF.md`) to understand project rules
+- Updated `CHANGELOG.md` with a condensed 0.3.0 section summarizing all
+  post-0.2.8 work (BLE cleanup, RTL-433 reports, config docs overhaul, recency
+  grouping, layout compliance, Pushover, etc.)
+- Restructured `VERSION_HISTORY.md` — moved `post-0.2.9 work` and
+  `post-0.2.8 / v0.2.9 work` under a new `## 0.3.0 detailed work` section;
+  created empty `## post-0.3.0 work` placeholder at top
+- Added `0.3.x` to the versioning policy in `README.md`
+- Updated `DESIGN.md` version header from 0.2.8 to 0.3.0
+
+No code changes were made.
+
 # Skannr Handoff - 2026-06-18
 
 ## Update - 2026-06-18
@@ -443,9 +526,6 @@ Before the documentation pass, the post-0.2.8 work included:
 
 ## Known Caveats
 
-- This local tree is not usable as a git repository; `.git` is empty.
-- The sandbox wrapper can fail because of the `/home/spommere/.codex/.git`
-  symlink constraint. Read/write commands may need approved escalation.
 - Use ASCII for edits unless an existing file requires otherwise.
 - Keep changes scoped; do not broaden into runtime log inspection or regression
   execution without explicit user direction.

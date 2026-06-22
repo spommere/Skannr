@@ -39,7 +39,7 @@ from .collectors.metadata import (
 from .connectivity import internet_available
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
 from .config import load_config
-from .device_history import DeviceHistoryBuilder
+from .wifi_ble_postprocessor import WiFiBLEPostprocessor
 from .findings import FindingsEngine
 from .history_analysis import HistoryAnalyzer, save_analysis
 from .identity_policy import (
@@ -47,7 +47,6 @@ from .identity_policy import (
     bluetooth_identity_bucket as identity_bluetooth_identity_bucket,
     bluetooth_manufacturer_label as identity_bluetooth_manufacturer_label,
     bluetooth_grouping_candidate as identity_bluetooth_grouping_candidate,
-    low_identity_bluetooth_record,
     low_identity_wifi_client,
     meaningful_bluetooth_names as identity_meaningful_bluetooth_names,
 )
@@ -2430,7 +2429,7 @@ def update_compact_device_history(reason="periodic"):
         return None
     try:
         log_dir = configured_log_dir()
-        builder = DeviceHistoryBuilder(
+        builder = WiFiBLEPostprocessor(
             log_dir,
             state_path=device_history_path(),
             window_days=None,
@@ -2460,13 +2459,7 @@ def update_compact_device_history(reason="periodic"):
             pruned_bluetooth,
         )
         summary = apply_subject_annotations(summary)
-        save_started = time.monotonic()
-        save_json_file(device_history_path(), summary)
-        logging.info(
-            "device_history background save finished reason=%s elapsed=%.2fs",
-            reason,
-            time.monotonic() - save_started,
-        )
+        builder.save_summary(summary)
         return summary
     except Exception as exc:
         logging.exception(
@@ -4186,7 +4179,7 @@ def load_cached_device_history(window_days):
         summary.setdefault("window", view_window_metadata(None))
         summary.setdefault("generated_at_epoch", now_epoch())
         summary.setdefault("generated_at", local_now(summary["generated_at_epoch"]))
-        output = DeviceHistoryBuilder(
+        output = WiFiBLEPostprocessor(
             configured_log_dir(),
             state_path=device_history_path(),
             window_days=window_days,
@@ -4679,7 +4672,7 @@ def apply_live_overlay_and_prune_device_history(
 
 def build_or_reuse_device_history_for_refresh(log_dir, window_days):
     """Return Device History for Subject History without duplicating background work."""
-    device_builder = DeviceHistoryBuilder(
+    device_builder = WiFiBLEPostprocessor(
         log_dir,
         state_path=device_history_path(),
         window_days=window_days,
@@ -4730,15 +4723,6 @@ def build_or_reuse_device_history_for_refresh(log_dir, window_days):
             device_builder, full_device_summary, persist=True
         )
         full_device_summary = apply_subject_annotations(full_device_summary)
-        try:
-            save_started = time.monotonic()
-            save_json_file(device_history_path(), full_device_summary)
-            logging.info(
-                "derived device_history save finished elapsed=%.2fs",
-                time.monotonic() - save_started,
-            )
-        except OSError as exc:
-            logging.exception("failed to persist device history: %s", exc)
         return full_device_summary
     finally:
         lock.release()
@@ -4777,10 +4761,6 @@ def refresh_subject_history(window_days="default"):
             subject_display.get("generated_at") or "",
         )
         return subject_display
-    full_device_summary = build_or_reuse_device_history_for_refresh(
-        log_dir, window_days
-    )
-
     subject_builder = SubjectHistoryBuilder(
         log_dir,
         state_path=subject_history_path(),
@@ -4789,7 +4769,7 @@ def refresh_subject_history(window_days="default"):
         enabled_collectors=enabled_subject_history_collectors(),
     )
     subject_started = time.monotonic()
-    full_subject_summary = subject_builder.build_summary(full_device_summary)
+    full_subject_summary = subject_builder.build_summary()
     full_subject_summary = apply_subject_annotations(full_subject_summary)
     logging.info(
         "derived subject_history build_summary finished elapsed=%.2fs subjects=%s "

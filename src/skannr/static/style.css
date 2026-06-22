@@ -451,7 +451,7 @@ main {
   display: inline-flex;
   align-items: center;
   min-height: 28px;
-  padding: 4px 10px;
+  padding: 4px 16px;
   border-radius: 999px;
   background: #edf3f4;
   color: var(--accent);

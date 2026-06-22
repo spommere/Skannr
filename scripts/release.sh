@@ -16,7 +16,7 @@ usage() {
     cat <<'EOF'
 Usage:
   scripts/release.sh [version|patch|minor|major] [--all|--files <paths...>]
-                     [--no-push] [--archive-dir <dir>]
+                     [--no-push] [--no-release] [--archive-dir <dir>]
 
 Examples:
   scripts/release.sh 0.1.1
@@ -25,6 +25,12 @@ Examples:
 
 If no version is supplied, the script prompts for one.
 If no file mode is supplied, the script prompts and defaults to --all.
+
+Requires a GitHub personal access token (classic) stored in .gh_token
+at the repo root for release creation:
+  echo github_pat_... > .gh_token
+  gh auth login --with-token < .gh_token
+(One-time setup — token never leaves your machine.)
 EOF
 }
 
@@ -74,6 +80,7 @@ EOF
 
 version_arg=""
 push_release=1
+create_release=1
 archive_dir="$repo_dir/.."
 stage_mode=""
 declare -a stage_files=()
@@ -101,6 +108,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-push)
             push_release=0
+            shift
+            ;;
+        --no-release)
+            create_release=0
             shift
             ;;
         --archive-dir)
@@ -228,3 +239,21 @@ git archive \
     HEAD
 
 echo "Created $archive_path"
+
+#
+# Create a GitHub release for this tag/version.
+#
+if [ "$create_release" -eq 1 ]; then
+    tag="v$version"
+    if gh auth status 2>/dev/null; then
+        gh release create "$tag" \
+            "$archive_path" \
+            --title "Release $version" \
+            --notes "See [CHANGELOG](CHANGELOG.md) for details." \
+            --repo "$(git remote get-url origin | sed 's|.*github.com[:\/]||;s|\.git$||')"
+        echo "Created GitHub release $tag"
+    else
+        echo "Skipping GitHub release — gh not authenticated."
+        echo "  Run:  gh auth login --with-token < .gh_token"
+    fi
+fi

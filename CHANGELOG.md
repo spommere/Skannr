@@ -7,13 +7,58 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
-## Unreleased
+## 0.3.0 - 2026-06-21
 
-- Expanded the configuration reference material: every example YAML under
-  `config.example/collectors/` plus `config.example/skannr.yaml` now has
-  clearer inline parameter comments, `REFERENCE.md` documents the full
-  parameter appendix and option interactions, and `README.md` points operators
-  to the new reference.
+- **Subject History is now the single source of truth for Wi-Fi/BLE.** The
+  `DeviceHistoryBuilder` layer was removed; its logic became an internal
+  `WiFiBLEPostprocessor` inside `SubjectHistoryBuilder`. `device_history.json`
+  is no longer written to disk. Subject History reads raw JSONL for all 15
+  collectors directly.
+- **BLE parsing, identity, and UUID cleanup.** Fixed the `bluetoothctl` parser
+  so property lines (RSSI, UUIDs, TxPower) no longer become device names.
+  Added centralized Bluetooth manufacturer normalization so raw company IDs
+  such as `0x004c` surface as `Apple` instead of raw codes. Added
+  `service_class.txt` support for UUID name lookup, resolving `0x110A` as
+  `Audio Source`.
+- **RTL-433 report evidence and browser deduper fix.** RTL-433 subject
+  summaries now use concise presence-style wording. The browser Evidence
+  deduper no longer removes `Pattern`, `Observed`, and `Activity` sections.
+- **Configuration documentation overhaul.** Added `REFERENCE.md` as a
+  comprehensive parameter appendix. Updated every collector YAML with clear
+  inline comments for BLE scan methods, Wi-Fi retry cadence, Wi-Fi Monitor
+  channel behavior, NOAA subfeeds, LAN source controls, and RTL-433 protocol
+  guidance.
+- **Reports and Subject History recency grouping.** Tables now group rows into
+  `Seen within the last hour`, `within 24 hours`, and `24+ hours ago` with
+  distinct yellow divider styling.
+- **System Status grouping.** Collectors are grouped by ONLINE, OFFLINE/STOPPED,
+  and DISABLED state.
+- **Multi-node regression support.** `node_logs_root` discovers dated collector
+  JSONL across multiple node directories with a default 250-event per-node cap.
+- **1920px layout compliance.** Expanded budget across every visible tab
+  including Reports, Subject History, Insights, LAN, Alerts, and System Status.
+- **Apple Find My accessory detection.** BLE advertisements with Apple
+  manufacturer data `0x004C` and payload type `0x12` are flagged, tracked
+  through Subject History/Reports, and trigger the BLE tracker alert rule.
+- **APRS-IS mobile trip evidence and grouped drilldowns.** Retained history
+  includes route samples, position spans, pass-through labels, and detail
+  panes for BLE/Wi-Fi/LAN grouped members without re-expanding main tables.
+- **Wi-Fi Monitor live-feed search box.** Events can be filtered by type,
+  channel, client MAC, AP/BSSID, SSID, signal, or timestamp.
+- **BLE empty-scan diagnostics and BlueZ warmup.** Repeated empty Bleak scan
+  windows now publish diagnostic status and can optionally run a short
+  `bluetoothctl` warmup pass to wake BlueZ discovery.
+- **Alerts table constrained layout.** Fixed-width columns with wrapping
+  Summary/Details prevent long content from stretching the page.
+- **Bluetooth table layout tightening.** Combined BLE Seen/Updates into one
+  count column, removed low-value columns from the main table, and widened
+  First/Last Seen for readable timestamps.
+- **Optional Pushover alert delivery.** Newly emitted or escalated alerts can
+  be sent through Pushover via a configurable background worker with
+  internet-connectivity gating.
+- **LAN annotation and decoder recovery fixes.** Custom LAN labels survive
+  refresh and appear consistently in tables and Reports. Managed decoders
+  (RTL-433, ADS-B) recover cleanly after transient RTL-SDR dongle loss.
 
 ## 0.2.8 - 2026-06-15
 

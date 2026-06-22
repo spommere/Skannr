@@ -22,7 +22,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from skannr.config import load_config
-from skannr.device_history import DeviceHistoryBuilder
+from skannr.wifi_ble_postprocessor import WiFiBLEPostprocessor
 from skannr.history_analysis import HistoryAnalyzer, save_analysis
 from skannr.log_utils import save_json_atomic
 from skannr.paths import CONFIG_PATH, RUNTIME_LOG_DIR
@@ -211,7 +211,7 @@ def rebuild_derived(config, log_dir, progress=False):
     reports_path = log_dir / "device_history" / "reports.json"
 
     status(f"rebuilding device history from {log_dir}", progress)
-    device_summary = DeviceHistoryBuilder(str(log_dir), state_path=str(device_path)).build(
+    device_summary = WiFiBLEPostprocessor(str(log_dir), state_path=str(device_path)).build(
         persist=True,
         merge_previous=False,
     )

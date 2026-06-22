@@ -1,6 +1,6 @@
 # Skannr Design Document
 
-Version: 0.2.8, 2026-06-15
+Version: 0.3.0, 2026-06-21
 
 ## 1. Overview
 
@@ -144,14 +144,13 @@ raw collector JSONL
        USGS earthquake, SWPC space-weather event, PWS station, LAN device/gateway
 
 Subject History
-  -> Wi-Fi/Bluetooth compatibility view         device_history.json tables
   -> Insights                                   short-lived tactical findings
   -> Reports                                    ranked intelligence summary
 ```
 
 The `device_history` directory name is historical. `subject_history.json` is the
-primary materialized history model; `device_history.json` is the derived
-Wi-Fi/Bluetooth compatibility view.
+single materialized history model. Per-collector direct state files and
+analysis artifacts also live in this directory.
 
 Subject History is the main materialized layer. Reports and longer-window
 analysis should read Subject History instead of rescanning raw collector logs.
@@ -1213,7 +1212,7 @@ compatibility view:
 - Subject History
 - Insights
 - Reports
-- Wi-Fi/Bluetooth compatibility view stored in `device_history.json`
+- Wi-Fi/Bluetooth subjects (via `WiFiBLEPostprocessor` internally)
 
 The dashboard-facing derived views have distinct responsibilities:
 
@@ -1386,9 +1385,9 @@ supported annotation families are Wi-Fi BSSIDs/clients, Bluetooth devices, and
 LAN devices/gateways.
 
 Randomized or locally administered identities are handled as low-confidence
-subjects unless another stable signal exists. Device History keeps raw per-MAC
-evidence in append-only JSONL logs, but its normal persisted state groups
-low-identity Wi-Fi/BLE churn before writing `device_history.json`. Named,
+subjects unless another stable signal exists. Raw per-MAC evidence stays in
+append-only JSONL logs, but the `WiFiBLEPostprocessor` groups low-identity
+Wi-Fi/BLE churn before folding records into Subject History. Named,
 vendor/model-rich, service-rich, finding-linked, or otherwise identifiable
 devices stay individual; low-identity randomized MACs collapse into aggregate
 Device History and Subject History rows such as `4934 randomized devices found`.
@@ -1914,8 +1913,8 @@ Adding a collector currently requires:
    `src/skannr/collectors/__init__.py`.
 7. If the collector contributes durable subjects, extend
    `SubjectHistoryBuilder.COLLECTORS` and add subject rollup logic. Wi-Fi and
-   Bluetooth still use `DeviceHistoryBuilder` underneath for their rich device
-   sessions.
+   Bluetooth use the internal `WiFiBLEPostprocessor` for their rich device
+   sessions, privacy grouping, and vendor enrichment.
 8. If the collector is a poll feed, make its live tab upsert by the same
    source event/subject identity and apply the configured live-feed TTL when
    appropriate.

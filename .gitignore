@@ -1,4 +1,5 @@
 # Local runtime state and generated artifacts.
+/.gh_token/
 /.codex/
 /.venv/
 /config/
@@ -11,6 +12,7 @@
 /scripts/validate*
 /scripts/ble*
 /git/
+/src.bak/
 
 # Python caches.
 __pycache__/
@@ -18,6 +20,7 @@ __pycache__/
 *$py.class
 
 # Local helper/output files.
+.gh_token
 /crtar.sh
 *.tar
 *.tar.gz

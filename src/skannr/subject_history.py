@@ -34,7 +34,7 @@ from .collectors.swpc import (
     xray_class_to_flux,
 )
 from .collectors.usgs import clean_usgs_data
-from .device_history import DeviceHistoryBuilder
+from .wifi_ble_postprocessor import WiFiBLEPostprocessor
 from .identity_policy import (
     bluetooth_group_label,
     bluetooth_grouping_candidate,
@@ -66,7 +66,7 @@ class SubjectHistoryBuilder:
 
     DIRECT_OBSERVATION_VERSION = 3
 
-    DEVICE_COLLECTORS = DeviceHistoryBuilder.COLLECTORS
+    DEVICE_COLLECTORS = WiFiBLEPostprocessor.COLLECTORS
     DIRECT_COLLECTORS = (
         "aprsis",
         "rayhunter",
@@ -126,28 +126,29 @@ class SubjectHistoryBuilder:
         """Return enabled collectors covered by Subject History."""
         return self.active_device_collectors() + self.active_direct_collectors()
 
-    def build(self, device_history_summary=None, persist=True):
+    def build(self, persist=True):
         """Return a display-ready Subject History summary."""
-        summary = self.build_summary(device_history_summary=device_history_summary)
+        summary = self.build_summary()
         if persist:
             self.save_summary(summary)
         return self.display_summary(summary, self.window_days)
 
-    def build_summary(self, device_history_summary=None):
+    def build_summary(self):
         """Build the materialized summary for the selected view window.
 
-        Wi-Fi/Bluetooth use the existing incremental Device History fold because
-        it owns session, signal, vendor, and live-overlay behavior. APRS-IS,
-        Rayhunter, RF decoders, and internet-fed collectors are folded here so
-        Reports no longer have separate raw-log readers for each collector.
+        Reads raw JSONL for all collectors. Wi-Fi/BLE observations are
+        processed through WiFiBLEPostprocessor, which handles session
+        tracking, vendor enrichment, and privacy grouping. Direct collectors
+        use registry-based per-collector builders.
         """
-        device_history_summary = device_history_summary or {}
         previous_summary = self.load_persisted_summary() or {}
-        device_subject_summary = DeviceHistoryBuilder(
+        wifi_ble = WiFiBLEPostprocessor(
             self.log_dir,
             state_path=self.device_history_state_path,
             window_days=self.window_days,
-        ).display_summary(device_history_summary, self.window_days)
+        )
+        wifi_ble_result = wifi_ble.build_summary()
+        wifi_ble_display = wifi_ble.display_summary(wifi_ble_result, self.window_days)
         (
             direct_observations,
             direct_checkpoint,
@@ -231,7 +232,7 @@ class SubjectHistoryBuilder:
             previous_generated_epoch = 0
         generated_at_epoch = max(now_epoch(), previous_generated_epoch + 1)
         raw_records = self.raw_records_by_collector(
-            device_history_summary,
+            wifi_ble_result,
             {
                 "aprsis": aprsis_records,
                 "rayhunter": rayhunter_records,
@@ -246,7 +247,7 @@ class SubjectHistoryBuilder:
             },
         )
         incremental_records = self.incremental_records_by_collector(
-            device_history_summary, direct_incremental_records
+            wifi_ble_result, direct_incremental_records
         )
         summary = {
             "schema": "subject_history.v1",
@@ -268,7 +269,7 @@ class SubjectHistoryBuilder:
             "raw_records_read": raw_records,
             "incremental_records_read_by_collector": incremental_records,
             "incremental_jsonl_read_stats": self.merge_incremental_read_stats(
-                device_history_summary.get("incremental_jsonl_read_stats"),
+                wifi_ble_result.get("incremental_jsonl_read_stats"),
                 direct_read_stats,
             ),
             "raw_log_files": {
@@ -276,7 +277,7 @@ class SubjectHistoryBuilder:
                 for collector in self.active_collectors()
             },
             "checkpoint": self.merge_jsonl_checkpoints(
-                device_history_summary.get("checkpoint"), direct_checkpoint
+                wifi_ble_result.get("checkpoint"), direct_checkpoint
             ),
             "direct_observation_state_path": self.direct_state_path,
             "device_history_embedded": False,
@@ -290,14 +291,21 @@ class SubjectHistoryBuilder:
             "pws": pws_events,
             "lan": lan_events,
         }
-        subject_input = dict(summary)
-        subject_input["wifi"] = device_subject_summary.get("wifi") or {
+        # Store wifi/ble in summary so it persists to subject_history.json
+        summary["wifi"] = wifi_ble_display.get("wifi") or {
             "access_points": [],
             "clients": [],
         }
-        subject_input["ble"] = device_subject_summary.get("ble") or {"devices": []}
+        summary["ble"] = wifi_ble_display.get("ble") or {"devices": []}
+        summary["bluetooth"] = wifi_ble_display.get("bluetooth") or summary["ble"]
+        subject_input = dict(summary)
+        subject_input["wifi"] = wifi_ble_display.get("wifi") or {
+            "access_points": [],
+            "clients": [],
+        }
+        subject_input["ble"] = wifi_ble_display.get("ble") or {"devices": []}
         subject_input["bluetooth"] = (
-            device_subject_summary.get("bluetooth") or subject_input["ble"]
+            wifi_ble_display.get("bluetooth") or subject_input["ble"]
         )
         summary["subjects"] = self.build_subject_records(subject_input)
         summary["subject_counts"] = self.count_subjects(summary["subjects"])
@@ -713,18 +721,12 @@ class SubjectHistoryBuilder:
                 "direct_observations",
             )
         }
-        device_summary = self.read_json_file(self.device_history_state_path) or {}
-        device_display = DeviceHistoryBuilder(
-            self.log_dir,
-            state_path=self.device_history_state_path,
-            window_days=window_days,
-        ).display_summary(device_summary, window_days)
-        output["wifi"] = device_display.get("wifi") or {
+        output["wifi"] = summary.get("wifi") or {
             "access_points": [],
             "clients": [],
         }
-        output["ble"] = device_display.get("ble") or {"devices": []}
-        output["bluetooth"] = device_display.get("bluetooth") or output["ble"]
+        output["ble"] = summary.get("ble") or {"devices": []}
+        output["bluetooth"] = summary.get("bluetooth") or output["ble"]
         for collector in (
             "aprsis",
             "rayhunter",

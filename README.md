@@ -35,6 +35,7 @@ Versioning policy:
 
 - `0.1.x`: bug fixes and documentation updates
 - `0.2.x`: meaningful feature additions or data format changes
+- `0.3.x`: architecture and collector data-flow changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
 The rest of this README is the operator manual.
@@ -816,14 +817,13 @@ runtime/logs/<collector>/YYYY-MM-DD.jsonl
 runtime/logs/skannr.log
 runtime/logs/device_history/subject_history.json
 runtime/logs/device_history/subject_annotations.json
-runtime/logs/device_history/device_history.json
 runtime/logs/device_history/history_analysis.json
 runtime/logs/device_history/reports.json
 ```
 
 The `device_history` directory name is historical. `subject_history.json` is the
-primary materialized history model; `device_history.json` is the derived
-Wi-Fi/Bluetooth compatibility view. `subject_annotations.json` is a durable user
+primary materialized history model; the directory also stores per-collector
+direct state and analysis artifacts. `subject_annotations.json` is a durable user
 overlay for custom subject annotations. It is not rebuilt from raw logs and is
 not removed by log pruning. Delete it explicitly only when intentionally
 removing operator-provided names as part of a clean start.
@@ -832,16 +832,17 @@ Randomized or locally administered identities are kept as raw evidence in JSONL
 logs but are grouped in normal materialized history when they have no stronger
 stable identity. For example, Wi-Fi monitor probe MACs and Bluetooth private
 addresses appear as aggregate randomized-device rows instead of thousands of
-one-off subjects. Device History performs this grouping before persisting
-`device_history.json`, so normal refreshes do not keep rewriting per-MAC churn.
+one-off subjects. The `WiFiBLEPostprocessor` (internal to Subject History)
+performs this grouping, so normal refreshes do not keep rewriting per-MAC churn.
 Older installs may still contain `findings_history.json`; current Skannr treats
 that file as a legacy compatibility artifact and does not use it as an Insights
 or Reports upstream.
 
 `subject_history.json` is the collector-neutral materialized layer for
-long-lived intelligence. Wi-Fi and Bluetooth still reuse an internal
-Wi-Fi/Bluetooth compatibility builder, but the resulting AP, client, and
-Bluetooth rows are exposed as Subject History alongside APRS-IS, Rayhunter,
+long-lived intelligence. Wi-Fi and Bluetooth observations are processed by an
+internal `WiFiBLEPostprocessor` (session tracking, vendor enrichment, privacy
+grouping), but the resulting AP, client, and Bluetooth rows are exposed as
+Subject History alongside APRS-IS, Rayhunter,
 RTL-SDR, RTL-433, ADS-B, NOAA, USGS, SWPC, PWS, and LAN subjects. The browser receives the
 smaller subject/report views, not the retained direct-observation state.
 
