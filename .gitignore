@@ -6,6 +6,7 @@
 /runtime/
 /logs/
 /pcaps/
+/CLAUDE.md
 /VERSION_PLAN.md
 /VERSION_HISTORY.md
 /scripts/skannr_reg*
@@ -23,6 +24,7 @@ __pycache__/
 # Local helper/output files.
 .gh_token
 /crtar.sh
+/crtarall.sh
 *.tar
 *.tar.gz
 *.tgz

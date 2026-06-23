@@ -165,6 +165,7 @@ BLE supports two scan methods. BlueZ/Bleak is the normal primary method. `blueto
 | `scan_interval_sec` | Delay between successful BLE scan passes. |
 | `discover_timeout_sec` | Hard timeout for one Bleak discovery/callback scan pass. `0` uses scanner defaults. |
 | `device_timeout_sec` | Live-row age-out after a BLE subject stops being observed. |
+| `cache_stale_rssi_threshold` | Consecutive identical RSSI values before a device is treated as a stale BlueZ cache ghost (0 disables). |
 | `active_scan` | Requests scan-response data when supported. |
 | `callback_scan` | Uses Bleak advertisement callback scanning. |
 | `force_discover_scan` | Forces Bleak discover mode instead of callback mode. |
@@ -219,8 +220,9 @@ BLE supports two scan methods. BlueZ/Bleak is the normal primary method. `blueto
 | `interface` | Single monitor interface or `auto`. |
 | `interfaces` | Ordered interface preference/allow list. |
 | `interface_regex` | Regex filter for auto-discovered monitor interfaces. |
-| `prepare_monitor_mode` | Lets Skannr switch a configured interface into monitor mode. |
-| `set_networkmanager_unmanaged` | Marks the interface unmanaged through NetworkManager before monitor setup. |
+| `prepare_monitor_mode` | Lets Skannr discover or prepare a safe monitor interface before capture. |
+| `allow_in_place_monitor_mode` | Allows the older in-place fallback that brings the source interface down temporarily. Default is false. |
+| `set_networkmanager_unmanaged` | Deprecated compatibility knob. Skannr no longer edits NetworkManager state at runtime. |
 | `monitor_setup_timeout_sec` | Timeout for each monitor setup command. |
 | `bands` | Channel bands to consider, usually `2.4` and/or `5`. |
 | `channel_mode` | `hop` for channel hopping or `fixed` for one configured channel. |

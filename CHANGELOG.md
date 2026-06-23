@@ -7,6 +7,19 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.3.1 - 2026-06-22
+
+- **Wi-Fi Monitor safety rework.** Skannr no longer rewrites `NetworkManager.conf`,
+  migrates default routes, or guesses across arbitrary interfaces for monitor mode.
+  `prepare_monitor_mode: true` prefers creating a separate `monX` interface;
+  in-place conversion is behind explicit `allow_in_place_monitor_mode: true`.
+  Managed Wi-Fi scan auto-selection prefers the current default-route interface to
+  reduce conflict with the monitor adapter.
+- **BLE stale-cache detection.** The BLE collector now tracks RSSI across scan
+  cycles and suppresses devices whose RSSI stays identical for N consecutive
+  cycles (configurable via `cache_stale_rssi_threshold`, default 10), filtering
+  out BlueZ cached entries that stopped advertising.
+
 ## 0.3.0 - 2026-06-21
 
 - **Subject History is now the single source of truth for Wi-Fi/BLE.** The

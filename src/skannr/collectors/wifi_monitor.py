@@ -21,9 +21,13 @@ from .base import (
 from .hardware import (
     availability_records,
     configured_candidates,
+    default_route_interface,
+    interface_supports_monitor_mode,
     monitor_mode_interfaces,
     package_available,
+    phy_for_interface,
     sort_wifi_interfaces,
+    wireless_interface_details,
     wireless_interfaces,
 )
 from .wifi import WiFiCollector
@@ -105,10 +109,21 @@ class WiFiMonitorCollector(WiFiCollector):
         self._channel_plan = []
         self._supported_channels = {}
         self._monitor_setup_warning = ""
+        self._prepared_monitor_source = None
+        self._created_monitor_interface = None
 
     def detect(self):
         """Report availability without starting sniffing or channel hopping."""
         self.log_monitor_setup_context("detect")
+        wireless = wireless_interfaces()
+        if len(wireless) < 2:
+            self.active_hardware = None
+            self.state = STATE_OFFLINE
+            self.warning = (
+                "Only one Wi-Fi interface found ({}). Monitor-mode capture "
+                "needs a second adapter to keep network connectivity."
+            ).format(", ".join(wireless))
+            return False
         if not command_path("iw"):
             self.active_hardware = None
             self.state = STATE_OFFLINE
@@ -137,6 +152,18 @@ class WiFiMonitorCollector(WiFiCollector):
         """Start monitor-mode sniffing only after the user clicks Start."""
         self._running = True
         self.log_monitor_setup_context("start")
+        wireless = wireless_interfaces()
+        if len(wireless) < 2:
+            self.state = STATE_OFFLINE
+            self.warning = (
+                "Only one Wi-Fi interface found ({}). Monitor-mode capture "
+                "needs a second adapter to keep network connectivity."
+            ).format(", ".join(wireless))
+            msg = self.warning
+            logging.warning("Wi-Fi Monitor startup failed: %s", msg)
+            await self.emit("collector_offline", {"reason": msg}, "warning")
+            self._running = False
+            return
         self.prepare_configured_monitor_interface()
         iface = self.select_monitor_interface()
         if not iface:
@@ -321,17 +348,42 @@ class WiFiMonitorCollector(WiFiCollector):
         self._hopper_task = loop.create_task(self.channel_hopper(iface))
         self._sniff_thread = threading.Thread(target=sniff_loop, daemon=True)
         self._sniff_thread.start()
+        monitor_check_counter = 0
         while self._running:
+            monitor_check_counter += 1
+            # Periodically verify the interface is still in monitor mode.
+            # The managed WiFiCollector's iw scan (which runs before our
+            # monitor-mode conversion) can reset the interface, and some
+            # drivers (e.g. rtl88xxau) reset on every scan call.
+            if (monitor_check_counter % 5 == 0
+                    and self.active_hardware
+                    and self.active_hardware not in self.monitor_interfaces()):
+                source_iface = self._prepared_monitor_source or self.active_hardware
+                logging.warning(
+                    "Wi-Fi Monitor interface %s was reset to managed mode, "
+                    "re-asserting monitor mode", self.active_hardware
+                )
+                ok, detail = self.set_interface_monitor_mode(source_iface)
+                if not ok:
+                    logging.warning(
+                        "Wi-Fi Monitor re-conversion failed: %s", detail
+                    )
+                else:
+                    self.active_hardware = detail
             await asyncio.sleep(1)
 
     async def stop(self):
-        """Stop sniffing and channel hopping, but leave monitor mode intact."""
+        """Stop sniffing and channel hopping; delete temporary monitor iface."""
         await BaseCollector.stop(self)
         if self._hopper_task and not self._hopper_task.done():
             self._hopper_task.cancel()
             await asyncio.gather(self._hopper_task, return_exceptions=True)
         if self._sniff_thread and self._sniff_thread.is_alive():
             self._sniff_thread.join(timeout=3)
+        if self._created_monitor_interface:
+            self.delete_monitor_interface(self._created_monitor_interface)
+            self._created_monitor_interface = None
+        self._prepared_monitor_source = None
 
     async def channel_hopper(self, iface):
         """Retune the monitor interface across the current channel plan."""
@@ -401,7 +453,18 @@ class WiFiMonitorCollector(WiFiCollector):
         return False
 
     def select_monitor_interface(self):
-        """Return the best configured or discovered monitor-mode interface."""
+        """Return the best configured or discovered monitor-mode interface.
+
+        Priority order:
+        1. ``self.active_hardware`` — set by
+           ``prepare_configured_monitor_interface()`` after a successful
+           conversion, so we don't need to re-check ``iw dev`` (which can lag
+           behind the kernel interface type change by a few hundred ms).
+        2. Explicitly configured candidates found in monitor mode.
+        3. Any discovered monitor-mode interface, sorted by capability.
+        """
+        if self.active_hardware:
+            return self.active_hardware
         configured = configured_candidates(
             self.config, "interfaces", extra_keys=("interface",)
         )
@@ -413,28 +476,31 @@ class WiFiMonitorCollector(WiFiCollector):
         return ranked[0] if ranked else None
 
     def prepare_configured_monitor_interface(self):
-        """Optionally switch a specifically configured interface to monitor mode."""
+        """Optionally prepare a safe monitor interface without host-policy edits."""
         if not bool(self.config.get("prepare_monitor_mode", False)):
             logging.info("Wi-Fi Monitor monitor-mode setup disabled")
             return
         self._monitor_setup_warning = ""
-        candidates = self.configured_monitor_candidates()
+        self._prepared_monitor_source = None
+        candidates = self.monitor_setup_candidates()
         logging.info("Wi-Fi Monitor monitor-mode setup candidates=%s", candidates)
         if not candidates:
             self._monitor_setup_warning = (
-                "prepare_monitor_mode is true, but no concrete interface is "
-                "configured; set interface: wlan1 or interfaces: [wlan1]"
+                "prepare_monitor_mode is true, but no safe monitor-capable "
+                "non-uplink adapter was found"
             )
-            logging.warning("Wi-Fi Monitor setup skipped: %s", self._monitor_setup_warning)
+            logging.warning(
+                "Wi-Fi Monitor setup skipped: %s", self._monitor_setup_warning
+            )
+            self.warning = self._monitor_setup_warning
             return
         for iface in candidates:
-            if iface in self.monitor_interfaces():
-                logging.info("Wi-Fi Monitor interface already in monitor mode: %s", iface)
-                return
             ok, detail = self.set_interface_monitor_mode(iface)
             if ok:
-                self.active_hardware = iface
+                self.active_hardware = detail
+                self._prepared_monitor_source = iface
                 self.warning = None
+                self._monitor_setup_warning = ""
                 return
             self._monitor_setup_warning = detail
             self.warning = detail
@@ -443,7 +509,8 @@ class WiFiMonitorCollector(WiFiCollector):
         """Log enough config/discovery context to debug monitor setup failures."""
         logging.info(
             "Wi-Fi Monitor %s config prepare_monitor_mode=%s interface=%s "
-            "interfaces=%s iw=%s ip=%s nmcli=%s monitors=%s wireless=%s",
+            "interfaces=%s iw=%s ip=%s nmcli=%s default_route=%s monitors=%s "
+            "wireless=%s",
             phase,
             bool(self.config.get("prepare_monitor_mode", False)),
             self.config.get("interface", "auto"),
@@ -451,6 +518,7 @@ class WiFiMonitorCollector(WiFiCollector):
             command_path("iw") or "missing",
             command_path("ip") or "missing",
             command_path("nmcli") or "missing",
+            default_route_interface() or "none",
             self.monitor_interfaces(),
             wireless_interfaces(),
         )
@@ -466,24 +534,133 @@ class WiFiMonitorCollector(WiFiCollector):
             if iface and iface != "auto" and self.interface_allowed(iface)
         ]
 
+    def auto_monitor_candidates(self):
+        """Return safe auto-selected monitor-source candidates.
+
+        Auto mode is limited to USB/external adapters that are monitor-capable
+        and are not the current default-route interface. This keeps wlan0/wlan1
+        naming swaps irrelevant while avoiding guesses against the live uplink.
+        """
+        route_iface = default_route_interface()
+        candidates = []
+        for iface in wireless_interfaces():
+            if iface == route_iface or not self.interface_allowed(iface):
+                continue
+            details = wireless_interface_details(iface)
+            if not details.get("usb"):
+                continue
+            if not self.interface_supports_monitor_mode(iface):
+                continue
+            candidates.append(iface)
+        return sort_wifi_interfaces(candidates, self.config)
+
+    def monitor_setup_candidates(self):
+        """Return explicit or safe auto-selected source interfaces."""
+        configured = self.configured_monitor_candidates()
+        if configured:
+            return configured
+        if str(self.config.get("interface", "auto")).strip().lower() != "auto":
+            return []
+        return self.auto_monitor_candidates()
+
+    def interface_supports_monitor_mode(self, iface):
+        """Return True when the adapter behind *iface* advertises monitor mode."""
+        return interface_supports_monitor_mode(iface)
+
+    def monitor_interface_on_same_phy(self, iface):
+        """Return an existing monitor interface on the same phy, if any."""
+        source_phy = self.phy_for_interface(iface)
+        if not source_phy:
+            return None
+        for monitor_iface in self.monitor_interfaces():
+            if self.phy_for_interface(monitor_iface) == source_phy:
+                return monitor_iface
+        return None
+
+    def build_monitor_interface_name(self, phy):
+        """Return a deterministic monitor interface name for one phy."""
+        suffix = str(phy or "phy0").replace("phy", "")
+        return "mon{}".format(suffix or "0")
+
+    def delete_monitor_interface(self, iface):
+        """Delete one temporary monitor interface, ignoring cleanup errors."""
+        if not iface:
+            return
+        self.run_setup_command(["iw", "dev", iface, "del"])
+
+    def create_monitor_interface(self, iface):
+        """Create a separate monitor interface on the same phy as *iface*."""
+        phy = self.phy_for_interface(iface)
+        if not phy:
+            return False, "could not resolve phy for {}".format(iface)
+        existing = self.monitor_interface_on_same_phy(iface)
+        if existing:
+            return True, existing
+        monitor_iface = self.build_monitor_interface_name(phy)
+        if os.path.exists(os.path.join("/sys/class/net", monitor_iface)):
+            if self.phy_for_interface(monitor_iface) == phy:
+                if monitor_iface in self.monitor_interfaces():
+                    return True, monitor_iface
+                return False, (
+                    "{} already exists on {} but is not in monitor mode"
+                ).format(monitor_iface, phy)
+            return False, (
+                "{} already exists on another device; cannot create monitor iface"
+            ).format(monitor_iface)
+        steps = [
+            ["iw", "phy", phy, "interface", "add", monitor_iface, "type", "monitor"],
+            ["ip", "link", "set", monitor_iface, "up"],
+        ]
+        for command in steps:
+            ok, output = self.run_setup_command(command)
+            if not ok:
+                self.delete_monitor_interface(monitor_iface)
+                return False, "{} failed: {}".format(" ".join(command), output)
+        if monitor_iface not in self.monitor_interfaces():
+            self.delete_monitor_interface(monitor_iface)
+            return False, "{} was created but is not in monitor mode".format(
+                monitor_iface
+            )
+        self._created_monitor_interface = monitor_iface
+        return True, monitor_iface
+
     def set_interface_monitor_mode(self, iface):
-        """Best-effort host-local monitor-mode setup for one configured interface."""
+        """Prepare or discover a monitor interface without touching the uplink."""
         if not os.path.exists(os.path.join("/sys/class/net", iface)):
             return False, "{} does not exist".format(iface)
-        if bool(self.config.get("set_networkmanager_unmanaged", True)):
-            self.run_setup_command(["nmcli", "dev", "set", iface, "managed", "no"])
-            self.run_setup_command(["nmcli", "dev", "disconnect", iface])
+        if iface in self.monitor_interfaces():
+            return True, iface
+        existing = self.monitor_interface_on_same_phy(iface)
+        if existing:
+            return True, existing
+        if iface == default_route_interface():
+            return False, (
+                "refusing to touch {} because it currently carries the default "
+                "IPv4 route"
+            ).format(iface)
+        if not self.interface_supports_monitor_mode(iface):
+            return False, "{} does not advertise monitor-mode support".format(
+                iface
+            )
+        ok, detail = self.create_monitor_interface(iface)
+        if ok:
+            return True, detail
+        if not bool(self.config.get("allow_in_place_monitor_mode", False)):
+            return False, (
+                "{}; Skannr left {} unchanged because in-place monitor-mode "
+                "conversion is disabled"
+            ).format(detail, iface)
         steps = [
             ["ip", "link", "set", iface, "down"],
             ["iw", "dev", iface, "set", "type", "monitor"],
             ["ip", "link", "set", iface, "up"],
         ]
         for command in steps:
-            ok, output = self.run_setup_command(command)
-            if not ok:
+            success, output = self.run_setup_command(command)
+            if not success:
                 return False, "{} failed: {}".format(" ".join(command), output)
         if iface in self.monitor_interfaces():
-            return True, "{} is in monitor mode".format(iface)
+            return True, iface
         return False, "{} is still not reported as monitor mode".format(iface)
 
     def run_setup_command(self, command):
@@ -607,25 +784,7 @@ class WiFiMonitorCollector(WiFiCollector):
 
     def phy_for_interface(self, iface):
         """Map an interface from 'iw dev' to its phy name such as phy0."""
-        if not iface:
-            return None
-        try:
-            output = subprocess.check_output(
-                [command_path("iw") or "iw", "dev"],
-                stderr=subprocess.STDOUT,
-                universal_newlines=True,
-                timeout=5,
-            )
-        except Exception:
-            return None
-        current_phy = None
-        for raw_line in output.splitlines():
-            line = raw_line.strip()
-            if line.startswith("phy#"):
-                current_phy = "phy{}".format(line.split("#", 1)[1])
-            elif line == "Interface {}".format(iface):
-                return current_phy
-        return None
+        return phy_for_interface(iface)
 
     def build_channel_plan(self):
         """Build a low-overhead channel plan from configured controls.

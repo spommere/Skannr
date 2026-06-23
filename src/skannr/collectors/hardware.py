@@ -7,6 +7,7 @@ know about individual collector hardware.
 
 import importlib.util
 import os
+import re
 import subprocess
 
 
@@ -119,6 +120,29 @@ def sort_bluetooth_adapters(adapters, config=None):
 def network_interface_exists(interface):
     """Check whether a Linux network interface exists."""
     return os.path.exists(os.path.join("/sys/class/net", interface))
+
+
+def default_route_interface():
+    """Return the network interface used for the default IPv4 route, or None.
+
+    Putting this interface into monitor mode would kill host network connectivity,
+    so monitor-mode setup guards against touching it.
+    """
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "route", "show", "default"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            universal_newlines=True,
+        )
+        if result.returncode == 0:
+            match = re.search(r"\bdev\s+(\S+)", result.stdout)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+    return None
 
 
 def wireless_interfaces():
@@ -253,6 +277,58 @@ def sort_wifi_interfaces(interfaces, config=None):
         interfaces,
         key=lambda item: (-wifi_interface_score(item, config), item),
     )
+
+
+def phy_for_interface(interface):
+    """Return the iw phy name for one Wi-Fi interface, such as phy0."""
+    try:
+        output = subprocess.check_output(
+            ["iw", "dev"],
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+
+    current_phy = None
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line.startswith("phy#"):
+            current_phy = "phy{}".format(line.split("#", 1)[1])
+        elif line == "Interface {}".format(interface):
+            return current_phy
+    return None
+
+
+def interface_supports_monitor_mode(interface):
+    """Return True when the interface phy advertises monitor-mode support."""
+    phy = phy_for_interface(interface)
+    if not phy:
+        return False
+    try:
+        output = subprocess.check_output(
+            ["iw", "phy", phy, "info"],
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            timeout=10,
+        )
+    except Exception:
+        return False
+
+    in_modes = False
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line == "Supported interface modes:":
+            in_modes = True
+            continue
+        if not in_modes:
+            continue
+        if raw_line and not raw_line.startswith("\t"):
+            break
+        if "monitor" in line.split():
+            return True
+    return False
 
 
 def monitor_mode_interfaces():

@@ -22,6 +22,7 @@ from .base import (
 from .hardware import (
     availability_records,
     configured_candidates,
+    default_route_interface,
     monitor_mode_interfaces,
     network_interface_exists,
     sort_wifi_interfaces,
@@ -74,7 +75,15 @@ class WiFiCollector(BaseCollector):
 
         discovered = managed_scan_interfaces()
         configured = configured_candidates(self.config, "interfaces")
-        candidates = configured or sort_wifi_interfaces(discovered, self.config)
+        if configured:
+            candidates = configured
+        else:
+            candidates = sort_wifi_interfaces(discovered, self.config)
+            route_iface = default_route_interface()
+            if route_iface in discovered:
+                candidates = [route_iface] + [
+                    iface for iface in candidates if iface != route_iface
+                ]
         for interface in candidates:
             if interface in discovered or self.interface_exists(interface):
                 self.active_hardware = interface
@@ -120,6 +129,24 @@ class WiFiCollector(BaseCollector):
             },
         )
         while self._running:
+            # If the interface was converted to monitor mode (e.g. by
+            # wifi_monitor), re-select a managed interface. Scanning on a
+            # monitor-mode interface can cause the driver to reset the mode
+            # back to managed, breaking monitor capture.
+            if iface not in managed_scan_interfaces():
+                self.detect()
+                if not self.active_hardware:
+                    self.state = STATE_OFFLINE
+                    self.warning = (
+                        "No managed Wi-Fi interface available "
+                        "(all wireless interfaces are in monitor mode)"
+                    )
+                    await self.emit(
+                        "collector_offline", {"reason": self.warning}, "warning"
+                    )
+                    return
+                iface = self.active_hardware
+                continue
             try:
                 # Reassert the interface state before every scan. On small Pi
                 # setups the interface can be administratively down after errors.

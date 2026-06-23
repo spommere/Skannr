@@ -1138,110 +1138,90 @@ It:
 - folds AP and client observations into Wi-Fi subjects
 
 By default, prepare a separate adapter first, then click Start in System Status
-or the Wi-Fi Monitor tab. On Raspberry Pi systems with a dedicated ALFA or
-similar USB adapter, keep that adapter out of NetworkManager and switch it to
-monitor mode before starting the collector. On fresh installs, precheck/postcheck
-seeds `interfaces` with the first interface already reported as monitor mode,
-so a dedicated `wlan1` monitor adapter is not accidentally used by Wi-Fi Scan.
+or the Wi-Fi Monitor tab. On Raspberry Pi systems with a dedicated USB monitor
+adapter, keep host connectivity on the built-in interface and keep the dongle
+out of normal client use with a one-time NetworkManager setup on the Pi itself.
 
-Skannr can also prepare a specifically configured interface before capture. Use
-this only for a dedicated monitor adapter, not for the normal network interface.
-The interface must be concrete; `prepare_monitor_mode: true` with
-`interface: auto` and an empty `interfaces` list is treated as unsafe and Skannr
-will not guess which managed adapter to convert:
+Skannr can also prepare a monitor interface before capture. The current safety
+rules are:
+
+- if only one Wi-Fi interface is present, Wi-Fi Monitor stays offline
+- Skannr never rewrites `NetworkManager.conf`
+- Skannr never migrates default routes
+- Skannr never touches the current default-route interface
+- `prepare_monitor_mode: true` first tries to create a separate `monX`
+  interface on the selected phy, so the source interface stays up
+- in-place conversion is disabled by default and only happens when
+  `allow_in_place_monitor_mode: true` is set explicitly
+
+For reboot-stable Pi setups where `wlan0` and `wlan1` may swap names, use
+`interface: auto` and leave `interfaces: []`. In that mode Skannr only
+auto-selects a USB/external adapter that both advertises monitor-mode support
+and is not the current uplink/default-route interface:
 
 ```yaml
-interface: wlan1
-interfaces:
-- wlan1
+interface: auto
+interfaces: []
 prepare_monitor_mode: true
-set_networkmanager_unmanaged: true
+allow_in_place_monitor_mode: false
 ```
 
-With that setting, Skannr runs `nmcli dev set wlan1 managed no` when available,
-then `ip link set wlan1 down`, `iw dev wlan1 set type monitor`, and
-`ip link set wlan1 up` before sniffing. If `interface` is `auto`, Skannr only
-discovers existing monitor-mode interfaces and does not guess which managed
-adapter should be changed.
+If you prefer an explicit allowlist, set `interfaces:` to one or more concrete
+source interfaces. Skannr still refuses to touch whichever interface currently
+carries the default route.
+
+With `prepare_monitor_mode: true`, Skannr first tries:
+
+```bash
+iw phy <phy> interface add monX type monitor
+ip link set monX up
+```
+
+If that succeeds, capture runs on the new `monX` interface and the original
+source interface is left alone. If the driver cannot create a separate monitor
+interface, Skannr leaves the source interface unchanged unless
+`allow_in_place_monitor_mode: true` is explicitly enabled.
 
 When this runs from the Skannr service, the service user must have enough
 privilege to change Wi-Fi interface mode, usually root or equivalent
 `CAP_NET_ADMIN`. Manual `sudo iw ...` success does not prove a non-root Skannr
 service can do the same thing. After changing `config/collectors/wifi_monitor.yaml`,
-restart Skannr and give NetworkManager/device state a short moment to settle
-before checking `iw dev wlan1 info`.
+restart Skannr and then check `iw dev` for the created monitor interface.
 
 For setup debugging, check `runtime/logs/skannr.log` or `journalctl -u skannr`.
 Useful lines look like:
 
 ```text
-Wi-Fi Monitor start config prepare_monitor_mode=True interface=wlan1 interfaces=['wlan1'] iw=/usr/sbin/iw ip=/usr/sbin/ip nmcli=/usr/bin/nmcli monitors=[] wireless=['wlan0', 'wlan1']
-Wi-Fi Monitor monitor-mode setup candidates=['wlan1']
-Wi-Fi Monitor setup command passed command=/usr/bin/nmcli dev set wlan1 managed no output=...
-Wi-Fi Monitor setup command passed command=/usr/sbin/iw dev wlan1 set type monitor output=...
+Wi-Fi Monitor start config prepare_monitor_mode=True interface=auto interfaces=[] iw=/usr/sbin/iw ip=/usr/sbin/ip nmcli=/usr/bin/nmcli default_route=wlan1 monitors=[] wireless=['wlan0', 'wlan1']
+Wi-Fi Monitor monitor-mode setup candidates=['wlan0']
+Wi-Fi Monitor setup command passed command=/usr/sbin/iw phy phy0 interface add mon0 type monitor output=...
+Wi-Fi Monitor setup command passed command=/usr/sbin/ip link set mon0 up output=...
 ```
 
-If the log says `interface=auto interfaces=[]` or `candidates=[]`, Skannr loaded
-the config but has no concrete interface to prepare. Set `interface: wlan1` or
-`interfaces: [wlan1]`.
+If the log says `candidates=[]`, Skannr did not find a safe monitor-capable
+non-uplink adapter to prepare. In that case Wi-Fi Monitor stays offline rather
+than guessing.
 
-For quick testing, this is usually enough until the next reboot or
-NetworkManager reset:
+If your driver cannot create a separate monitor interface and you still want to
+allow in-place conversion on a dedicated non-uplink adapter, enable it
+explicitly:
 
-```bash
-sudo nmcli dev set wlan1 managed no
-sudo ip link set wlan1 down
-sudo iw dev wlan1 set type monitor
-sudo ip link set wlan1 up
-iw dev wlan1 info
+```yaml
+prepare_monitor_mode: true
+allow_in_place_monitor_mode: true
 ```
 
-For a permanent setup, prefer a NetworkManager keyfile entry so the monitor
-adapter is not claimed as a normal managed Wi-Fi interface:
+That fallback is intentionally off by default because it requires bringing the
+source interface down.
 
-```ini
-[keyfile]
-unmanaged-devices=interface-name:wlan1
-```
+For a permanent host setup, bind the normal client profile to the built-in
+adapter by stable identity such as MAC address, and keep the monitor dongle out
+of normal client use by stable identity as well. Skannr no longer edits those
+host-level settings for you.
 
-Then restart NetworkManager:
-
-```bash
-sudo systemctl restart NetworkManager
-```
-
-You can also make monitor-mode preparation automatic with a small systemd
-oneshot service. This does not edit NetworkManager config; it assumes the
-adapter is already unmanaged or otherwise safe to reconfigure:
-
-```ini
-[Unit]
-Description=Set wlan1 to monitor mode
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/ip link set wlan1 down
-ExecStart=/usr/sbin/iw dev wlan1 set type monitor
-ExecStart=/usr/sbin/ip link set wlan1 up
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Save that as a local systemd unit such as
-`/etc/systemd/system/wlan1-monitor-mode.service`, then enable it:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now wlan1-monitor-mode.service
-iw dev wlan1 info
-```
-
-If `iw dev wlan1 info` does not show `type monitor`, Wi-Fi Monitor will remain
-offline and System Status will report that no monitor-mode interface was found
-or that monitor setup failed.
+If `iw dev` never shows a monitor interface such as `mon0` or `wlan1` with
+`type monitor`, Wi-Fi Monitor will remain offline and System Status will report
+that no monitor-mode interface was found or that setup failed.
 
 If no monitor-mode client/probe frames have been summarized for the selected
 view, Subject History shows an explicit no-data message under Wi-Fi Monitor.
@@ -1261,7 +1241,7 @@ interface: auto
 interfaces: []
 interface_regex: wlan|^mon
 prepare_monitor_mode: false
-set_networkmanager_unmanaged: true
+allow_in_place_monitor_mode: false
 monitor_setup_timeout_sec: 10
 bands:
 - '2.4'

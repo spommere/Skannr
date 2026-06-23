@@ -1,6 +1,6 @@
 # Skannr Design Document
 
-Version: 0.3.0, 2026-06-21
+Version: 0.3.1, 2026-06-22
 
 ## 1. Overview
 
@@ -459,30 +459,29 @@ Operational model:
   monitor mode in System Status. Fresh-config precheck/postcheck can seed
   `wifi_monitor.interfaces` with the first detected monitor-mode interface. By
   default Skannr does not change adapter mode.
-- When `prepare_monitor_mode: true` is set with a concrete interface such as
-  `wlan1`, Skannr runs `nmcli dev set <iface> managed no` when requested and
-  available, then `ip link set <iface> down`, `iw dev <iface> set type monitor`,
-  and `ip link set <iface> up` before capture.
-- `prepare_monitor_mode` is intentionally explicit. `interface: auto` means
-  discover an already monitor-mode adapter; it does not let Skannr choose one of
-  the managed wireless adapters to convert. If `interface: auto` and
-  `interfaces: []` are configured, setup logs `candidates=[]` and exits without
-  changing adapter mode.
+- When `prepare_monitor_mode: true` is enabled, Skannr first tries to create a
+  separate monitor interface on the selected phy with `iw phy <phy> interface
+  add monX type monitor`, then brings only that monitor interface up.
+- `interface: auto` is allowed for preparation, but only for a safe subset:
+  USB/external adapters that advertise monitor-mode support and are not the
+  current default-route interface. This keeps `wlan0`/`wlan1` renaming from
+  mattering after reboot.
+- If no safe auto candidate exists, Wi-Fi Monitor stays offline rather than
+  guessing.
+- In-place conversion of a source interface is disabled by default and requires
+  explicit `allow_in_place_monitor_mode: true` because it brings that source
+  interface down temporarily.
 - Monitor-mode preparation requires the Skannr service process to have network
   administration privilege, usually root or equivalent `CAP_NET_ADMIN`. Manual
   success with `sudo ip` or `sudo iw` only proves the commands work for the
   interactive shell, not for a non-root service.
-- A dedicated RPi monitor adapter should normally be excluded from
-  NetworkManager with a persistent keyfile entry such as
-  `unmanaged-devices=interface-name:wlan1`. The transient alternative is
-  `nmcli dev set wlan1 managed no`, but that may not survive reboot or
-  NetworkManager restart.
+- Skannr does not rewrite `NetworkManager.conf` or migrate default routes. Host
+  connectivity policy stays an OS-level responsibility outside the collector.
 - Monitor-mode setup can be automated outside Skannr with a systemd oneshot
-  that runs `ip link set wlan1 down`, `iw dev wlan1 set type monitor`, and
-  `ip link set wlan1 up`. This is preferred over having Skannr change global
-  OS network-manager files at runtime.
-- Monitor preparation remains opt-in and interface-specific so Skannr does not
-  accidentally convert the normal managed Wi-Fi interface.
+  or host-level network setup. This is still preferred when a site wants full
+  control over NetworkManager and boot ordering.
+- Monitor preparation remains opt-in and conservative so Skannr does not
+  accidentally disrupt the normal managed Wi-Fi lifeline.
 
 Important events:
 

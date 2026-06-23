@@ -1,5 +1,5 @@
-This is about the Skannr (or 'skannr') project in /scratch/spomemre/Skannr.
-Although there's a .gitignore, it is NOT a git repo; the upload to github is done on hampi4.  If this is a new session here, take a moment to study the product.
+This is about the Skannr (or 'skannr') project in /home/pi/Skannr.
+This IS a git repo; development happens directly on this machine (a Raspberry Pi).
 
 Some rules about documenting progress and versioning:
 
@@ -42,4 +42,7 @@ VERY IMPORTANT FOR TOKEN SAVING PURPOSES:
 
 The only thing that meeds to run on this machine, is skannr_regression_test.py and skannr_admin.py but I do this outside Codex.
 
-4. You are allowed to write to /scratch/spommere/.codex.
+4. You are allowed to write to /home/pi/.claude/projects/-home-pi-Skannr/memory.
+
+
+5.always make good plans, think it through. Don't jump the gun making code changes.

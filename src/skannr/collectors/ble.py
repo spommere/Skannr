@@ -210,6 +210,10 @@ class BLECollector(BaseCollector):
         self._runtime_bluetoothctl_scan = bool(
             self.config.get("force_bluetoothctl_scan", False)
         )
+        self._stale_rssi_threshold = int(
+            self.config.get("cache_stale_rssi_threshold", 10)
+        )
+        self._stale_rssi: dict[str, list[int]] = {}
         self.prepare_adapter()
         await self.emit(
             "scanner_started",
@@ -291,6 +295,11 @@ class BLECollector(BaseCollector):
                 mac = getattr(device, "address", None) or "unknown"
                 rssi = self.device_rssi(device, advertisement)
                 name = self.device_name(device, advertisement)
+                # Suppress devices that appear to be BlueZ cache ghosts
+                # (identical RSSI across many scan cycles — physically impossible
+                # for a real BLE signal; the device stopped advertising long ago).
+                if self._is_stale_cache(mac, rssi):
+                    continue
                 payload = {
                     "mac": mac,
                     "name": name,
@@ -825,6 +834,28 @@ class BLECollector(BaseCollector):
         if rssi is None:
             rssi = getattr(device, "rssi", None)
         return rssi
+
+    def _is_stale_cache(self, mac, rssi):
+        """Return True when a device's RSSI has not changed across >= threshold
+        consecutive scan cycles — strong evidence BlueZ is serving a cached
+        device entry rather than a live BLE advertisement.
+
+        A real BLE signal always fluctuates; identical integer RSSI across
+        multiple scans is physically impossible for a live device.
+        """
+        if rssi is None:
+            return False
+        threshold = getattr(self, "_stale_rssi_threshold", 10)
+        history = self._stale_rssi.get(mac, [])
+        history.append(rssi)
+        if len(history) > threshold + 2:
+            history = history[-(threshold + 2):]
+        self._stale_rssi[mac] = history
+        # RSSI changed — device is actually advertising again
+        if len(history) >= 2 and len(set(history)) > 1:
+            del self._stale_rssi[mac]
+            return False
+        return len(history) >= threshold
 
     def device_name(self, device, advertisement):
         """Extract the best available advertised/display name.

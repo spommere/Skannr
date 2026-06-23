@@ -12,7 +12,8 @@ auto_start: false
 validation_timeout_sec: 10
 
 # Interface selection. interface: auto chooses a discovered monitor interface or
-# a configured candidate. interfaces is an ordered allow/preference list.
+# safely auto-selects one USB/external monitor-capable non-uplink source adapter
+# when prepare_monitor_mode is enabled. interfaces is an ordered explicit list.
 # interface_regex filters automatically discovered monitor interfaces.
 interface: auto
 interfaces: []
@@ -20,8 +21,13 @@ interface_regex: wlan|^mon
 
 # Optional host-local monitor-mode setup. Leave prepare_monitor_mode false if an
 # external script/systemd unit already creates the monitor interface. When true,
-# Skannr runs nmcli/ip/iw setup against the configured interface candidate.
+# Skannr first tries to create a separate monitor interface on the selected phy
+# and leaves the source interface untouched. In-place conversion stays disabled
+# by default because it requires bringing the source interface down.
 prepare_monitor_mode: false
+allow_in_place_monitor_mode: false
+# Deprecated compatibility knob. Skannr no longer edits NetworkManager config
+# or managed/unmanaged state at runtime.
 set_networkmanager_unmanaged: true
 monitor_setup_timeout_sec: 10
 

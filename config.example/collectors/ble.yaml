@@ -56,6 +56,12 @@ name_lookup_interval_sec: 60
 classic_name_lookup: false
 classic_name_timeout_sec: 2
 
+# BlueZ cache-stale detection. When BlueZ reports a cached device that is no
+# longer advertising, its RSSI stays identical across every scan cycle. A real
+# BLE signal always fluctuates, so N consecutive identical RSSI values means the
+# device entry is stale. Set to 0 to disable detection.
+cache_stale_rssi_threshold: 10
+
 # Retry and wedged-adapter handling. retry_interval_sec is used after collector
 # failures. retry_timeout_sec is reported as the setup/retry window. Repeated
 # "operation already in progress" conditions can trigger reset/wedged warnings.
