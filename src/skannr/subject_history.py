@@ -43,6 +43,7 @@ from .identity_policy import (
     low_identity_bluetooth_record,
     low_identity_lan_record,
     low_identity_wifi_client,
+    meaningful_bluetooth_names,
     wifi_client_group_label,
 )
 from .log_utils import (
@@ -4426,14 +4427,43 @@ class SubjectHistoryBuilder:
                 grouped[bluetooth_identity_bucket(device)].append(device)
             else:
                 individual_devices.append(device)
-        for devices in list(grouped.values()):
-            if self.grouped_record_count(devices) <= 1:
+        for bucket, devices in list(grouped.items()):
+            count = self.grouped_record_count(devices)
+            if count <= 1:
                 individual_devices.extend(devices)
+                del grouped[bucket]
+            elif bucket[0] == "name" and count <= 5:
+                # A handful of MACs sharing a name may be genuinely separate
+                # devices (e.g. 3 "rnet" Amazon devices).  Only group when
+                # the count strongly indicates privacy rotation (> 5).
+                individual_devices.extend(devices)
+                del grouped[bucket]
         grouped = {
             bucket: devices
             for bucket, devices in grouped.items()
             if self.grouped_record_count(devices) > 1
         }
+        # Reconcile: name-based individual devices whose advertised name appears
+        # across multiple MACs should fold into a group. A single physical device
+        # that rotates through universal MACs while keeping the same name (e.g.
+        # Bose speakers, Lucimed LE-FBI tags) is a privacy-rotation pattern, not
+        # a collection of independent stable devices.
+        name_individuals = defaultdict(list)
+        for device in list(individual_devices):
+            if not bluetooth_grouping_candidate(device):
+                continue
+            names = meaningful_bluetooth_names(device)
+            if names:
+                name_individuals[("name", names[0])].append(device)
+        for bucket, devices in name_individuals.items():
+            if len(devices) <= 5:
+                continue
+            for device in devices:
+                individual_devices.remove(device)
+            if bucket in grouped:
+                grouped[bucket].extend(devices)
+            else:
+                grouped[bucket] = devices
         for device in individual_devices:
             mac = device.get("mac") or "unknown"
             names = [

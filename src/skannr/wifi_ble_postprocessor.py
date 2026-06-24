@@ -785,6 +785,7 @@ class WiFiBLEPostprocessor:
         """Fold multi-MAC low-identity BLE privacy churn before persistence."""
         kept = []
         candidates = defaultdict(list)
+        name_candidates = defaultdict(list)
         for record in records or []:
             if not isinstance(record, dict):
                 continue
@@ -794,11 +795,22 @@ class WiFiBLEPostprocessor:
             if bluetooth_grouping_candidate(record):
                 bucket = bluetooth_identity_bucket(record)
                 if bucket[0] == "name" and not record.get("grouped_randomized"):
-                    kept.append(record)
+                    # Defer name-based records: a single physical device that
+                    # rotates MACs while keeping the same name is a privacy
+                    # pattern — keep individual only when the name is unique.
+                    name_candidates[bucket[1].lower()].append(record)
                 else:
                     candidates[self.bluetooth_storage_group_key(record)].append(record)
             else:
                 kept.append(record)
+        # Resolve deferred name-based candidates: single-MAC names stay
+        # individual; multi-MAC names fold into privacy groups.
+        for name_key, records in name_candidates.items():
+            if len(records) <= 5:
+                kept.extend(records)
+            else:
+                for record in records:
+                    candidates[self.bluetooth_storage_group_key(record)].append(record)
         for candidate_records in candidates.values():
             represented = sum(self.group_record_count(record) for record in candidate_records)
             if represented <= 1:
@@ -808,6 +820,26 @@ class WiFiBLEPostprocessor:
             for record in candidate_records:
                 group = self.update_bluetooth_storage_group(group, record)
             kept.append(group)
+        # Dedup: remove low-identity individual records whose MAC already
+        # appears inside a group (can happen across incremental builds when
+        # grouping logic changes).  Devices with findings or strong identity
+        # are never pruned.
+        group_member_macs = set()
+        for item in kept:
+            if not item.get("grouped_randomized"):
+                continue
+            for member in item.get("group_members") or []:
+                mac = (member.get("mac") or "").strip().lower()
+                if mac:
+                    group_member_macs.add(mac)
+        if group_member_macs:
+            kept = [
+                item
+                for item in kept
+                if item.get("grouped_randomized")
+                or not low_identity_bluetooth_record(item)
+                or (item.get("mac") or "").strip().lower() not in group_member_macs
+            ]
         return sorted(
             kept,
             key=lambda item: record_time_epoch(item, "last_seen") or 0,

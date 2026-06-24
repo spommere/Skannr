@@ -204,21 +204,28 @@ def low_identity_bluetooth_record(record):
 
 
 def stable_bluetooth_mac_record(record):
-    """Return True for a low-detail BLE row that behaves like a stable device."""
+    """Return True for a low-detail BLE row that behaves like a stable device.
+
+    A device is stable only when it has been observed across a meaningful time
+    span (≥1 hour).  High update counts inside a short window (e.g. 60 updates
+    in 20 minutes) are typical of brief visitors and rotating privacy addresses,
+    not persistent devices.
+    """
     if (record or {}).get("grouped_randomized"):
         return False
     if (record or {}).get("randomized_mac") or locally_administered_mac((record or {}).get("mac")):
         return False
-    if (record or {}).get("active_session"):
+    first_seen = numeric_epoch((record or {}).get("first_seen_epoch"))
+    last_seen = numeric_epoch((record or {}).get("last_seen_epoch"))
+    time_span = (last_seen - first_seen) if first_seen is not None and last_seen is not None else 0
+    if (record or {}).get("active_session") and time_span >= 3600:
         return True
     try:
-        if int((record or {}).get("update_count") or 0) >= 10:
+        if int((record or {}).get("update_count") or 0) >= 10 and time_span >= 3600:
             return True
     except (TypeError, ValueError):
         pass
-    first_seen = numeric_epoch((record or {}).get("first_seen_epoch"))
-    last_seen = numeric_epoch((record or {}).get("last_seen_epoch"))
-    return first_seen is not None and last_seen is not None and last_seen - first_seen >= 3600
+    return time_span >= 3600
 
 
 def bluetooth_grouping_candidate(record):

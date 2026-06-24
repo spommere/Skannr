@@ -28,6 +28,12 @@ pre-1.0:
 - **Code quality fixes.** YAML-null footgun in MAC filtering, deduplicated
   `_JSON_INVALID_CTRL_RE` regex across scripts, `sanitize_json_line` fast-path,
   and `black` formatting on changed files.
+- **Bluetooth privacy-rotation grouping fix.** Multi-MAC devices advertising
+  the same name (Bose speakers, LE-FBI trackers) now correctly fold into one
+  grouped row when > 5 MACs share the name, instead of appearing as dozens of
+  individual rows. Fixed `stable_bluetooth_mac_record()` time-span requirement
+  and a double-display bug where ungrouped devices appeared in both the group
+  and individual lists.
 
 ## 0.3.1 - 2026-06-22
 
