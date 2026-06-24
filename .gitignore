@@ -9,11 +9,7 @@
 /HANDOFF.md
 /VERSION_PLAN.md
 /VERSION_HISTORY.md
-/scripts/skannr_reg*
-/scripts/validate*
-/scripts/ble*
-/scripts/releas*
-/scripts/trim*
+/scripts/
 /git/
 /src.bak/
 
