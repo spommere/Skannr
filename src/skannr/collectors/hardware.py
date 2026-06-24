@@ -220,6 +220,9 @@ def wireless_interface_details(interface):
         "product": "",
         "usb": False,
         "alfa_like": False,
+        "mac": sysfs_read(
+            os.path.join("/sys/class/net", interface, "address")
+        ).lower(),
     }
     current = device_path
     for _ in range(8):

@@ -55,6 +55,7 @@ from .log_utils import (
     now_epoch,
     read_incremental_jsonl_events,
     record_time_epoch,
+    sanitize_json_line,
     save_json_atomic,
     timestamp_epoch,
     window_metadata,
@@ -963,7 +964,7 @@ class SubjectHistoryBuilder:
                     if not line.strip():
                         continue
                     try:
-                        event = json.loads(line)
+                        event = json.loads(sanitize_json_line(line))
                     except ValueError:
                         continue
                     if self.direct_observation_from_event(collector, event) is not None:
@@ -1016,7 +1017,7 @@ class SubjectHistoryBuilder:
                     if not line.strip():
                         continue
                     try:
-                        event = json.loads(line)
+                        event = json.loads(sanitize_json_line(line))
                     except ValueError:
                         continue
                     observation = self.direct_observation_from_event(collector, event)

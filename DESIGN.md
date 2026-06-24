@@ -1,6 +1,6 @@
 # Skannr Design Document
 
-Version: 0.3.1, 2026-06-22
+Version: 0.3.2, 2026-06-23
 
 ## 1. Overview
 
@@ -459,6 +459,11 @@ Operational model:
   monitor mode in System Status. Fresh-config precheck/postcheck can seed
   `wifi_monitor.interfaces` with the first detected monitor-mode interface. By
   default Skannr does not change adapter mode.
+- An optional `mac` config key can pin monitor-mode selection to one specific
+  adapter by MAC address, regardless of which `wlanX` name the kernel assigns
+  after reboot. When `mac` is set, only that adapter is eligible for monitor
+  mode; all other adapters are ignored. This is the preferred way to keep a
+  dedicated monitor dongle separate from the managed Wi-Fi interface.
 - When `prepare_monitor_mode: true` is enabled, Skannr first tries to create a
   separate monitor interface on the selected phy with `iw phy <phy> interface
   add monX type monitor`, then brings only that monitor interface up.

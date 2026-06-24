@@ -8,7 +8,7 @@ separate from the raw audit logs.
 import json
 import os
 
-from ..log_utils import format_epoch, normalize_retention_days, now_epoch
+from ..log_utils import format_epoch, normalize_retention_days, now_epoch, sanitize_json_line
 from .base import BasePersistence
 
 
@@ -63,7 +63,7 @@ class FilesystemPersistence(BasePersistence):
                 path = os.path.join(root, filename)
                 for line in reversed(self.read_lines(path)):
                     try:
-                        events.append(json.loads(line))
+                        events.append(json.loads(sanitize_json_line(line)))
                     except ValueError:
                         # Ignore partial/corrupt lines so one bad write does
                         # not make the whole history unreadable.

@@ -1154,17 +1154,22 @@ rules are:
 - in-place conversion is disabled by default and only happens when
   `allow_in_place_monitor_mode: true` is set explicitly
 
-For reboot-stable Pi setups where `wlan0` and `wlan1` may swap names, use
-`interface: auto` and leave `interfaces: []`. In that mode Skannr only
-auto-selects a USB/external adapter that both advertises monitor-mode support
-and is not the current uplink/default-route interface:
+For reboot-stable Pi setups where `wlan0` and `wlan1` may swap names, pin the
+monitor adapter by MAC address so the kernel interface name doesn't matter:
 
 ```yaml
+mac: "00:c0:ca:bb:58:e1"
 interface: auto
 interfaces: []
 prepare_monitor_mode: true
 allow_in_place_monitor_mode: false
 ```
+
+When `mac` is set, only that adapter is eligible for monitor mode — all other
+adapters are ignored. Leave `mac:` empty (the default) to auto-select from all
+monitor-capable USB adapters. Use `interface: auto` and leave `interfaces: []`
+so Skannr only auto-selects a USB/external adapter that both advertises
+monitor-mode support and is not the current uplink/default-route interface.
 
 If you prefer an explicit allowlist, set `interfaces:` to one or more concrete
 source interfaces. Skannr still refuses to touch whichever interface currently
@@ -1240,6 +1245,7 @@ Useful settings:
 interface: auto
 interfaces: []
 interface_regex: wlan|^mon
+mac:
 prepare_monitor_mode: false
 allow_in_place_monitor_mode: false
 monitor_setup_timeout_sec: 10

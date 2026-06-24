@@ -220,6 +220,7 @@ BLE supports two scan methods. BlueZ/Bleak is the normal primary method. `blueto
 | `interface` | Single monitor interface or `auto`. |
 | `interfaces` | Ordered interface preference/allow list. |
 | `interface_regex` | Regex filter for auto-discovered monitor interfaces. |
+| `mac` | Optional MAC address of the single adapter allowed for monitor mode. When set, only the interface whose MAC matches is eligible — interface-name swaps across reboots are harmless. Empty means auto-select from all monitor-capable adapters. |
 | `prepare_monitor_mode` | Lets Skannr discover or prepare a safe monitor interface before capture. |
 | `allow_in_place_monitor_mode` | Allows the older in-place fallback that brings the source interface down temporarily. Default is false. |
 | `set_networkmanager_unmanaged` | Deprecated compatibility knob. Skannr no longer edits NetworkManager state at runtime. |

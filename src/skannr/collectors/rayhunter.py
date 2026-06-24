@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 
 from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE, STATE_RETRYING
+from ..log_utils import sanitize_json_line
 
 
 RAYHUNTER_CODE_MARKERS = (
@@ -281,7 +282,7 @@ class RayhunterCollector(BaseCollector):
             if not line.strip():
                 continue
             try:
-                record = json.loads(line)
+                record = json.loads(sanitize_json_line(line))
             except (TypeError, ValueError):
                 continue
             if not metadata_seen:

@@ -19,6 +19,12 @@ interface: auto
 interfaces: []
 interface_regex: wlan|^mon
 
+# Optional MAC address of the single adapter allowed for monitor mode. When set,
+# only the interface whose MAC matches this value is eligible — interface-name
+# swaps across reboots are harmless. Leave empty to auto-select from all
+# monitor-capable USB adapters (the default).
+mac:
+
 # Optional host-local monitor-mode setup. Leave prepare_monitor_mode false if an
 # external script/systemd unit already creates the monitor interface. When true,
 # Skannr first tries to create a separate monitor interface on the selected phy

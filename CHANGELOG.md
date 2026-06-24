@@ -7,6 +7,28 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.3.2 - 2026-06-23
+
+- **Wi-Fi Monitor MAC-based adapter selection.** Added `mac` config key to
+  `wifi_monitor` so a single adapter can be pinned by MAC address regardless of
+  kernel interface naming. `hardware.py` now exposes the interface MAC from sysfs;
+  `wifi_monitor.py` filters candidates through `_mac_allows_interface()`.
+- **JSONL null-byte sanitization.** Added `sanitize_json_line()` in `log_utils.py`
+  to strip JSON-invalid control characters before every `json.loads` call, fixing
+  corrupted-line crashes across the raw-log reading paths.
+- **Recency bucket rework.** Subject History and Reports now use four recency
+  buckets: Active (< 1h), Recent (1–24h), Stale (1–7d), Dormant (> 7d), replacing
+  the old three-bucket scheme.
+- **RTL-433 report verbosity compaction.** Frontend renderers now show signal
+  ranges instead of per-event dumps, TPMS sample counts instead of individual
+  samples, and filter out raw signal/modulation/hex-blob keys from latest fields.
+- **Regression test hardening.** Reduced event limits, added per-source line caps,
+  fixed recency/TPMS/annotation checks, improved progress output, and verified
+  multi-node discovery through `node_logs_root`.
+- **Code quality fixes.** YAML-null footgun in MAC filtering, deduplicated
+  `_JSON_INVALID_CTRL_RE` regex across scripts, `sanitize_json_line` fast-path,
+  and `black` formatting on changed files.
+
 ## 0.3.1 - 2026-06-22
 
 - **Wi-Fi Monitor safety rework.** Skannr no longer rewrites `NetworkManager.conf`,

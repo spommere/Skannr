@@ -977,23 +977,25 @@ function insightSeverityCategory(insight) {
 
 function recencyBucketForItem(item) {
   const timestampMs = recordTimestampMs(item, "last_seen") || recordTimestampMs(item, "timestamp");
-  if (!timestampMs) return {key: "older", label: "Seen 24+ hours ago"};
+  if (!timestampMs) return {key: "dormant", label: "Dormant (> 7d)"};
   const ageMs = Date.now() - timestampMs;
-  if (ageMs <= 60 * 60000) return {key: "hour", label: "Seen within last hour"};
-  if (ageMs <= 24 * 60 * 60000) return {key: "day", label: "Seen within last 24 hours"};
-  return {key: "older", label: "Seen 24+ hours ago"};
+  if (ageMs <= 60 * 60000) return {key: "active", label: "Active (< 1h)"};
+  if (ageMs <= 24 * 60 * 60000) return {key: "recent", label: "Recent (1–24h)"};
+  if (ageMs <= 7 * 24 * 60 * 60000) return {key: "stale", label: "Stale (1–7d)"};
+  return {key: "dormant", label: "Dormant (> 7d)"};
 }
 
 function groupedByRecency(items) {
   const groups = [
-    {key: "hour", label: "Seen within last hour", items: []},
-    {key: "day", label: "Seen within last 24 hours", items: []},
-    {key: "older", label: "Seen 24+ hours ago", items: []},
+    {key: "active", label: "Active (< 1h)", items: []},
+    {key: "recent", label: "Recent (1–24h)", items: []},
+    {key: "stale", label: "Stale (1–7d)", items: []},
+    {key: "dormant", label: "Dormant (> 7d)", items: []},
   ];
   const byKey = new Map(groups.map((group) => [group.key, group]));
   (items || []).forEach((item) => {
     const bucket = recencyBucketForItem(item);
-    (byKey.get(bucket.key) || byKey.get("older")).items.push(item);
+    (byKey.get(bucket.key) || byKey.get("dormant")).items.push(item);
   });
   return groups;
 }
@@ -6292,16 +6294,12 @@ function rtl433TpmsTemperatureText(data) {
 }
 
 function rtl433TpmsSamplesText(samples) {
-  return compactList((samples || []).map((sample) => {
-    const parts = [
-      sample.time || "",
-      sample.pressure_psi !== undefined ? `${sample.pressure_psi} psi` : "",
-      sample.temperature_f !== undefined ? `${sample.temperature_f} F` : "",
-      sample.battery_status ? `battery ${sample.battery_status}` : "",
-      sample.tpms_status ? `status ${sample.tpms_status}` : ""
-    ].filter(Boolean);
-    return parts.join(" | ");
-  }), 8);
+  // Report the sample count only.  Aggregated pressure / temperature ranges
+  // are already shown by rtl433TpmsPressureText / rtl433TpmsTemperatureText.
+  // Per-sample detail (time, psi, F, battery, status) belongs in Subject
+  // History drilldown.
+  const count = (Array.isArray(samples) ? samples : []).length;
+  return count ? `${count} sample(s)` : "";
 }
 
 function valueOrDash(value) {
@@ -8379,7 +8377,7 @@ function rtl433TpmsEvidenceText(evidence) {
     evidence.tpms_status ? `status ${evidence.tpms_status}` : "",
     evidence.tpms_position ? `position ${evidence.tpms_position}` : "",
     rtl433BandText(evidence.latest_frequency_mhz || (Array.isArray(evidence.frequencies_mhz) ? evidence.frequencies_mhz[0] : null)),
-    evidence.tpms_samples && evidence.tpms_samples.length ? `samples ${rtl433TpmsSamplesText(evidence.tpms_samples)}` : ""
+    rtl433TpmsSamplesText(evidence.tpms_samples)
   ].filter(Boolean).join("; ");
 }
 
@@ -8425,17 +8423,25 @@ function rtl433BurstGapText(data) {
 }
 
 function rtl433RecentObservationsText(observations) {
-  const rows = (Array.isArray(observations) ? observations : []).map((item) => {
-    const parts = [
-      item.time || "",
-      item.rssi_db !== undefined ? `RSSI ${item.rssi_db}` : "",
-      item.snr_db !== undefined ? `SNR ${item.snr_db}` : "",
-      item.id ? `ID ${item.id}` : "",
-      item.channel ? `channel ${item.channel}` : ""
-    ].filter(Boolean);
-    return parts.join(", ");
-  });
-  return rows.length ? compactList(rows, 8) : "";
+  // Summarize recent decode signal quality instead of dumping every event.
+  // Per-event detail (time, RSSI, SNR, ID, channel) belongs in Subject
+  // History drilldown, not in the report evidence summary.
+  const items = (Array.isArray(observations) ? observations : []).filter(Boolean);
+  if (!items.length) return "";
+  const rssiVals = items.map((o) => Number(o.rssi_db)).filter((v) => Number.isFinite(v));
+  const snrVals = items.map((o) => Number(o.snr_db)).filter((v) => Number.isFinite(v));
+  const parts = [];
+  if (rssiVals.length === 1) {
+    parts.push(`RSSI ${rssiVals[0].toFixed(1)} dB`);
+  } else if (rssiVals.length > 1) {
+    parts.push(`RSSI ${Math.min(...rssiVals).toFixed(1)} to ${Math.max(...rssiVals).toFixed(1)} dB`);
+  }
+  if (snrVals.length === 1) {
+    parts.push(`SNR ${snrVals[0].toFixed(1)} dB`);
+  } else if (snrVals.length > 1) {
+    parts.push(`SNR ${Math.min(...snrVals).toFixed(1)} to ${Math.max(...snrVals).toFixed(1)} dB`);
+  }
+  return parts.join(", ");
 }
 
 function rtl433RecentObservationsSummaryText(observations) {
@@ -8497,9 +8503,17 @@ function rtl433WeekdayEvidenceText(map, limit = 3) {
 
 function rtl433LatestFieldsText(fields) {
   if (!fields || typeof fields !== "object") return "";
+  // Prefer human-meaningful fields.  Raw signal metrics (rssi, snr, noise)
+  // and modulation detail (mod, mic) belong in the RF / Observed sections,
+  // not repeated here.  Likewise raw status bitfields are rarely useful.
   const preferred = [
-    "temperature_C", "temperature_F", "humidity", "moisture", "battery_ok",
-    "button", "state", "status", "mod", "mic", "rssi", "snr", "noise"
+    "temperature_C", "temperature_F", "humidity", "moisture",
+    "pressure_PSI", "pressure_kPa", "pressure_hPa",
+    "battery_ok", "battery_mV", "battery_low",
+    "wind_dir_deg", "wind_avg_mi_h", "wind_max_mi_h",
+    "rain_mm", "rain_mm_h", "rain_inch_h",
+    "uv", "light_lux",
+    "tamper", "alert"
   ];
   const seen = new Set();
   const parts = [];
@@ -8508,10 +8522,15 @@ function rtl433LatestFieldsText(fields) {
     seen.add(key);
     parts.push(`${key}: ${fields[key]}`);
   });
+  // Catch remaining fields, but skip metadata, signal, and raw-hex noise.
+  const skipPattern = /^(time|model|id|channel|freq|protocol|rssi|snr|noise|mod|mic|flags|type|msg|len|reset|cmd|crc|checksum|raw|data)(_|$)/;
   Object.keys(fields).sort().forEach((key) => {
-    if (seen.has(key) || ["time", "model", "id", "channel", "freq", "protocol"].includes(key)) return;
+    if (seen.has(key)) return;
+    if (skipPattern.test(key)) return;
     const value = fields[key];
     if (value === undefined || value === null || value === "") return;
+    // Skip long hex/blob values (e.g. raw payload dumps).
+    if (typeof value === "string" && /^[0-9a-fA-F]{12,}$/.test(value)) return;
     parts.push(`${key}: ${value}`);
   });
   return compactList(parts, 6);

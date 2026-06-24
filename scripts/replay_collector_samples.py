@@ -22,6 +22,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from skannr.bus import local_now
+from skannr.log_utils import sanitize_json_line
 from skannr.main import (  # noqa: E402
     refresh_history_analysis,
     refresh_reports,
@@ -169,6 +170,7 @@ def subject_key(collector, event):
 def read_jsonl(path):
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line_number, line in enumerate(handle, 1):
+            line = sanitize_json_line(line)
             if not line.strip():
                 continue
             try:

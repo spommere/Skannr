@@ -8,9 +8,28 @@ folded into materialized summaries.
 
 import json
 import os
+import re
 import tempfile
 import time
 from datetime import datetime
+
+# Control characters that are never valid in JSON (even inside strings).
+# JSON only permits \t (0x09), \n (0x0A), and \r (0x0D).
+_JSON_INVALID_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def sanitize_json_line(line):
+    """Strip control characters that are invalid in JSON from *line*.
+
+    Null bytes and other binary garbage can appear in log files after an
+    interrupted write or filesystem corruption.  Removing them lets
+    ``json.loads`` succeed on the remaining valid JSON text.
+
+    The fast-path avoids a string allocation on clean lines (the common case).
+    """
+    if _JSON_INVALID_CTRL_RE.search(line) is None:
+        return line
+    return _JSON_INVALID_CTRL_RE.sub("", line)
 
 
 def now_epoch():
@@ -220,7 +239,7 @@ def read_jsonl_events(log_dir, collector, window_days=None):
             with open(path, "r", encoding="utf-8") as fh:
                 for line in fh:
                     try:
-                        event = json.loads(line)
+                        event = json.loads(sanitize_json_line(line))
                     except ValueError:
                         # A truncated line should not make the whole collector
                         # history unreadable after an interrupted write.
@@ -367,7 +386,7 @@ def read_incremental_jsonl_events(log_dir, collector, checkpoint, read_stats=Non
                             int(stats.get("max_line_bytes") or 0), raw_size
                         )
                     try:
-                        event = json.loads(raw_line.decode("utf-8"))
+                        event = json.loads(sanitize_json_line(raw_line.decode("utf-8")))
                     except (UnicodeDecodeError, ValueError):
                         if stats is not None:
                             stats["invalid_lines"] += 1

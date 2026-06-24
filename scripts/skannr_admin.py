@@ -24,7 +24,7 @@ if str(SRC_DIR) not in sys.path:
 from skannr.config import load_config
 from skannr.wifi_ble_postprocessor import WiFiBLEPostprocessor
 from skannr.history_analysis import HistoryAnalyzer, save_analysis
-from skannr.log_utils import save_json_atomic
+from skannr.log_utils import sanitize_json_line, save_json_atomic
 from skannr.paths import CONFIG_PATH, RUNTIME_LOG_DIR
 from skannr.reports import ReportsBuilder, save_reports
 from skannr.subject_history import SubjectHistoryBuilder
@@ -109,7 +109,7 @@ def rewrite_jsonl_without_collector(path, collector, apply):
             for line in fh:
                 total += 1
                 try:
-                    event = json.loads(line)
+                    event = json.loads(sanitize_json_line(line))
                 except ValueError:
                     kept_lines.append(line)
                     continue

@@ -27,11 +27,11 @@ from .hardware import (
     package_available,
     phy_for_interface,
     sort_wifi_interfaces,
+    sysfs_read,
     wireless_interface_details,
     wireless_interfaces,
 )
 from .wifi import WiFiCollector
-
 
 COMMAND_CANDIDATES = {
     "ip": ("/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"),
@@ -91,7 +91,9 @@ class WiFiMonitorCollector(WiFiCollector):
             "scapy": package_available("scapy"),
             "auto_start": config.get("auto_start", False),
             "interface": interface,
-            "prepare_monitor_mode": bool(config.get("prepare_monitor_mode", False)),
+            "prepare_monitor_mode": bool(
+                config.get("prepare_monitor_mode", False)
+            ),
             "wireless_interfaces": wireless,
             "monitor_interfaces": monitors,
             "interfaces": availability_records(
@@ -141,7 +143,9 @@ class WiFiMonitorCollector(WiFiCollector):
                 "into monitor mode before clicking Start."
             )
             if setup:
-                self.warning = "{} Monitor setup: {}".format(self.warning, setup)
+                self.warning = "{} Monitor setup: {}".format(
+                    self.warning, setup
+                )
             return False
         self.active_hardware = iface
         self.state = STATE_STOPPED
@@ -175,7 +179,9 @@ class WiFiMonitorCollector(WiFiCollector):
                 "into monitor mode before clicking Start."
             )
             if setup:
-                self.warning = "{} Monitor setup: {}".format(self.warning, setup)
+                self.warning = "{} Monitor setup: {}".format(
+                    self.warning, setup
+                )
             logging.warning("Wi-Fi Monitor startup failed: %s", self.warning)
             await self.emit(
                 "collector_offline", {"reason": self.warning}, "warning"
@@ -274,7 +280,7 @@ class WiFiMonitorCollector(WiFiCollector):
                 asyncio.run_coroutine_threadsafe(
                     self.emit("probe_request", payload), loop
                 )
-            #elif dot11.subtype == 8:
+            # elif dot11.subtype == 8:
             #    # Beacon: monitor mode sees the same AP identity as Wi-Fi Scan,
             #    # but on whichever channel the hopper is currently sampling.
             #    payload = {
@@ -355,13 +361,18 @@ class WiFiMonitorCollector(WiFiCollector):
             # The managed WiFiCollector's iw scan (which runs before our
             # monitor-mode conversion) can reset the interface, and some
             # drivers (e.g. rtl88xxau) reset on every scan call.
-            if (monitor_check_counter % 5 == 0
-                    and self.active_hardware
-                    and self.active_hardware not in self.monitor_interfaces()):
-                source_iface = self._prepared_monitor_source or self.active_hardware
+            if (
+                monitor_check_counter % 5 == 0
+                and self.active_hardware
+                and self.active_hardware not in self.monitor_interfaces()
+            ):
+                source_iface = (
+                    self._prepared_monitor_source or self.active_hardware
+                )
                 logging.warning(
                     "Wi-Fi Monitor interface %s was reset to managed mode, "
-                    "re-asserting monitor mode", self.active_hardware
+                    "re-asserting monitor mode",
+                    self.active_hardware,
                 )
                 ok, detail = self.set_interface_monitor_mode(source_iface)
                 if not ok:
@@ -434,7 +445,14 @@ class WiFiMonitorCollector(WiFiCollector):
         """Best-effort retune of the monitor interface."""
         try:
             result = subprocess.run(
-                [command_path("iw") or "iw", "dev", iface, "set", "channel", str(channel)],
+                [
+                    command_path("iw") or "iw",
+                    "dev",
+                    iface,
+                    "set",
+                    "channel",
+                    str(channel),
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 check=False,
@@ -462,18 +480,22 @@ class WiFiMonitorCollector(WiFiCollector):
            behind the kernel interface type change by a few hundred ms).
         2. Explicitly configured candidates found in monitor mode.
         3. Any discovered monitor-mode interface, sorted by capability.
+
+        When ``mac`` is configured, all paths are constrained to the
+        matching adapter.
         """
         if self.active_hardware:
             return self.active_hardware
-        configured = configured_candidates(
-            self.config, "interfaces", extra_keys=("interface",)
-        )
+        configured = self.configured_monitor_candidates()
         discovered = self.monitor_interfaces()
         for iface in configured:
             if iface in discovered:
                 return iface
         ranked = sort_wifi_interfaces(discovered, self.config)
-        return ranked[0] if ranked else None
+        for iface in ranked:
+            if self._mac_allows_interface(iface):
+                return iface
+        return None
 
     def prepare_configured_monitor_interface(self):
         """Optionally prepare a safe monitor interface without host-policy edits."""
@@ -483,7 +505,9 @@ class WiFiMonitorCollector(WiFiCollector):
         self._monitor_setup_warning = ""
         self._prepared_monitor_source = None
         candidates = self.monitor_setup_candidates()
-        logging.info("Wi-Fi Monitor monitor-mode setup candidates=%s", candidates)
+        logging.info(
+            "Wi-Fi Monitor monitor-mode setup candidates=%s", candidates
+        )
         if not candidates:
             self._monitor_setup_warning = (
                 "prepare_monitor_mode is true, but no safe monitor-capable "
@@ -523,6 +547,26 @@ class WiFiMonitorCollector(WiFiCollector):
             wireless_interfaces(),
         )
 
+    def _mac_allows_interface(self, iface, mac=None):
+        """Return True when *iface* matches the optional ``mac`` config key.
+
+        When ``mac`` is unset (the default) every interface is allowed.
+        When set, only the adapter whose MAC matches the configured value
+        is eligible for monitor-mode setup — interface-name swaps across
+        reboots are harmless.
+
+        If *mac* is provided it is used directly, avoiding a sysfs read.
+        """
+        raw = self.config.get("mac")
+        if not raw:
+            return True
+        configured_mac = str(raw).strip().lower()
+        if mac is None:
+            mac = sysfs_read(
+                os.path.join("/sys/class/net", iface, "address")
+            ).lower()
+        return mac == configured_mac
+
     def configured_monitor_candidates(self):
         """Return explicit interfaces eligible for Skannr monitor-mode setup."""
         candidates = configured_candidates(
@@ -531,7 +575,10 @@ class WiFiMonitorCollector(WiFiCollector):
         return [
             iface
             for iface in candidates
-            if iface and iface != "auto" and self.interface_allowed(iface)
+            if iface
+            and iface != "auto"
+            and self.interface_allowed(iface)
+            and self._mac_allows_interface(iface)
         ]
 
     def auto_monitor_candidates(self):
@@ -540,6 +587,8 @@ class WiFiMonitorCollector(WiFiCollector):
         Auto mode is limited to USB/external adapters that are monitor-capable
         and are not the current default-route interface. This keeps wlan0/wlan1
         naming swaps irrelevant while avoiding guesses against the live uplink.
+
+        When ``mac`` is configured, only the matching adapter is considered.
         """
         route_iface = default_route_interface()
         candidates = []
@@ -547,6 +596,8 @@ class WiFiMonitorCollector(WiFiCollector):
             if iface == route_iface or not self.interface_allowed(iface):
                 continue
             details = wireless_interface_details(iface)
+            if not self._mac_allows_interface(iface, details.get("mac", "")):
+                continue
             if not details.get("usb"):
                 continue
             if not self.interface_supports_monitor_mode(iface):
@@ -559,7 +610,7 @@ class WiFiMonitorCollector(WiFiCollector):
         configured = self.configured_monitor_candidates()
         if configured:
             return configured
-        if str(self.config.get("interface", "auto")).strip().lower() != "auto":
+        if (self.config.get("interface") or "auto").strip().lower() != "auto":
             return []
         return self.auto_monitor_candidates()
 
@@ -608,7 +659,16 @@ class WiFiMonitorCollector(WiFiCollector):
                 "{} already exists on another device; cannot create monitor iface"
             ).format(monitor_iface)
         steps = [
-            ["iw", "phy", phy, "interface", "add", monitor_iface, "type", "monitor"],
+            [
+                "iw",
+                "phy",
+                phy,
+                "interface",
+                "add",
+                monitor_iface,
+                "type",
+                "monitor",
+            ],
             ["ip", "link", "set", monitor_iface, "up"],
         ]
         for command in steps:
@@ -669,7 +729,8 @@ class WiFiMonitorCollector(WiFiCollector):
         executable = command_path(command[0])
         if not executable:
             logging.warning(
-                "Wi-Fi Monitor setup command unavailable: %s", " ".join(original)
+                "Wi-Fi Monitor setup command unavailable: %s",
+                " ".join(original),
             )
             return False, "{} not found".format(command[0])
         command = [executable] + list(command[1:])
@@ -703,7 +764,9 @@ class WiFiMonitorCollector(WiFiCollector):
                 result.returncode,
                 output,
             )
-        return result.returncode == 0, output or "exit {}".format(result.returncode)
+        return result.returncode == 0, output or "exit {}".format(
+            result.returncode
+        )
 
     def monitor_interfaces(self):
         """Parse 'iw dev' and return interfaces whose type is monitor."""
@@ -745,7 +808,7 @@ class WiFiMonitorCollector(WiFiCollector):
                 continue
             if "disabled" in line.lower():
                 continue
-            #match = re.search(r"(\d+)\s+MHz\s+\[(\d+)\]", line)
+            # match = re.search(r"(\d+)\s+MHz\s+\[(\d+)\]", line)
             match = re.search(r"(\d+)(?:\.\d+)?\s+MHz\s+\[(\d+)\]", line)
             if not match:
                 continue

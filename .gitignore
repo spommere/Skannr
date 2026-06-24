@@ -1,18 +1,19 @@
 # Local runtime state and generated artifacts.
 /.gh_token/
-/.codex/
 /.venv/
 /config/
 /runtime/
 /logs/
 /pcaps/
 /CLAUDE.md
+/HANDOFF.md
 /VERSION_PLAN.md
 /VERSION_HISTORY.md
 /scripts/skannr_reg*
 /scripts/validate*
 /scripts/ble*
 /scripts/releas*
+/scripts/trim*
 /git/
 /src.bak/
 
