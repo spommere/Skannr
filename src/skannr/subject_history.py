@@ -91,6 +91,7 @@ class SubjectHistoryBuilder:
         direct_state_path=None,
         window_days=None,
         enabled_collectors=None,
+        progress_callback=None,
     ):
         self.log_dir = log_dir
         self.state_path = state_path or os.path.join(
@@ -106,6 +107,7 @@ class SubjectHistoryBuilder:
         self.enabled_collectors = (
             set(enabled_collectors) if enabled_collectors is not None else None
         )
+        self.progress_callback = progress_callback
         self.subject_history_event_contract = subject_history_event_contract_by_key()
 
     def collector_enabled(self, collector):
@@ -144,13 +146,22 @@ class SubjectHistoryBuilder:
         use registry-based per-collector builders.
         """
         previous_summary = self.load_persisted_summary() or {}
+        if self.progress_callback:
+            self.progress_callback("Wi-Fi / BLE device history")
         wifi_ble = WiFiBLEPostprocessor(
             self.log_dir,
             state_path=self.device_history_state_path,
             window_days=self.window_days,
+            progress_callback=self.progress_callback,
         )
         wifi_ble_result = wifi_ble.build_summary()
+        try:
+            wifi_ble.save_summary(wifi_ble_result)
+        except OSError as exc:
+            logging.exception("failed to persist device history: %s", exc)
         wifi_ble_display = wifi_ble.display_summary(wifi_ble_result, self.window_days)
+        if self.progress_callback:
+            self.progress_callback("Reading direct collector logs")
         (
             direct_observations,
             direct_checkpoint,
@@ -158,6 +169,8 @@ class SubjectHistoryBuilder:
             direct_incremental_records,
             direct_read_stats,
         ) = self.build_direct_observations()
+        if self.progress_callback:
+            self.progress_callback("Building collector histories")
         aprsis_events, aprsis_records = self.build_or_keep_direct_history(
             previous_summary,
             "aprsis",
@@ -4417,105 +4430,69 @@ class SubjectHistoryBuilder:
             )
 
     def add_bluetooth_subjects(self, subjects, bluetooth):
-        """Add Bluetooth identity subjects keyed by MAC."""
-        grouped = defaultdict(list)
-        individual_devices = []
+        """Add Bluetooth identity subjects keyed by MAC.
+
+        Grouping is decided by WiFiBLEPostprocessor.compact_bluetooth_devices_for_storage.
+        This method only maps the postprocessor output to Subject History records.
+        """
         for device in (bluetooth or {}).get("devices") or []:
             if not isinstance(device, dict):
                 continue
-            if device.get("grouped_randomized") or bluetooth_grouping_candidate(device):
-                grouped[bluetooth_identity_bucket(device)].append(device)
-            else:
-                individual_devices.append(device)
-        for bucket, devices in list(grouped.items()):
-            count = self.grouped_record_count(devices)
-            if count <= 1:
-                individual_devices.extend(devices)
-                del grouped[bucket]
-            elif bucket[0] == "name" and count <= 5:
-                # A handful of MACs sharing a name may be genuinely separate
-                # devices (e.g. 3 "rnet" Amazon devices).  Only group when
-                # the count strongly indicates privacy rotation (> 5).
-                individual_devices.extend(devices)
-                del grouped[bucket]
-        grouped = {
-            bucket: devices
-            for bucket, devices in grouped.items()
-            if self.grouped_record_count(devices) > 1
-        }
-        # Reconcile: name-based individual devices whose advertised name appears
-        # across multiple MACs should fold into a group. A single physical device
-        # that rotates through universal MACs while keeping the same name (e.g.
-        # Bose speakers, Lucimed LE-FBI tags) is a privacy-rotation pattern, not
-        # a collection of independent stable devices.
-        name_individuals = defaultdict(list)
-        for device in list(individual_devices):
-            if not bluetooth_grouping_candidate(device):
-                continue
-            names = meaningful_bluetooth_names(device)
-            if names:
-                name_individuals[("name", names[0])].append(device)
-        for bucket, devices in name_individuals.items():
-            if len(devices) <= 5:
-                continue
-            for device in devices:
-                individual_devices.remove(device)
-            if bucket in grouped:
-                grouped[bucket].extend(devices)
-            else:
-                grouped[bucket] = devices
-        for device in individual_devices:
-            mac = device.get("mac") or "unknown"
-            names = [
-                str(name).strip()
-                for name in device.get("names") or []
-                if str(name).strip()
-            ]
-            label = " - ".join([names[0], mac]) if names else mac
-            subjects.append(
-                self.subject_record(
-                    "bluetooth",
-                    "bluetooth_device",
-                    mac,
-                    label,
-                    device,
-                    {
-                        "mac": mac,
-                        "names": names[:6],
-                        "seen_count": device.get("seen_count") or 0,
-                        "transports": device.get("transports") or [],
-                        "signal_max": device.get("signal_max"),
-                    },
+            if device.get("grouped_randomized"):
+                # ── Group record ────────────────────────────────────
+                bucket = bluetooth_identity_bucket(device)
+                label = bluetooth_group_label(device)
+                subject_id = device.get("mac") or "randomized:{}:{}".format(
+                    bucket[0], bucket[1].lower())
+                subjects.append(
+                    self.subject_record(
+                        "bluetooth",
+                        "bluetooth_device_group",
+                        subject_id,
+                        "{} found".format(label),
+                        self.grouped_subject_time_source([device]),
+                        {
+                            "grouped_randomized": True,
+                            "randomized_group_count": self.grouped_record_count([device]),
+                            "identity_bucket": bucket[0],
+                            "identity_label": bucket[1],
+                            "sample_macs": self.grouped_sample_macs([device]),
+                            "group_members": self.grouped_member_summaries([device], "bluetooth"),
+                            "service_uuids": self.grouped_list_values([device], "service_uuids", 32),
+                            "seen_count": self.grouped_sum([device], "seen_count"),
+                            "update_count": self.grouped_sum([device], "update_count"),
+                            "lost_count": self.grouped_sum([device], "lost_count"),
+                            "session_count": self.grouped_sum([device], "session_count"),
+                            "signal_min": self.grouped_signal_value([device], "signal_min", min),
+                            "signal_max": self.grouped_signal_value([device], "signal_max", max),
+                        },
+                    )
                 )
-            )
-        for bucket, devices in sorted(grouped.items(), key=lambda item: item[0]):
-            exemplar = devices[0] if devices else {}
-            label = bluetooth_group_label(exemplar)
-            subject_id = "randomized:{}:{}".format(bucket[0], bucket[1].lower())
-            subjects.append(
-                self.subject_record(
-                    "bluetooth",
-                    "bluetooth_device_group",
-                    subject_id,
-                    "{} found".format(label),
-                    self.grouped_subject_time_source(devices),
-                    {
-                        "grouped_randomized": True,
-                        "randomized_group_count": self.grouped_record_count(devices),
-                        "identity_bucket": bucket[0],
-                        "identity_label": bucket[1],
-                        "sample_macs": self.grouped_sample_macs(devices),
-                        "group_members": self.grouped_member_summaries(devices, "bluetooth"),
-                        "service_uuids": self.grouped_list_values(devices, "service_uuids", 32),
-                        "seen_count": self.grouped_sum(devices, "seen_count"),
-                        "update_count": self.grouped_sum(devices, "update_count"),
-                        "lost_count": self.grouped_sum(devices, "lost_count"),
-                        "session_count": self.grouped_sum(devices, "session_count"),
-                        "signal_min": self.grouped_signal_value(devices, "signal_min", min),
-                        "signal_max": self.grouped_signal_value(devices, "signal_max", max),
-                    },
+            else:
+                # ── Individual device ──────────────────────────────
+                mac = device.get("mac") or "unknown"
+                names = [
+                    str(name).strip()
+                    for name in device.get("names") or []
+                    if str(name).strip()
+                ]
+                label = " - ".join([names[0], mac]) if names else mac
+                subjects.append(
+                    self.subject_record(
+                        "bluetooth",
+                        "bluetooth_device",
+                        mac,
+                        label,
+                        device,
+                        {
+                            "mac": mac,
+                            "names": names[:6],
+                            "seen_count": device.get("seen_count") or 0,
+                            "transports": device.get("transports") or [],
+                            "signal_max": device.get("signal_max"),
+                        },
+                    )
                 )
-            )
 
     def add_aprsis_subjects(self, subjects, events):
         """Add APRS callsign/object subjects."""

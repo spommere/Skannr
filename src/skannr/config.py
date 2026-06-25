@@ -147,6 +147,7 @@ DEFAULT_CONFIG = {
             "level": "critical",
             "window_sec": 60,
             "count": 5,
+            "suppress_known_ap_self_deauth": True,
         },
         "wifi_open_sensitive": {
             "enabled": True,

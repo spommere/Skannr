@@ -71,6 +71,7 @@ def bluetooth_adapter_details(adapter):
         "manufacturer": "",
         "product": "",
         "usb": False,
+        "mac": bluetooth_adapter_mac(adapter),
     }
     current = device_path
     for _ in range(8):
@@ -88,6 +89,35 @@ def bluetooth_adapter_details(adapter):
             break
         current = parent
     return details
+
+
+def bluetooth_adapter_mac(adapter):
+    """Return the Bluetooth adapter BD Address (MAC) as a lowercase string.
+
+    The sysfs ``address`` file is not present on all kernels (e.g. Raspberry Pi
+    6.12).  ``hciconfig`` is the reliable fallback.
+    """
+    # Try sysfs first (works on x86, some ARM kernels).
+    mac = sysfs_read(
+        os.path.join("/sys/class/bluetooth", adapter, "address")
+    ).strip().lower()
+    if mac:
+        return mac
+    # Fall back to hciconfig output.
+    try:
+        output = subprocess.run(
+            ["hciconfig", adapter],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:
+        return ""
+    for line in output.splitlines():
+        if "BD Address:" in line:
+            parts = line.strip().split()
+            for i, part in enumerate(parts):
+                if part == "Address:" and i + 1 < len(parts):
+                    return parts[i + 1].strip().lower()
+    return ""
 
 
 def bluetooth_adapter_score(adapter, config=None):

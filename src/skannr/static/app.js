@@ -3412,6 +3412,14 @@ function bluetoothDisplayName(name, mac) {
   return value;
 }
 
+function advDataHexText(value) {
+  if (!value || typeof value !== "object") return "";
+  return Object.keys(value).sort().map(function (code) {
+    var hex = String(value[code] || "");
+    return hex ? code + " " + hex.match(/.{1,2}/g).join(":") : "";
+  }).filter(Boolean).join(" | ") || "";
+}
+
 function bluetoothNameLooksLikeAddress(name, mac) {
   const value = String(name || "").trim();
   if (!value) return false;
@@ -6372,6 +6380,7 @@ function buildBluetoothDetail(mac) {
         ["Find My", device.findmy_accessory ? (device.findmy_label || "Apple Find My accessory") : ""],
         ["Find My Payload", findmyPayloadText(device)],
         ["Services / UUIDs", bluetoothServiceList(device.service_uuids)],
+        ["Adv Data Hex", advDataHexText(device.adv_data_hex)],
         ["Model", device.model_number],
         ["Serial", device.serial_number],
         ["Firmware", device.firmware_revision],

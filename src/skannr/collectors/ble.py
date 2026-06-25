@@ -25,6 +25,7 @@ from .base import (
 from .hardware import (
     availability_records,
     bluetooth_adapter_exists,
+    bluetooth_adapter_mac,
     bluetooth_adapters,
     configured_candidates,
     package_available,
@@ -173,6 +174,8 @@ class BLECollector(BaseCollector):
             self.config, "adapters"
         ) or sort_bluetooth_adapters(bluetooth_adapters(), self.config)
         for adapter in candidates:
+            if not self._mac_allows_adapter(adapter):
+                continue
             if self.adapter_exists(adapter):
                 self.active_hardware = adapter
                 self.state = STATE_ONLINE
@@ -182,6 +185,19 @@ class BLECollector(BaseCollector):
         self.state = STATE_OFFLINE
         self.warning = "No usable Bluetooth adapter found."
         return False
+
+    def _mac_allows_adapter(self, adapter):
+        """Return True when *adapter* matches the optional ``mac`` config key.
+
+        When ``mac`` is unset (the default) every adapter is allowed.
+        When set, only the adapter whose MAC matches the configured value
+        is eligible — ``hciN`` name swaps across reboots are harmless.
+        """
+        raw = self.config.get("mac")
+        if not raw:
+            return True
+        configured_mac = str(raw).strip().lower()
+        return bluetooth_adapter_mac(adapter) == configured_mac
 
     async def start(self):
         """Continuously scan BLE advertisements and publish device events."""
@@ -223,7 +239,7 @@ class BLECollector(BaseCollector):
         # updated, and lost devices instead of appending duplicate rows forever.
         seen = {}
         timeout = float(self.config.get("device_timeout_sec", 60))
-        interval = float(self.config.get("scan_interval_sec", 5))
+        interval = float(self.config.get("scan_interval_sec", 15))
         consecutive_in_progress = 0
         empty_scan_windows = 0
         last_bluez_warmup = 0
@@ -306,7 +322,7 @@ class BLECollector(BaseCollector):
                     "rssi": rssi,
                     "manufacturer": self.manufacturer_summary(advertisement),
                     "service_uuids": self.service_uuids(advertisement),
-                    "adv_data_hex": None,
+                    "adv_data_hex": self.manufacturer_data_hex(advertisement),
                 }
                 payload.update(self.findmy_accessory_fields(advertisement))
                 previous = seen.get(mac)
@@ -1021,6 +1037,8 @@ class BLECollector(BaseCollector):
             merged["manufacturer"] = previous.get("manufacturer")
         if not merged.get("service_uuids") and previous.get("service_uuids"):
             merged["service_uuids"] = list(previous.get("service_uuids") or [])
+        if not merged.get("adv_data_hex") and previous.get("adv_data_hex"):
+            merged["adv_data_hex"] = previous.get("adv_data_hex")
         for field in ("findmy_accessory", "findmy_status", "findmy_hint", "findmy_label"):
             if merged.get(field) in (None, "") and previous.get(field) not in (None, ""):
                 merged[field] = previous.get(field)
@@ -1033,6 +1051,7 @@ class BLECollector(BaseCollector):
             "rssi",
             "manufacturer",
             "service_uuids",
+            "adv_data_hex",
             "findmy_accessory",
             "findmy_status",
             "findmy_hint",
@@ -1064,6 +1083,24 @@ class BLECollector(BaseCollector):
             # company ID so the user can look it up later.
             parts.append("{} ({})".format(name, code) if name else code)
         return ", ".join(parts)
+
+    def manufacturer_data_hex(self, advertisement):
+        """Return raw manufacturer-data payload bytes as hex keyed by company ID.
+
+        This is the durable cross-reference key for correlating Skannr records
+        with other BLE scanners (nRF Connect, Wireshark, etc.).  Each value is
+        the hex-encoded payload that follows the company ID in the AD structure.
+        """
+        if advertisement is None:
+            return None
+        data = getattr(advertisement, "manufacturer_data", None) or {}
+        if not data:
+            return None
+        return {
+            "0x{:04X}".format(int(key)): value.hex()
+            for key, value in data.items()
+            if value
+        }
 
     def findmy_accessory_fields(self, advertisement):
         """Return compact Apple Find My accessory markers from manufacturer data."""

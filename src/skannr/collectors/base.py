@@ -6,7 +6,10 @@ to the dashboard.
 """
 
 import asyncio
+import gzip
+import json
 import subprocess
+import urllib.request
 
 from ..bus import local_now
 from ..log_utils import now_epoch, timestamp_epoch
@@ -118,6 +121,34 @@ class BaseCollector:
         await self.emit("collector_retrying", payload, "warning")
         if sleep and self._running:
             await self.retry_sleep()
+
+    async def run_blocking(self, callback, *args):
+        """Run a blocking call without blocking the event loop."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, callback, *args)
+
+    def fetch_text(self, url, accept=None):
+        """Fetch one URL as UTF-8 text."""
+        user_agent = self.config.get("user_agent") or "Skannr {} collector".format(
+            self.name
+        )
+        headers = {"User-Agent": user_agent}
+        if accept:
+            headers["Accept"] = accept
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(
+            request, timeout=float(self.config.get("request_timeout_sec", 15))
+        ) as response:
+            body = response.read()
+        encoding = str(response.headers.get("Content-Encoding") or "").lower()
+        if encoding == "gzip" or body.startswith(b"\x1f\x8b"):
+            body = gzip.decompress(body)
+        return body.decode("utf-8", errors="replace")
+
+    def fetch_json(self, url, accept="application/json"):
+        """Fetch one URL and parse as JSON."""
+        text = self.fetch_text(url, accept=accept)
+        return json.loads(text)
 
     def validate_configured(self, key, default_command=None):
         """Run one named validation command from collector config."""

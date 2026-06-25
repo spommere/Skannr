@@ -18,12 +18,15 @@ validation_timeout_sec: 10
 # Adapter selection. Empty means Skannr ranks available BlueZ adapters and tends
 # to choose external USB adapters before built-in radios.
 adapters: []
+# Optional: pin adapter by MAC address to survive hciN name swaps across reboots.
+# Find the MAC with: hciconfig hci0 | grep 'BD Address'
+# mac:
 
 # BlueZ/Bleak primary scan settings. scan_interval_sec is the steady-state delay
 # between successful BLE scan passes. discover_timeout_sec is a hard timeout for
 # a Bleak discovery/callback pass; 0 uses the scanner default. device_timeout_sec
 # controls when live BLE rows age out after they stop being observed.
-scan_interval_sec: 2
+scan_interval_sec: 15
 discover_timeout_sec: 0
 device_timeout_sec: 60
 

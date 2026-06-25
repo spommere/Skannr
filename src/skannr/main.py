@@ -245,6 +245,13 @@ class DerivedRefreshCoordinator:
                 self.stage_started = started
         return started, step, total, label
 
+    def set_stage_label(self, text):
+        """Update the operator-facing stage label for status polling."""
+        if not self.is_active():
+            return
+        with self.state_lock:
+            self.stage_label = str(text or "")
+
     def finish_phase(self, mode, name, label):
         """Mark a phase complete for status polling."""
         if not self.is_active():
@@ -735,9 +742,16 @@ def subject_annotations_update():
         return json_response({"ok": False, "error": str(exc)}, status=500)
     logging.info("subject annotation updated key=%s state_path=%s", key, subject_annotations_path())
     with runtime["derived_cache_lock"]:
-        runtime["subject_history"] = None
-        runtime["device_history"] = None
-        runtime["reports"] = None
+        if runtime["subject_history"] is not None:
+            runtime["subject_history"] = apply_subject_annotations(
+                runtime["subject_history"]
+            )
+        if runtime["device_history"] is not None:
+            runtime["device_history"] = apply_subject_annotations(
+                runtime["device_history"]
+            )
+        if runtime["reports"] is not None:
+            runtime["reports"] = apply_report_annotations(runtime["reports"])
     return json_response(
         {
             "ok": True,
@@ -2874,6 +2888,7 @@ WIFI_CLIENT_BROWSER_KEYS = {
 }
 
 BLUETOOTH_DEVICE_BROWSER_KEYS = {
+    "adv_data_hex",
     "annotation",
     "classic_seen_count",
     "custom_name",
@@ -3191,9 +3206,17 @@ def compact_records_with_randomized_group(
         candidates.setdefault(bucket, []).append(record)
 
     randomized_groups = []
-    for candidate_records in candidates.values():
+    for bucket, candidate_records in candidates.items():
         represented = sum(browser_group_record_count(record) for record in candidate_records)
         if represented <= 1:
+            individual.extend(candidate_records)
+            continue
+        # Name-based grouping requires > 5 MACs before folding into a group.
+        # A handful of MACs sharing a name (e.g. 2-5 "rnet" Amazon devices)
+        # are more likely genuinely separate devices than one privacy-rotating
+        # device.  This mirrors the persisted-cache threshold in
+        # WiFiBLEPostprocessor.compact_bluetooth_devices_for_storage().
+        if str(bucket or "").startswith("name|") and represented <= 5:
             individual.extend(candidate_records)
             continue
         group = None
@@ -3225,9 +3248,22 @@ def browser_group_record_count(record):
 
 
 def compact_wifi_clients_for_browser(records, limit, required_macs):
-    """Compact Wi-Fi client rows and group randomized probe MACs for display."""
-    return compact_records_with_randomized_group(
-        records,
+    """Compact Wi-Fi client rows and group randomized probe MACs for display.
+
+    Server-side grouping decisions pass through unchanged.  Only individual
+    records are candidates for browser-side folding.
+    """
+    server_groups = []
+    individuals = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if record.get("grouped_randomized"):
+            server_groups.append(record)
+        else:
+            individuals.append(record)
+    result = compact_records_with_randomized_group(
+        individuals,
         WIFI_CLIENT_BROWSER_KEYS,
         limit,
         required_macs,
@@ -3236,6 +3272,11 @@ def compact_wifi_clients_for_browser(records, limit, required_macs):
         lambda record: "randomized-wifi-client-macs",
         update_randomized_wifi_client_group,
     )
+    for group in server_groups:
+        result.append(compact_device_record_for_browser(
+            group, WIFI_CLIENT_BROWSER_KEYS))
+    result.sort(key=browser_record_sort_key, reverse=True)
+    return result
 
 
 def update_randomized_wifi_client_group(group, record):
@@ -3369,18 +3410,36 @@ def update_group_signal_bounds(group, record):
 
 
 def compact_bluetooth_devices_for_browser(records, limit, required_macs):
-    """Compact Bluetooth history and group noisy randomized/no-name addresses."""
-    return compact_records_with_randomized_group(
-        records,
+    """Compact Bluetooth history for browser display.
+
+    Server-side grouping decisions (name, manufacturer, Find My) are final —
+    already-grouped records pass through unchanged.  Only stale one-off MACs
+    are folded here as a browser-only payload optimization.
+    """
+    server_groups = []
+    individuals = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if record.get("grouped_randomized"):
+            server_groups.append(record)
+        else:
+            individuals.append(record)
+    result = compact_records_with_randomized_group(
+        individuals,
         BLUETOOTH_DEVICE_BROWSER_KEYS,
         limit,
         required_macs,
         "mac",
-        lambda record: likely_randomized_bluetooth_record(record)
-        or stale_single_seen_bluetooth_record(record),
+        lambda record: stale_single_seen_bluetooth_record(record),
         randomized_bluetooth_group_key,
         update_randomized_bluetooth_group,
     )
+    for group in server_groups:
+        result.append(compact_device_record_for_browser(
+            group, BLUETOOTH_DEVICE_BROWSER_KEYS))
+    result.sort(key=browser_record_sort_key, reverse=True)
+    return result
 
 
 def select_device_records_for_browser(records, limit, required_callback):
@@ -4723,14 +4782,37 @@ def build_or_reuse_device_history_for_refresh(log_dir, window_days):
             device_builder, full_device_summary, persist=True
         )
         full_device_summary = apply_subject_annotations(full_device_summary)
+        try:
+            device_builder.save_summary(full_device_summary)
+        except OSError as exc:
+            logging.exception("failed to persist device history: %s", exc)
         return full_device_summary
     finally:
         lock.release()
+
+def _push_known_bssids_to_alerts(subject_history):
+    """Extract BSSID->SSID mapping from subject history and push to AlertEngine.
+
+    Used by wifi_disruption_alerts to suppress false positives when deauth
+    frames are between co-BSSIDs of the same known SSID (e.g., band steering).
+    """
+    if runtime.get("alerts") is None:
+        return
+    wifi = (subject_history or {}).get("wifi") or {}
+    aps = wifi.get("access_points") or []
+    bssid_to_ssid = {}
+    for ap in aps:
+        bssid = ap.get("bssid")
+        ssid = ap.get("ssid")
+        if bssid and ssid:
+            bssid_to_ssid[normalized_identity(bssid)] = ssid
+    runtime["alerts"].set_known_bssids(bssid_to_ssid)
 
 def refresh_subject_history(window_days="default"):
     """Build Subject History and its Device History compatibility view."""
     window_days = resolve_window_days(window_days)
     log_dir = configured_log_dir()
+    derived_refresh.set_stage_label("Subject History — checking pending data")
     pending_started = time.monotonic()
     cached_full_summary = read_json_file(subject_history_path())
     pending_stats = subject_history_pending_jsonl_stats(cached_full_summary)
@@ -4747,12 +4829,14 @@ def refresh_subject_history(window_days="default"):
         (cached_full_summary or {}).get("generated_at") or "",
     )
     if isinstance(cached_full_summary, dict) and not cached_full_summary.get("empty") and not pending_raw:
+        derived_refresh.set_stage_label("Subject History — loading cached")
         reuse_started = time.monotonic()
         subject_display = load_cached_subject_history(window_days)
         device_display = device_history_from_subject_history(subject_display, window_days)
         with runtime["derived_cache_lock"]:
             runtime["subject_history"] = subject_display
             runtime["device_history"] = device_display
+        _push_known_bssids_to_alerts(subject_display)
         logging.info(
             "derived subject_history reused cached summary; window=%s elapsed=%.2fs subjects=%s generated=%s",
             window_days,
@@ -4767,6 +4851,9 @@ def refresh_subject_history(window_days="default"):
         device_history_state_path=device_history_path(),
         window_days=window_days,
         enabled_collectors=enabled_subject_history_collectors(),
+        progress_callback=lambda text: derived_refresh.set_stage_label(
+            "Subject History — {}".format(text)
+        ),
     )
     subject_started = time.monotonic()
     full_subject_summary = subject_builder.build_summary()
@@ -4810,6 +4897,7 @@ def refresh_subject_history(window_days="default"):
     with runtime["derived_cache_lock"]:
         runtime["subject_history"] = subject_display
         runtime["device_history"] = device_display
+    _push_known_bssids_to_alerts(subject_display)
     return subject_display
 
 

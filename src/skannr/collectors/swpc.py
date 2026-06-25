@@ -200,11 +200,6 @@ class SWPCCollector(BaseCollector):
                 )
             await asyncio.sleep(interval)
 
-    async def run_blocking(self, callback, *args):
-        """Run a blocking network call without requiring Python 3.9 to_thread."""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, callback, *args)
-
     def feed_sources(self):
         """Return enabled SWPC product descriptors."""
         products = self.config.get("products") or {}
@@ -530,18 +525,8 @@ class SWPCCollector(BaseCollector):
 
     def fetch_json(self, url):
         """Fetch one SWPC JSON URL."""
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json, text/json",
-                "User-Agent": self.config.get("user_agent") or "Skannr SWPC collector",
-            },
-        )
-        with urllib.request.urlopen(
-            request, timeout=float(self.config.get("request_timeout_sec", 15))
-        ) as response:
-            body = response.read()
-        return json.loads(body.decode("utf-8", errors="replace"))
+        text = self.fetch_text(url, accept="application/json, text/json")
+        return json.loads(text)
 
     def changed(self, key, fingerprint):
         """Return True when a source event is new or materially changed."""

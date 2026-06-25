@@ -15,6 +15,9 @@ validation_timeout_sec: 10
 # Adapter selection. Empty means Skannr ranks available BlueZ adapters and tends
 # to choose external USB adapters before built-in radios.
 adapters: []
+# Optional: pin adapter by MAC address to survive hciN name swaps across reboots.
+# Find the MAC with: hciconfig hci0 | grep 'BD Address'
+# mac:
 
 # scan_timeout_sec is the length of each inquiry. scan_interval_sec is the delay
 # between completed inquiries. device_timeout_sec controls live-row aging.

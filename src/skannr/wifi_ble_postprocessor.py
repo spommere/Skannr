@@ -35,6 +35,7 @@ from .identity_policy import (
     bluetooth_property_like_name,
     low_identity_bluetooth_record,
     low_identity_wifi_client,
+    numeric_epoch,
 )
 from .oui_lookup import normalize_oui, vendor_name, vendor_prefix
 
@@ -48,12 +49,13 @@ class WiFiBLEPostprocessor:
     GROUP_SAMPLE_MAC_LIMIT = 12
     GROUP_SAMPLE_VALUE_LIMIT = 50
 
-    def __init__(self, log_dir, state_path=None, window_days=None):
+    def __init__(self, log_dir, state_path=None, window_days=None, progress_callback=None):
         self.log_dir = log_dir
         self.state_path = state_path or os.path.join(
             log_dir, "device_history", "device_history.json"
         )
         self.window_days = window_days
+        self.progress_callback = progress_callback
         self._time_cache = {}
 
     def build(self, persist=True, merge_previous=True):
@@ -114,11 +116,15 @@ class WiFiBLEPostprocessor:
         # Wi-Fi scan and Wi-Fi monitor both produce AP beacons, but only monitor
         # mode produces clients/probes/deauth. apply_wifi_event() handles both
         # sources and records the source set on each device.
+        if self.progress_callback:
+            self.progress_callback("Wi-Fi Scan")
         for event in self.read_all_events("wifi"):
             records_read += 1
             records_by_collector["wifi"] += 1
             self.apply_wifi_event(event, wifi_aps, wifi_clients)
 
+        if self.progress_callback:
+            self.progress_callback("Wi-Fi Monitor")
         for event in self.read_all_events("wifi_monitor"):
             records_read += 1
             records_by_collector["wifi_monitor"] += 1
@@ -127,16 +133,22 @@ class WiFiBLEPostprocessor:
         # BLE, BLE Identify, and Classic Bluetooth are merged into one
         # Bluetooth device history because a physical device may show up through
         # more than one Bluetooth capture method over time.
+        if self.progress_callback:
+            self.progress_callback("BLE")
         for event in self.read_all_events("ble"):
             records_read += 1
             records_by_collector["ble"] += 1
             self.apply_ble_event(event, ble_devices)
 
+        if self.progress_callback:
+            self.progress_callback("BLE Identify")
         for event in self.read_all_events("ble_identify"):
             records_read += 1
             records_by_collector["ble_identify"] += 1
             self.apply_ble_identify_event(event, ble_devices)
 
+        if self.progress_callback:
+            self.progress_callback("BT Classic")
         for event in self.read_all_events("bt_classic"):
             records_read += 1
             records_by_collector["bt_classic"] += 1
@@ -466,6 +478,8 @@ class WiFiBLEPostprocessor:
             item["names"].add(name)
         if data.get("manufacturer"):
             item["manufacturer"] = self.clean(data.get("manufacturer"))
+        if data.get("adv_data_hex") and not item.get("adv_data_hex"):
+            item["adv_data_hex"] = data["adv_data_hex"]
         for uuid in data.get("service_uuids") or []:
             self.add_set_value(item["service_uuids"], uuid)
         for field in (
@@ -490,7 +504,7 @@ class WiFiBLEPostprocessor:
                 item, timestamp, timestamp_epoch_value, data
             )
         elif event_type == "device_lost":
-            item["lost_count"] += 1
+            item["lost_count"] = int(item.get("lost_count") or 0) + 1
             self.close_ble_session(item, timestamp, timestamp_epoch_value, data)
 
     def apply_ble_identify_event(self, event, ble_devices):
@@ -781,67 +795,186 @@ class WiFiBLEPostprocessor:
         self.update_storage_group_signal_bounds(group, record)
         return group
 
+    # ── Temporal-density grouping ──────────────────────────────────────
+    # Only count MACs seen recently toward the privacy-group threshold.
+    # Stale MACs from days ago are excluded so that genuinely separate
+    # devices (e.g. floodlights keeping the same name for weeks) do not
+    # accidentally trip the grouping threshold.
+    GROUP_DENSITY_THRESHOLD = 5
+    GROUP_DENSITY_WINDOW_HOURS = 4
+
+    def _active_record_count(self, records):
+        """Count records whose last_seen_epoch falls within the density window."""
+        if not records:
+            return 0
+        cutoff = now_epoch() - (self.GROUP_DENSITY_WINDOW_HOURS * 3600)
+        count = 0
+        for record in records:
+            last = record.get("last_seen_epoch")
+            if last is not None and last >= cutoff:
+                count += 1
+        return count
+
     def compact_bluetooth_devices_for_storage(self, records):
-        """Fold multi-MAC low-identity BLE privacy churn before persistence."""
+        """Fold multi-MAC low-identity BLE privacy churn before persistence.
+
+        Seven gated passes, single file, no split responsibility.
+        """
+        # ── Gate 1: route records ────────────────────────────────────
+        # Already-grouped records go straight to candidates.
+        # High-identity records go to kept.  Low-identity individuals
+        # are deferred into name or manufacturer buckets for density
+        # evaluation.
         kept = []
         candidates = defaultdict(list)
         name_candidates = defaultdict(list)
+        mfr_candidates = defaultdict(list)
+        candidate_groups = set()  # storage keys that already have a group
+
         for record in records or []:
             if not isinstance(record, dict):
                 continue
             if self.keep_individual_bluetooth_device(record):
                 kept.append(record)
                 continue
-            if bluetooth_grouping_candidate(record):
-                bucket = bluetooth_identity_bucket(record)
-                if bucket[0] == "name" and not record.get("grouped_randomized"):
-                    # Defer name-based records: a single physical device that
-                    # rotates MACs while keeping the same name is a privacy
-                    # pattern — keep individual only when the name is unique.
-                    name_candidates[bucket[1].lower()].append(record)
-                else:
-                    candidates[self.bluetooth_storage_group_key(record)].append(record)
-            else:
+            if not bluetooth_grouping_candidate(record):
                 kept.append(record)
-        # Resolve deferred name-based candidates: single-MAC names stay
-        # individual; multi-MAC names fold into privacy groups.
-        for name_key, records in name_candidates.items():
-            if len(records) <= 5:
-                kept.extend(records)
+                continue
+            bucket = bluetooth_identity_bucket(record)
+            storage_key = self.bluetooth_storage_group_key(record)
+            if record.get("grouped_randomized"):
+                candidates[storage_key].append(record)
+                candidate_groups.add(storage_key)
+            elif bucket[0] == "name":
+                name_candidates[bucket[1].lower()].append(record)
+            elif bucket[0] == "manufacturer":
+                mfr_candidates[storage_key].append(record)
             else:
-                for record in records:
-                    candidates[self.bluetooth_storage_group_key(record)].append(record)
-        for candidate_records in candidates.values():
-            represented = sum(self.group_record_count(record) for record in candidate_records)
+                candidates[storage_key].append(record)
+
+        # ── Gate 2: temporal density check ───────────────────────────
+        # Only MACs seen within GROUP_DENSITY_WINDOW_HOURS count toward
+        # the threshold.  Stale MACs from days ago are excluded so that
+        # genuinely separate devices (e.g. floodlights) do not trip the
+        # threshold.
+        def _density_ok(recs):
+            return self._active_record_count(recs) >= self.GROUP_DENSITY_THRESHOLD
+
+        # ── Pre-dedup: remove individuals whose MAC is already in a ──
+        # group.  Incremental events can resurrect individual rows for
+        # MACs that were already folded into a group; without this step
+        # those individuals dilute the density count and trigger
+        # incorrect stale-group removal in Gate 4.
+        group_macs = set()
+        for storage_key in candidate_groups:
+            for rec in candidates[storage_key]:
+                if not rec.get("grouped_randomized"):
+                    continue
+                for m in rec.get("group_members") or []:
+                    mac = (m.get("mac") or "").strip().lower()
+                    if mac:
+                        group_macs.add(mac)
+        if group_macs:
+            name_candidates = defaultdict(list, {
+                k: [r for r in recs
+                    if (r.get("mac") or "").strip().lower() not in group_macs]
+                for k, recs in name_candidates.items()
+            })
+            mfr_candidates = defaultdict(list, {
+                k: [r for r in recs
+                    if (r.get("mac") or "").strip().lower() not in group_macs]
+                for k, recs in mfr_candidates.items()
+            })
+
+        # ── Gate 3: dissolve stale groups ───────────────────────────
+        # An existing group whose active-member count has fallen below
+        # threshold is dissolved; its members become individuals again.
+        for storage_key in list(candidate_groups):
+            group_recs = candidates[storage_key]
+            recs_without_group = [r for r in group_recs
+                                  if not r.get("grouped_randomized")]
+            # Count active distinct MACs across the group members
+            active_macs = set()
+            cutoff = now_epoch() - (self.GROUP_DENSITY_WINDOW_HOURS * 3600)
+            for rec in group_recs:
+                if rec.get("grouped_randomized"):
+                    for m in rec.get("group_members") or []:
+                        last = m.get("last_seen_epoch")
+                        if last is not None and last >= cutoff:
+                            active_macs.add((m.get("mac") or "").strip().lower())
+                else:
+                    last = rec.get("last_seen_epoch")
+                    if last is not None and last >= cutoff:
+                        active_macs.add((rec.get("mac") or "").strip().lower())
+            if len(active_macs) < self.GROUP_DENSITY_THRESHOLD:
+                # Dissolve: keep group members as individuals, remove group
+                del candidates[storage_key]
+                candidate_groups.discard(storage_key)
+                kept.extend(recs_without_group)
+                # The group record itself is discarded
+
+        # ── Gate 4: fold qualified individuals into groups ──────────
+        # Name-based candidates that meet the temporal density threshold
+        # are folded into a group (new or existing).
+        for name_key, recs in name_candidates.items():
+            if not recs:
+                continue  # all pre-deduped; skip to avoid stale-pop
+            storage_key = "name:{}".format(name_key)
+            if _density_ok(recs):
+                candidates[storage_key].extend(recs)
+            else:
+                kept.extend(recs)
+                # If a stale group exists for this name but density is
+                # now below threshold, remove it.
+                candidates.pop(storage_key, None)
+
+        for storage_key, recs in mfr_candidates.items():
+            if not recs:
+                continue
+            if _density_ok(recs):
+                candidates[storage_key].extend(recs)
+            else:
+                kept.extend(recs)
+                candidates.pop(storage_key, None)
+
+        # ── Gate 5: form groups ─────────────────────────────────────
+        compacted = []
+        for storage_key, recs in candidates.items():
+            represented = sum(self.group_record_count(r) for r in recs)
             if represented <= 1:
-                kept.extend(candidate_records)
+                compacted.extend(recs)
                 continue
             group = None
-            for record in candidate_records:
-                group = self.update_bluetooth_storage_group(group, record)
-            kept.append(group)
-        # Dedup: remove low-identity individual records whose MAC already
-        # appears inside a group (can happen across incremental builds when
-        # grouping logic changes).  Devices with findings or strong identity
-        # are never pruned.
-        group_member_macs = set()
-        for item in kept:
+            for rec in recs:
+                group = self.update_bluetooth_storage_group(group, rec)
+            compacted.append(group)
+
+        # ── Gate 6: dedup ───────────────────────────────────────────
+        # Remove low-identity individual records whose MAC already
+        # appears inside a group.  This prevents incremental events
+        # from resurrecting individual rows for MACs that were already
+        # folded into a group (which would otherwise dilute the density
+        # count and trigger incorrect dissolution on the next build).
+        group_macs = set()
+        for item in compacted:
             if not item.get("grouped_randomized"):
                 continue
-            for member in item.get("group_members") or []:
-                mac = (member.get("mac") or "").strip().lower()
+            for m in item.get("group_members") or []:
+                mac = (m.get("mac") or "").strip().lower()
                 if mac:
-                    group_member_macs.add(mac)
-        if group_member_macs:
-            kept = [
-                item
-                for item in kept
+                    group_macs.add(mac)
+        if group_macs:
+            compacted = [
+                item for item in compacted
                 if item.get("grouped_randomized")
                 or not low_identity_bluetooth_record(item)
-                or (item.get("mac") or "").strip().lower() not in group_member_macs
+                or (item.get("mac") or "").strip().lower() not in group_macs
             ]
+        compacted.extend(kept)
+
+        # ── Gate 7: sort ────────────────────────────────────────────
         return sorted(
-            kept,
+            compacted,
             key=lambda item: record_time_epoch(item, "last_seen") or 0,
             reverse=True,
         )
@@ -973,7 +1106,7 @@ class WiFiBLEPostprocessor:
                 "disassoc_count": record.get("disassoc_count") or 0,
             })
         elif source == "bluetooth":
-            names = record.get("names") or ([record.get("name")] if record.get("name") else [])
+            names = list(record.get("names") or ([record.get("name")] if record.get("name") else []))
             member.update({
                 "identity": names[0] if names else (record.get("manufacturer") or record.get("manufacturer_name") or ""),
                 "names": names[:6],
@@ -1654,7 +1787,7 @@ class WiFiBLEPostprocessor:
             return
         stored = dict(session)
         stored["names"] = sorted(stored.get("names") or [])
-        item["sessions"].append(stored)
+        item.setdefault("sessions", []).append(stored)
 
     def update_session_signal(self, session, value):
         """Maintain min/max RSSI for one BLE presence session."""

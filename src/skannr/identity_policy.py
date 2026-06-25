@@ -252,6 +252,15 @@ def bluetooth_identity_bucket(record):
         kind = str((record or {}).get("identity_bucket") or "").strip()
         label = str((record or {}).get("identity_label") or "").strip()
         if kind and label and not generated_bluetooth_group_label(label):
+            # Normalize manufacturer labels so the group key matches what
+            # bluetooth_manufacturer_label produces for individual records
+            # (visible label strips the company code).  Without this the
+            # stale-group pop in compact_bluetooth_devices_for_storage can
+            # never match.
+            if kind == "manufacturer":
+                visible = bluetooth_visible_manufacturer_label(label)
+                if visible:
+                    label = visible
             return (kind, label)
     if (record or {}).get("findmy_accessory"):
         return ("findmy", "Apple Find My accessory")

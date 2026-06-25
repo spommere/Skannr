@@ -13,7 +13,7 @@ interfaces: []
 
 # Steady-state scan cadence after a successful managed scan pass. This is not a
 # retry delay; retry_interval_sec below is used after command/setup failures.
-managed_scan_interval_sec: 2
+managed_scan_interval_sec: 30
 
 # Scanner backend. auto tries iw first and falls back to nmcli when needed.
 scan_tool: auto

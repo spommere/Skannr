@@ -96,6 +96,7 @@ DEFAULT_ALERT_CONFIG = {
         "broadcast_count": 3,
         "distinct_receiver_count": 3,
         "single_receiver_count": 50,
+        "suppress_known_ap_self_deauth": True,
     },
     "wifi_open_sensitive": {
         "enabled": True,
@@ -234,7 +235,16 @@ class AlertEngine:
         self.recent = deque(maxlen=self.max_items)
         self._counter = 0
         self.wifi_disruptions = {}
+        self.known_bssids = {}  # normalized_bssid -> ssid (from subject history)
         self.dirty = False
+
+    def set_known_bssids(self, bssid_to_ssid):
+        """Update the known-AP index for wifi_disruption cross-referencing.
+
+        Args:
+            bssid_to_ssid: dict mapping normalized BSSID string to SSID string.
+        """
+        self.known_bssids = bssid_to_ssid
 
     def process(self, event, emit=True):
         """Process one live event and return newly emitted alert events."""
@@ -554,6 +564,14 @@ class AlertEngine:
             attack_pattern = "high-rate single-receiver"
         if not attack_pattern:
             return []
+        # Suppress when transmitter and receiver are both known BSSIDs of the
+        # same SSID (e.g., band steering — one radio deauthing the other).
+        # This is normal AP behavior, not an attack.
+        if self.known_bssids and rule.get("suppress_known_ap_self_deauth", True):
+            tx_ssid = self.known_bssids.get(normalized_key(transmitter))
+            rx_ssid = self.known_bssids.get(normalized_key(receiver))
+            if tx_ssid and rx_ssid and tx_ssid == rx_ssid:
+                return []
         title = "Wi-Fi disruption burst"
         summary = "{} attack-like {} frame(s) in {:.0f}s; transmitter {}; receivers {}; pattern {}".format(
             total_count,

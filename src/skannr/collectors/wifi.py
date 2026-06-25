@@ -116,7 +116,7 @@ class WiFiCollector(BaseCollector):
 
     async def managed_scan_loop(self, iface):
         """Managed scanner for normal Wi-Fi interfaces."""
-        interval = float(self.config.get("managed_scan_interval_sec", 2))
+        interval = float(self.config.get("managed_scan_interval_sec", 30))
         await self.emit(
             "scan_started",
             {

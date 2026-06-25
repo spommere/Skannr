@@ -542,7 +542,9 @@ installs. `config/` is machine-specific local state.
 - `pws_weather.rain_1h_in`, `critical_rain_1h_in`, `wind_gust_mph`,
   `critical_wind_gust_mph`: PWS weather alert thresholds.
 - `rayhunter_warning`: alerts when Rayhunter reports non-zero warnings.
-- `wifi_disruption.window_sec`, `count`: deauth/disruption burst alert window.
+- `wifi_disruption.window_sec`, `count`, `suppress_known_ap_self_deauth`:
+  deauth/disruption burst alert window, count, and whether to suppress
+  alerts between co-BSSIDs of the same known SSID (band steering).
 - `wifi_open_sensitive.ssid_patterns`: open SSIDs that should alert.
 - `ble_tracker.min_rssi`, `name_patterns`, `manufacturer_patterns`,
   `service_uuid_patterns`: tracker-like BLE alert matching.

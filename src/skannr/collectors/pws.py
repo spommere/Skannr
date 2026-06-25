@@ -204,11 +204,6 @@ class PWSCollector(BaseCollector):
                 )
             await asyncio.sleep(interval)
 
-    async def run_blocking(self, callback, *args):
-        """Run a blocking network call without requiring Python 3.9 to_thread."""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, callback, *args)
-
     def poll_once(self):
         """Fetch and return new/changed PWS station rows."""
         payload = self.fetch_json(self.query_url())
@@ -240,18 +235,8 @@ class PWSCollector(BaseCollector):
 
     def fetch_json(self, url):
         """Fetch the Ambient Weather devices endpoint."""
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": self.config.get("user_agent") or "Skannr PWS collector",
-            },
-        )
-        with urllib.request.urlopen(
-            request, timeout=float(self.config.get("request_timeout_sec", 15))
-        ) as response:
-            body = response.read()
-        data = json.loads(body.decode("utf-8", errors="replace"))
+        text = self.fetch_text(url, accept="application/json")
+        data = json.loads(text)
         return data if isinstance(data, list) else []
 
     def redacted_error_text(self, exc):

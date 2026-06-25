@@ -21,6 +21,7 @@ from .base import (
 from .hardware import (
     availability_records,
     bluetooth_adapter_exists,
+    bluetooth_adapter_mac,
     bluetooth_adapters,
     configured_candidates,
     sort_bluetooth_adapters,
@@ -72,6 +73,8 @@ class BluetoothClassicCollector(BaseCollector):
             self.config, "adapters"
         ) or sort_bluetooth_adapters(bluetooth_adapters(), self.config)
         for adapter in candidates:
+            if not self._mac_allows_adapter(adapter):
+                continue
             if bluetooth_adapter_exists(adapter):
                 self.active_hardware = adapter
                 self.state = STATE_ONLINE
@@ -81,6 +84,19 @@ class BluetoothClassicCollector(BaseCollector):
         self.state = STATE_OFFLINE
         self.warning = "No usable Bluetooth adapter found."
         return False
+
+    def _mac_allows_adapter(self, adapter):
+        """Return True when *adapter* matches the optional ``mac`` config key.
+
+        When ``mac`` is unset (the default) every adapter is allowed.
+        When set, only the adapter whose MAC matches the configured value
+        is eligible — ``hciN`` name swaps across reboots are harmless.
+        """
+        raw = self.config.get("mac")
+        if not raw:
+            return True
+        configured_mac = str(raw).strip().lower()
+        return bluetooth_adapter_mac(adapter) == configured_mac
 
     async def start(self):
         """Run repeated classic Bluetooth inquiries until stopped."""

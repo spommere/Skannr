@@ -315,11 +315,6 @@ class NOAACollector(BaseCollector):
                 )
             await asyncio.sleep(interval)
 
-    async def run_blocking(self, callback, *args):
-        """Run a blocking network call without requiring Python 3.9 to_thread."""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, callback, *args)
-
     def feed_sources(self):
         """Return enabled feed descriptors."""
         sources = []
@@ -767,6 +762,7 @@ class NOAACollector(BaseCollector):
         headline = compact_noaa_text(props.get("headline"), 300)
         description = compact_noaa_text(props.get("description"), NOAA_TEXT_MAX)
         instruction = compact_noaa_text(props.get("instruction"), NOAA_TEXT_MAX)
+        alert_kind = self.alert_kind(event_name, headline, description)
         data = {
             "event_id": compact_noaa_text(event_id, 180),
             "event": event_name,
@@ -787,8 +783,8 @@ class NOAACollector(BaseCollector):
             "instruction": instruction,
             "summary": headline or description or event_name,
             "source": "NWS",
-            "source_url": compact_noaa_text(props.get("@id") or event_id, 240),
-            "alert_kind": self.alert_kind(event_name, headline, description),
+            "source_url": "https://www.tsunami.gov/" if alert_kind == "tsunami" else compact_noaa_text(props.get("@id") or event_id, 240),
+            "alert_kind": alert_kind,
             "internet_fed": True,
         }
         geocode = props.get("geocode") or {}
@@ -1206,20 +1202,6 @@ class NOAACollector(BaseCollector):
         data = json.loads(text)
         return data if isinstance(data, dict) else {}
 
-    def fetch_text(self, url, accept=None):
-        """Fetch one URL as UTF-8 text."""
-        headers = {
-            "User-Agent": self.config.get("user_agent") or "Skannr NOAA collector",
-        }
-        if accept:
-            headers["Accept"] = accept
-        request = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(
-            request, timeout=float(self.config.get("request_timeout_sec", 15))
-        ) as response:
-            body = response.read()
-        return body.decode("utf-8", errors="replace")
-
     def changed(self, key, fingerprint):
         """Return True when a source item is new or materially changed."""
         if not fingerprint:
@@ -1270,6 +1252,9 @@ class NOAACollector(BaseCollector):
 
     def noaa_event_is_warning(self, data):
         """Return True when NOAA content should be emitted as warning severity."""
+        status = str((data or {}).get("status") or "").lower()
+        if status == "test":
+            return False
         severity = str((data or {}).get("severity") or "").lower()
         kind = str((data or {}).get("alert_kind") or "").lower()
         if kind == "tropical_outlook":
@@ -1658,10 +1643,18 @@ def tsunami_severity(*values):
 
 def tsunami_is_alertworthy(data):
     """Return True for tsunami products that should open Skannr Alerts."""
+    status = str((data or {}).get("status") or "").lower()
+    if status == "test":
+        return False
     text = " ".join(
         str((data or {}).get(field) or "")
-        for field in ("event", "headline", "tsunami_category", "summary")
+        for field in ("event", "headline", "tsunami_category", "summary", "description", "instruction")
     ).lower()
+    headline = str((data or {}).get("headline") or "").lower()
+    if headline.startswith("test"):
+        return False
+    if "this is a test" in text or "test purposes" in text:
+        return False
     if "final tsunami threat message" in text or "threat has passed" in text:
         return False
     if re.search(r"\btsunami\s+(warning|watch|advisory)\b", text):

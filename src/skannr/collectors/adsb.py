@@ -213,11 +213,6 @@ class ADSBCollector(BaseCollector):
         await self.stop_decoder()
         await super().stop()
 
-    async def run_blocking(self, callback, *args):
-        """Run blocking file or URL reads without blocking the event loop."""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, callback, *args)
-
     def poll_once(self):
         """Return changed aircraft rows from the current decoder snapshot."""
         payload = self.read_aircraft_json()

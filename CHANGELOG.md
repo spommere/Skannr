@@ -7,6 +7,34 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.3.3 - 2026-06-25
+
+- **Temporal-density Bluetooth grouping.** The all-time MAC-count threshold for
+  privacy-rotation groups is replaced with a recency-window check: only MACs seen
+  within the last 4 hours count toward the group threshold (T=5). Stale MACs from
+  power-cycled devices days ago no longer push genuinely separate devices into
+  spurious groups. Session-overlap detection prevents grouping MACs that were
+  seen simultaneously. Grouping logic is consolidated into a single seven-gate
+  pass in `compact_bluetooth_devices_for_storage`; `add_bluetooth_subjects` no
+  longer performs independent re-grouping or reconciliation.
+- **Incremental grouping stability.** Incremental raw-log builds no longer
+  resurrect individual MAC rows that were already folded into a privacy group,
+  fixing a regression where groups were silently dissolved on every second
+  Subject History refresh.
+- **NOAA tsunami TEST filtering.** Events with `status == "Test"` or headlines
+  starting with "TEST" never raise Skannr alerts, preventing NTWC communication
+  test warnings from appearing as live alerts. Tsunami alert Details links now
+  point to `https://www.tsunami.gov/` instead of the `api.weather.gov` JSON
+  endpoint.
+- **HTTP fetch consolidation.** `BaseCollector` now provides `run_blocking`,
+  `fetch_text` (with gzip support), and `fetch_json`, removing duplicate
+  implementations from NOAA, USGS, SWPC, PWS, ADS-B, and Rayhunter.
+- **Relaxed default scan intervals.** Wi-Fi scan default: 2 s → 30 s. BLE scan
+  default: 2 s → 15 s. Config example and code fallback values now match.
+- **Defensive `group_member_summary` fix.** The `names` field is now explicitly
+  converted to a list before subscripting, preventing a `TypeError` when the
+  field arrives as a `set` from raw event folding.
+
 ## 0.3.2 - 2026-06-23
 
 - **Wi-Fi Monitor MAC-based adapter selection.** Added `mac` config key to

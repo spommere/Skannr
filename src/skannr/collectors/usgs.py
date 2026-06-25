@@ -153,11 +153,6 @@ class USGSCollector(BaseCollector):
                 )
             await asyncio.sleep(interval)
 
-    async def run_blocking(self, callback, *args):
-        """Run a blocking network call without requiring Python 3.9 to_thread."""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, callback, *args)
-
     def poll_once(self):
         """Fetch and return new/changed earthquake events."""
         merged = {}
@@ -350,18 +345,8 @@ class USGSCollector(BaseCollector):
 
     def fetch_json(self, url):
         """Fetch one USGS GeoJSON URL."""
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/geo+json, application/json",
-                "User-Agent": self.config.get("user_agent") or "Skannr USGS collector",
-            },
-        )
-        with urllib.request.urlopen(
-            request, timeout=float(self.config.get("request_timeout_sec", 15))
-        ) as response:
-            body = response.read()
-        data = json.loads(body.decode("utf-8", errors="replace"))
+        text = self.fetch_text(url, accept="application/geo+json, application/json")
+        data = json.loads(text)
         return data if isinstance(data, dict) else {}
 
     def changed(self, key, fingerprint):
