@@ -37,7 +37,7 @@ from .identity_policy import (
     low_identity_wifi_client,
     numeric_epoch,
 )
-from .oui_lookup import normalize_oui, vendor_name, vendor_prefix
+from .oui_lookup import normalize_oui, vendor_info, vendor_name, vendor_prefix
 
 
 class WiFiBLEPostprocessor:
@@ -49,14 +49,20 @@ class WiFiBLEPostprocessor:
     GROUP_SAMPLE_MAC_LIMIT = 12
     GROUP_SAMPLE_VALUE_LIMIT = 50
 
-    def __init__(self, log_dir, state_path=None, window_days=None, progress_callback=None):
+    def __init__(self, log_dir, state_path=None, window_days=None,
+                 progress_callback=None, reference_epoch=None):
         self.log_dir = log_dir
         self.state_path = state_path or os.path.join(
             log_dir, "device_history", "device_history.json"
         )
         self.window_days = window_days
         self.progress_callback = progress_callback
+        self.reference_epoch = reference_epoch  # for historical snapshots
         self._time_cache = {}
+
+    def _now(self):
+        """Return reference_epoch if set, else current wall-clock time."""
+        return self.reference_epoch or now_epoch()
 
     def build(self, persist=True, merge_previous=True):
         """Return materialized Device History, updating it incrementally.
@@ -327,8 +333,8 @@ class WiFiBLEPostprocessor:
                     "ssid": ssid,
                     "ssids": set(),
                     "bssid": bssid,
-                    "vendor_oui": self.vendor_for(bssid),
-                    "vendor_prefix": self.vendor_prefix_for(bssid),
+                    "vendor_oui": vendor_info(bssid)["vendor_oui"],
+                    "vendor_prefix": vendor_info(bssid)["vendor_prefix"],
                     "vendor_name": self.clean(data.get("vendor_name")),
                     "first_seen": timestamp,
                     "last_seen": timestamp,
@@ -352,9 +358,9 @@ class WiFiBLEPostprocessor:
             # Refill missing values from the local OUI registry as records are
             # touched by newer events.
             if not item.get("vendor_oui"):
-                item["vendor_oui"] = self.vendor_for(bssid)
+                item["vendor_oui"] = vendor_info(bssid)["vendor_oui"]
             if not item.get("vendor_prefix"):
-                item["vendor_prefix"] = self.vendor_prefix_for(bssid)
+                item["vendor_prefix"] = vendor_info(bssid)["vendor_prefix"]
             if data.get("vendor_name"):
                 item["vendor_name"] = self.clean(data.get("vendor_name"))
             if data.get("vendor_prefix"):
@@ -807,7 +813,7 @@ class WiFiBLEPostprocessor:
         """Count records whose last_seen_epoch falls within the density window."""
         if not records:
             return 0
-        cutoff = now_epoch() - (self.GROUP_DENSITY_WINDOW_HOURS * 3600)
+        cutoff = self._now() - (self.GROUP_DENSITY_WINDOW_HOURS * 3600)
         count = 0
         for record in records:
             last = record.get("last_seen_epoch")
@@ -895,7 +901,7 @@ class WiFiBLEPostprocessor:
                                   if not r.get("grouped_randomized")]
             # Count active distinct MACs across the group members
             active_macs = set()
-            cutoff = now_epoch() - (self.GROUP_DENSITY_WINDOW_HOURS * 3600)
+            cutoff = self._now() - (self.GROUP_DENSITY_WINDOW_HOURS * 3600)
             for rec in group_recs:
                 if rec.get("grouped_randomized"):
                     for m in rec.get("group_members") or []:
@@ -907,11 +913,45 @@ class WiFiBLEPostprocessor:
                     if last is not None and last >= cutoff:
                         active_macs.add((rec.get("mac") or "").strip().lower())
             if len(active_macs) < self.GROUP_DENSITY_THRESHOLD:
-                # Dissolve: keep group members as individuals, remove group
+                # Dissolve: keep group members as individuals, remove group.
+                # Extract members from the group record itself — pre-existing
+                # individuals (recs_without_group) may be empty because Gate 6
+                # already deduplicated them.  Without this the dissolved
+                # group's MACs vanish from device history on the next build.
                 del candidates[storage_key]
                 candidate_groups.discard(storage_key)
+                for rec in group_recs:
+                    if rec.get("grouped_randomized"):
+                        for m in rec.get("group_members") or []:
+                            if not isinstance(m, dict):
+                                continue
+                            mac = str(m.get("mac") or "").strip().lower()
+                            if not mac:
+                                continue
+                            kept.append({
+                                "mac": mac,
+                                "first_seen": (
+                                    m.get("first_seen")
+                                    or rec.get("first_seen") or ""
+                                ),
+                                "first_seen_epoch": (
+                                    m.get("first_seen_epoch")
+                                    or rec.get("first_seen_epoch")
+                                ),
+                                "last_seen": (
+                                    m.get("last_seen")
+                                    or rec.get("last_seen") or ""
+                                ),
+                                "last_seen_epoch": (
+                                    m.get("last_seen_epoch")
+                                    or rec.get("last_seen_epoch")
+                                ),
+                                "signal_min": m.get("signal_min"),
+                                "signal_max": m.get("signal_max"),
+                                "randomized_mac": True,
+                                "grouped_randomized": False,
+                            })
                 kept.extend(recs_without_group)
-                # The group record itself is discarded
 
         # ── Gate 4: fold qualified individuals into groups ──────────
         # Name-based candidates that meet the temporal density threshold
@@ -1209,7 +1249,9 @@ class WiFiBLEPostprocessor:
                 loaded = json.load(fh)
                 self.sanitize_bluetooth_names(loaded)
                 return loaded
-        except (OSError, ValueError):
+        except FileNotFoundError:
+            return None
+        except Exception:
             return None
 
     def sanitize_bluetooth_names(self, summary):

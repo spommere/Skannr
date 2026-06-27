@@ -1,6 +1,6 @@
 # Skannr Design Document
 
-Version: 0.3.2, 2026-06-23
+Version: 0.3.4, 2026-06-27
 
 ## 1. Overview
 
@@ -408,6 +408,12 @@ Implementation:
   `scan_tool: iwlist`.
 - Does not put adapters into monitor mode.
 - Excludes interfaces already in monitor mode from automatic fallback selection.
+- An optional `mac` config key can pin managed scanning to one specific adapter
+  by MAC address, regardless of which `wlanX` name the kernel assigns after
+  reboot. When `mac` is set, only that adapter is eligible; all other adapters
+  are ignored. On hosts with multiple Wi-Fi adapters (e.g. a Pi 4 with three
+  WLAN dongles), this is the recommended way to keep the scan collector on the
+  intended radio.
 - Does not capture probe requests, deauth frames, or associations.
 
 Important events:
@@ -418,12 +424,6 @@ Important events:
 - `ap_beacon`
 - `collector_retrying`
 - `collector_offline`
-
-Browser behavior:
-
-- The Rayhunter tab shows one latest row per endpoint with warning count,
-  recording metadata, compact device health fields, and status summary text.
-- The same endpoint key links live rows to Subject History and related Reports.
 
 Subject History contribution:
 
@@ -493,7 +493,6 @@ Important events:
 - `monitor_started`
 - `monitor_channel_changed`
 - `probe_request`
-- `ap_beacon`
 - `association_seen`
 - `disassoc_seen`
 - `deauth_seen`
@@ -509,6 +508,41 @@ Subject History contribution:
 - Probe, association, deauth, and disassociation events fold into Wi-Fi client
   history keyed by client MAC.
 
+802.11 frame filtering:
+
+The monitor collector captures raw 802.11 frames via Scapy with a kernel BPF
+filter (``type mgt``) so only management frames reach userspace.  Within the
+management frame handler, only the subtypes useful for client discovery and
+disruption detection are processed; the rest are discarded.
+
+**Processed management subtypes:**
+
+| Subtype | Name | Emitted as | Purpose |
+|---------|------|------------|---------|
+| 0 | Association Request | ``association_seen`` | Client connecting to an AP |
+| 2 | Reassociation Request | ``association_seen`` | Client roaming between APs |
+| 4 | Probe Request | ``probe_request`` | Client searching for networks — makes Wi-Fi clients visible in history |
+| 10 | Disassociation | ``disassoc_seen`` | Graceful connection teardown |
+| 12 | Deauthentication | ``deauth_seen`` | Forced disconnect — security-relevant |
+
+**Filtered management subtypes:**
+
+| Subtype | Name | Reason for exclusion |
+|---------|------|---------------------|
+| 8 | Beacon | Already captured by managed Wi-Fi Scan (``iw scan``) across all supported channels. Monitor-mode beacons are single-channel snapshots that would produce incomplete, channel-biased duplicates. |
+
+**Dropped by kernel BPF (``filter="type mgt"``):**
+
+| Type | Name | Reason for exclusion |
+|------|------|---------------------|
+| 1 | Control (ACK, RTS, CTS, etc.) | No device-history or security value. |
+| 2 | Data | Encrypted payload — resource-intensive to process, no history value. |
+
+Other management subtypes (1, 3, 5, 6, 7, 9, 11, 13, 14 — Authentication,
+Deauthentication-Auth, etc.) are not handled because they do not contribute
+to the collector's purpose: detecting client presence, AP association activity,
+and disruption frames.
+
 ### BLE Scan (`ble`)
 
 Purpose: passive Bluetooth Low Energy advertisement scanning.
@@ -519,6 +553,14 @@ Implementation:
 - Uses the ordered `adapters` list when configured; otherwise ranks available
   BlueZ adapters and normally chooses external USB adapters before built-in
   radios.
+- An optional `mac` config key can pin BLE scanning to one specific adapter by
+  MAC address, regardless of which `hciN` name the kernel assigns after reboot.
+  When `mac` is set, only that adapter is eligible; all other adapters are
+  ignored. On hosts with multiple Bluetooth adapters (e.g. a Pi 4 with two
+  dongles), this is the recommended way to keep the BLE collector on the
+  intended radio. On single-adapter hosts (Kali, Hampi4) where only `hci0`
+  exists, leaving `mac` empty is sufficient — the built-in adapter is the only
+  candidate.
 - Uses a shared adapter operation lock so BLE Scan and BLE Identify do not
   collide on the same adapter.
 - Tracks seen, updated, and lost devices.
@@ -632,6 +674,8 @@ Implementation:
 - Uses classic inquiry, preferably `hcitool scan --info`.
 - Does not auto-start.
 - Runs scan passes at configured intervals while active.
+- Uses the same `mac` config key as BLE Scan to pin adapter selection to one
+  specific Bluetooth adapter by MAC address, surviving `hciN` name swaps.
 
 Important events:
 
@@ -757,8 +801,8 @@ Implementation:
 Important events:
 
 - `collector_online`
-- `collector_retrying`
 - `collector_offline`
+- `collector_retrying`
 - `adsb_aircraft`
 
 Subject History contribution:
@@ -861,6 +905,8 @@ Important events:
 - `aprs_message`
 - `aprs_status`
 - `aprs_weather`
+- `aprs_telemetry`
+- `aprs_packet`
 
 Subject History contribution:
 
@@ -1128,10 +1174,16 @@ Implementation:
   directory when possible so `ieee-oui.txt` / `mac-vendor.txt` lookup does not
   depend on systemd's working directory.
 - Uses poll cadence from `config/collectors/lan.yaml`, default `60` seconds.
+- An optional `mac` config key can pin all LAN collection (ARP scan, passive
+  listeners) to one specific adapter by MAC address, regardless of which
+  `wlanN` name the kernel assigns after reboot. When `mac` is set, only the
+  interface whose MAC matches is eligible. On hosts with a single network
+  interface, leaving `mac` empty auto-discovers the available interface.
 
 Important events:
 
 - `collector_online`
+- `collector_offline`
 - `collector_retrying`
 - `lan_device_seen`
 - `lan_device_changed`
@@ -1517,24 +1569,10 @@ the cutoff field. For history observations, `last_seen_epoch` is preferred over
 the row timestamp because observations are regenerated on refresh; this prevents
 old device behavior from becoming "recent" merely because analysis was rebuilt.
 
-Current rule families include:
-
-- weak or open Wi-Fi encryption
-- BSSID encryption changes
-- BSSID advertised multiple SSIDs
-- BSSID seen on multiple channels
-- new strong Wi-Fi AP
-- short-lived strong Wi-Fi AP
-- same SSID seen on multiple BSSIDs
-- many probed SSIDs
-- watched/sensitive SSID probes
-- repeated blank probes
-- repeated deauth activity
-- strong Bluetooth device
-- lingering Bluetooth device
-- repeated Bluetooth lost/return behavior
-- recurring Bluetooth presence
-- locally administered/randomized MAC population
+Current rule families include Wi-Fi encryption/channel/probe/BSSID patterns,
+Bluetooth signal/linger/presence patterns, and randomized-MAC population
+observations.  Each collector defines its own insight rules — see that
+collector's section under §6 Built-In Collectors.
 
 The analysis does not call an LLM.
 
@@ -1547,33 +1585,13 @@ are generated by `ReportsBuilder` and written to:
 runtime/logs/device_history/reports.json
 ```
 
-Current report families include:
-
-- recurring Bluetooth presence by day/hour
-- long Bluetooth presence
-- strong Bluetooth signal in the report window
-- recently new named/static Bluetooth device
-- grouped unnamed BLE randomized/private addresses by manufacturer,
-  advertised name, and advertised service/member UUID fingerprint
-- recently new Wi-Fi AP
-- recurring Wi-Fi AP/SSID presence from managed Wi-Fi Scan history
-- long or intermittent Wi-Fi AP presence windows
-- Wi-Fi AP RSSI swing over the selected window
-- strong Wi-Fi AP in the report window
-- Wi-Fi AP encryption variation
-- Wi-Fi AP channel variation
-- SSID with multiple BSSIDs
-- Wi-Fi client probe activity
-- Wi-Fi deauth/disassociation activity
-- new Wi-Fi Monitor client activity
-- population/cross-subject rows for environment-level patterns such as APRS-IS
-  weather/mobile activity, NOAA hazard/tropical product sets, USGS seismic
-  activity, SWPC space-weather product sets, LAN subject population,
-  multi-BSSID Wi-Fi SSID profiles, BLE private-address clusters, and local RF
-  privacy exposure
-- materialized period rows for longitudinal patterns such as PWS and APRS-IS
-  weather station trends, USGS seismic periods, SWPC space-weather periods, and
-  NOAA monthly/yearly hazard context
+Report families cover per-collector subject profiles (Wi-Fi AP/SSID/client,
+Bluetooth device/cluster, APRS-IS station/weather, NOAA hazard/tropical/tsunami,
+USGS seismic, SWPC space-weather, PWS weather station, LAN device/gateway,
+RTL-433 decoded subjects, ADS-B aircraft), population/cross-subject rows,
+collector-health rows, and materialized period summaries.  Each collector
+defines its own report families — see that collector's section under
+§6 Built-In Collectors.
 
 Bluetooth sessions are clipped to the selected report window so a last-24-hours
 report does not count hours before the window boundary.
@@ -1644,60 +1662,10 @@ profile is more important to review because several signals line up: long
 presence, repeated presence, current activity, strong nearby signal, new
 appearance, weak security, or unusually broad address/BSSID behavior.
 
-Bluetooth stable-device scoring:
-
-- Longest session: `+25` for at least 1 hour, `+40` for at least 4 hours, `+50`
-  for at least 8 hours.
-- Days seen: `+15` for the configured recurring threshold, `+25` for 3-4 days,
-  `+35` for 5 or more days.
-- Predictable timing: `+10` for recurring start-hour pattern and `+10` for
-  recurring active-hour pattern.
-- Current activity: `+15` when the device is still active.
-- Proximity: `+10` for RSSI at least `-70`, `+20` for at least `-55`, `+30` for
-  at least `-45`.
-- New named/static device: `+30`.
-- Recency adjustment: `+15` when last seen within 24 hours, `+5` when last seen
-  within 1-3 days, `-15` when last seen within 3-7 days, and `-30` when older
-  than 7 days. This keeps stale but historically interesting rows visible while
-  letting current activity sort higher.
-
-Bluetooth private-address cluster scoring:
-
-- Address count: `+15` for at least 10 addresses, `+25` for at least 50,
-  `+35` for at least 100.
-- Current activity: `+10` if any private address in the cluster is still active.
-- Proximity: `+20` for RSSI at least `-55`, `+30` for at least `-45`.
-- Recency adjustment uses the same last-seen age rule as stable Bluetooth rows.
-- Cluster score is capped at 95 because identity is weaker than a stable named
-  device.
-
-Wi-Fi AP/BSSID scoring:
-
-- New AP: `+25`.
-- Recurring AP presence: `+15`.
-- Long AP presence: `+20`.
-- Intermittent AP presence: `+10`.
-- Proximity: `+10` for RSSI at least `-70`, `+20` for at least `-55`, `+35` for
-  at least `-40`, `+45` for at least `-25`.
-- RSSI swing: `+10` when the configured min/max swing threshold is met.
-- Security: `+50` for open/WEP/WPA, `+35` for meaningful encryption variation,
-  `+20` for lower-value security-detail variation.
-- Radio drift: `+15` when one BSSID appears on multiple channels.
-- Current activity: `+10` when still active.
-- Persistence: `+15` for at least 4 hours, `+25` for at least 8 hours.
-
-Wi-Fi SSID scoring:
-
-- BSSID count: `+10` for 2 BSSIDs, `+20` for 3-5, `+30` for 6 or more.
-- Recurring SSID presence: `+15`.
-- Vendor diversity: `+25` when one SSID spans multiple vendors.
-- Locally administered/randomized BSSIDs: `+15`.
-- Security diversity: `+35` for mixed weak/open and secured security, `+20` for
-  other mixed security values.
-- Channel/band spread: `+10` for multiple channels, `+15` for both 2.4 GHz and
-  5 GHz.
-- Strong member: `+15` for any member at least `-55`, `+25` for any member at
-  least `-40`.
+Scoring rules are defined per subject family: Bluetooth stable-device,
+Bluetooth private-address cluster, Wi-Fi AP/BSSID, and Wi-Fi SSID profiles.
+Each rule family lives with its collector — see the Wi-Fi Scan and BLE Scan
+sections under §6 Built-In Collectors for the current point values.
 
 Scores at or above 75 become warning-level profile rows unless a more specific
 security rule already set severity. This is intentionally a high-attention
@@ -1941,18 +1909,11 @@ complexity before the collector set stabilizes.
 
 ## 14. Known Limitations
 
-- Subject History currently has rich Wi-Fi, Bluetooth, APRS-IS, Rayhunter,
-  RTL-433, ADS-B, NOAA, USGS, SWPC, PWS, and LAN support. System is omitted
-  because it is runtime state rather than an observed subject source.
+- Subject History covers all registered collectors. System is omitted because it
+  is runtime state rather than an observed subject source.
 - Reports are deterministic summaries, not forensic conclusions.
-- Wi-Fi Monitor only hears frames on the channel currently selected by the
-  channel hopper.
-- Managed Wi-Fi Scan cannot see probe requests or deauth frames.
-- BLE visibility depends heavily on BlueZ behavior, adapter state, device
-  privacy behavior, and whether devices advertise names.
-- BLE Identify requires an active connection and many devices reject or time out
-  such reads.
-- Classic Bluetooth only sees discoverable classic devices.
+- Per-collector limitations (channel coverage, protocol visibility, adapter
+  behavior) are documented in each collector's section under §6.
 - The built-in web server is for local/lightweight use, not hardened production
   hosting.
 
@@ -1981,8 +1942,16 @@ complexity before the collector set stabilizes.
       ble.py
       ble_identify.py
       bt_classic.py
+      rtl433.py
+      adsb.py
       rayhunter.py
       aprsis.py
+      noaa.py
+      usgs.py
+      swpc.py
+      pws.py
+      lan.py
+      lan_identify.py
     persistence/
       base.py
       filesystem.py

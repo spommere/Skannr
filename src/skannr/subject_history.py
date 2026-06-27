@@ -92,8 +92,10 @@ class SubjectHistoryBuilder:
         window_days=None,
         enabled_collectors=None,
         progress_callback=None,
+        reference_epoch=None,
     ):
         self.log_dir = log_dir
+        self.reference_epoch = reference_epoch
         self.state_path = state_path or os.path.join(
             log_dir, "device_history", "subject_history.json"
         )
@@ -153,6 +155,7 @@ class SubjectHistoryBuilder:
             state_path=self.device_history_state_path,
             window_days=self.window_days,
             progress_callback=self.progress_callback,
+            reference_epoch=self.reference_epoch,
         )
         wifi_ble_result = wifi_ble.build_summary()
         try:
@@ -4261,7 +4264,7 @@ class SubjectHistoryBuilder:
                 "disassoc_count": record.get("disassoc_count") or 0,
             })
         elif source == "bluetooth":
-            names = record.get("names") or ([record.get("name")] if record.get("name") else [])
+            names = list(record.get("names") or ([record.get("name")] if record.get("name") else []))
             member.update({
                 "identity": names[0] if names else (record.get("manufacturer") or record.get("manufacturer_name") or ""),
                 "names": names[:6],
@@ -4351,6 +4354,8 @@ class SubjectHistoryBuilder:
                         "observations": ap.get("observations") or 0,
                         "channels": ap.get("channels") or [],
                         "signal_max": ap.get("signal_max"),
+                        "vendor_name": ap.get("vendor_name") or "",
+                        "vendor_prefix": ap.get("vendor_prefix") or "",
                     },
                 )
             )
@@ -4407,6 +4412,7 @@ class SubjectHistoryBuilder:
                         "disassoc_count": self.grouped_sum(randomized_clients, "disassoc_count"),
                         "signal_min": self.grouped_signal_value(randomized_clients, "signal_min", min),
                         "signal_max": self.grouped_signal_value(randomized_clients, "signal_max", max),
+                        "blank_ssid_count": sum(1 for c in randomized_clients if not c.get("ssids")),
                     },
                 )
             )
@@ -4425,6 +4431,9 @@ class SubjectHistoryBuilder:
                         "probe_count": client.get("probe_count") or 0,
                         "association_count": client.get("association_count") or 0,
                         "signal_max": client.get("signal_max"),
+                        "vendor_name": client.get("vendor_name") or "",
+                        "vendor_prefix": client.get("vendor_prefix") or "",
+                        "ssids": list(client.get("ssids") or [])[:20],
                     },
                 )
             )

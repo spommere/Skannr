@@ -519,6 +519,9 @@ def ui_debug():
     return {"ok": True}
 
 
+_BLUETOOTH_UUID_NAMES_CACHE = None
+
+
 def bluetooth_uuid_names():
     """Load optional offline Bluetooth UUID names for browser decoding.
 
@@ -528,7 +531,13 @@ def bluetooth_uuid_names():
     advertised in the service UUID list. It also accepts Bluetooth classic
     service class files so older/common 16-bit service UUIDs like 0x110A can
     be resolved in the BLE UI.
+
+    Results are cached for the process lifetime.  The source files are
+    small (~36 KB total) and do not change at runtime.
     """
+    global _BLUETOOTH_UUID_NAMES_CACHE
+    if _BLUETOOTH_UUID_NAMES_CACHE is not None:
+        return _BLUETOOTH_UUID_NAMES_CACHE
     names = {}
     directories = (DATA_COLLECTORS_DIR, CONFIG_COLLECTORS_DIR)
     for basename in (
@@ -540,7 +549,16 @@ def bluetooth_uuid_names():
         for directory in directories:
             for extension in (".txt", ".yaml", ".yml"):
                 path = os.path.join(directory, "{}{}".format(basename, extension))
-                names.update(load_bluetooth_uuid_file(path))
+                file_names = load_bluetooth_uuid_file(path)
+                for key, value in file_names.items():
+                    if key in names and names[key] != value:
+                        logging.warning(
+                            "Bluetooth UUID collision: key=%s existing=%r "
+                            "incoming=%r file=%s",
+                            key, names[key], value, path,
+                        )
+                    names[key] = value
+    _BLUETOOTH_UUID_NAMES_CACHE = names
     return names
 
 

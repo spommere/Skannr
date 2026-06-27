@@ -1,17 +1,13 @@
 # Local runtime state and generated artifacts.
-/.gh_token/
 /.venv/
 /config/
 /runtime/
-/logs/
-/pcaps/
 /CLAUDE.md
 /HANDOFF.md
 /VERSION_PLAN.md
 /VERSION_HISTORY.md
-/scripts/
-/git/
-/src.bak/
+/testscripts/
+/validation/
 
 # Python caches.
 __pycache__/

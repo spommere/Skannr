@@ -46,9 +46,13 @@ Skannr installation is intentionally split into OS tools, Python dependencies,
 and local collector enablement:
 
 1. Install OS packages for the collectors this host may use.
-2. Run `python3 scripts/skannr_precheck.py` on a new host if you want to see
-   which collectors have the required software/hardware before install. This
+2. (Optional) Run `python3 scripts/skannr_precheck.py` on a new host to preview
+   which collectors have the required software/hardware before installing. This
    creates `config/precheck.yaml`; it may create `config/` with only that file.
+   If you have RTL-SDR hardware, run this with `sudo` so `rtl_test -t` can
+   access the USB device — otherwise the hardware probe may fail or produce
+   garbled output. `install.sh` re-runs the precheck automatically on fresh
+   config, so this step is purely a preview.
 3. Run `./install.sh`. On a fresh config, it copies `config.example/` into
    `config/`, applies `precheck.yaml`, installs Python dependencies, runs
    `scripts/skannr_postcheck.py`, writes `config/postcheck.yaml`, and applies
@@ -68,6 +72,7 @@ both present. Optional LAN enrichment tools such as `arp-scan` and
 ```bash
 SKANNR_DIR=/path/to/skannr
 cd "$SKANNR_DIR"
+# Optional preview — use sudo if you have RTL-SDR hardware plugged in
 python3 scripts/skannr_precheck.py
 ./install.sh
 sudo env PYTHONPATH="$SKANNR_DIR/src" "$SKANNR_DIR/.venv/bin/python" -m skannr.main
@@ -1099,6 +1104,47 @@ For example, hardware rows say `hci0: available`, `hci1: unavailable`, and
 `active: hci0` instead of showing shell exit codes. Detailed validation
 failures remain in logs/events for troubleshooting.
 
+### Multi-Adapter Hosts
+
+On hosts with more than one Wi-Fi or Bluetooth adapter, interface names such as
+`wlan0`/`wlan1` and `hci0`/`hci1` can swap across reboots. **Always pin
+collectors to a specific adapter by MAC address**, not by interface name:
+
+- **Wi-Fi (Scan, Monitor)** — `mac: "00:c0:ca:bb:58:e1"` in `wifi.yaml` and
+  `wifi_monitor.yaml`
+- **BLE, BLE Identify, Bluetooth Classic** — `mac: "00:1A:7D:DA:71:13"` in
+  `ble.yaml`, `ble_identify.yaml`, and `bt_classic.yaml`
+- **LAN** — `mac: "d8:3a:dd:6e:85:63"` in `lan.yaml`
+
+Find adapter MACs with `ip link show wlan0` (Wi-Fi/LAN) or
+`hciconfig hci0 | grep 'BD Address'` (Bluetooth).
+
+When `mac` is set, only the adapter whose MAC matches is eligible — the kernel
+interface name (`wlan1`, `hci1`) is irrelevant and can swap freely.
+
+**Example — Pi 4 with three WLAN dongles and two Bluetooth dongles:**
+
+```yaml
+# config/collectors/wifi.yaml — pin managed AP scans to wlan2 (internet/uplink)
+mac: "d8:3a:dd:6e:85:63"
+interfaces: []
+
+# config/collectors/wifi_monitor.yaml — pin monitor mode to the dedicated Alfa dongle
+mac: "00:c0:ca:bb:58:e1"
+interface: auto
+
+# config/collectors/ble.yaml — pin BLE scanning to the Plugable BT 5 dongle
+mac: "00:1A:7D:DA:71:13"
+adapters: []
+
+# config/collectors/lan.yaml — pin LAN collection to wlan2 (the local-net interface)
+mac: "d8:3a:dd:6e:85:63"
+```
+
+**Single-adapter hosts (Kali, Hampi4):** leave `mac` empty (the default).
+With only one Wi-Fi interface (`wlan0`) or one Bluetooth adapter (`hci0`),
+auto-discovery picks the sole candidate and no pinning is needed.
+
 ## Wi-Fi Scan
 
 `Wi-Fi Scan` is the lightweight managed-mode collector.
@@ -1114,6 +1160,9 @@ It:
 - can run on a normal managed Wi-Fi interface
 - ignores interfaces already in monitor mode when no explicit `interfaces` list
   is configured
+- supports an optional `mac` config key that pins managed scanning to one
+  adapter by MAC address, surviving `wlanN` name swaps (see Multi-Adapter
+  Hosts above)
 
 The live table has one Search box that matches across SSID, BSSID, vendor,
 channel/frequency, encryption, signal, and last-seen time.
@@ -1135,7 +1184,9 @@ It:
 
 - uses Scapy packet capture
 - channel-hops across configured/supported 2.4 GHz and 5 GHz channels
-- records probe requests, AP beacons, associations, disassociations, and deauth
+- records probe requests, associations, disassociations, and deauth frames
+  (beacons are intentionally skipped — managed Wi-Fi Scan covers all channels via
+  `iw scan`; monitor-mode beacons would be single-channel biased duplicates)
   frames
 - folds AP and client observations into Wi-Fi subjects
 
@@ -1325,7 +1376,9 @@ config/collectors/ble.yaml
 
 Use `adapters: []` to let Skannr rank the BlueZ adapters Linux exposes. External
 USB adapters are normally chosen before built-in radios. List specific adapters
-in order when you want to force a local choice. BLE visibility depends on adapter
+in order when you want to force a local choice. On multi-adapter hosts, prefer
+the `mac` config key (see Multi-Adapter Hosts above) — it survives `hciN` name
+swaps across reboots. BLE visibility depends on adapter
 behavior, BlueZ state, and whether nearby devices are advertising. Each Bleak
 scan window has a hard `discover_timeout_sec` guard so a hung BlueZ discovery
 call becomes a visible retry diagnostic instead of leaving the feed idle. On
@@ -1339,7 +1392,9 @@ Skannr can run a short, rate-limited
 ### Bluetooth Classic
 
 `Bluetooth Classic` is on demand. It runs inquiry scans for discoverable classic
-Bluetooth devices such as some laptops, phones, headsets, and watches.
+Bluetooth devices such as some laptops, phones, headsets, and watches. It uses
+the same `adapters` list and optional `mac` config key as BLE Scan (see
+Multi-Adapter Hosts above).
 
 Default config:
 
@@ -1913,6 +1968,12 @@ dhcp_lease_command: ""
 LAN data feeds the LAN live tab, Subject History, Reports, and Alerts. Gateway
 change alerts are enabled by default; new LAN device alerts are disabled by
 default because normal networks can be noisy.
+
+An optional `mac` config key can pin all LAN collection (ARP scan, passive
+listeners) to one adapter by MAC address. On a multi-adapter Pi, this keeps LAN
+inventory on the intended interface regardless of `wlanN` name swaps (see
+Multi-Adapter Hosts above). On single-interface hosts, leave `mac` empty — the
+sole interface is auto-discovered.
 
 Passive mDNS and SSDP listeners enrich LAN subjects with advertised services,
 device locations, and server/product strings. Optional Avahi import runs

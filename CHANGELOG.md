@@ -7,6 +7,39 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.3.4 - 2026-06-27
+
+- **Wi-Fi Monitor CPU reduction.** Three changes to `packet_handler`: a kernel
+  BPF filter (`type mgt`) drops Control and Data frames before Scapy sees them
+  (50-90% frame-volume reduction in busy RF), expensive timestamp and Dot11Elt
+  work is deferred past the management-type gate, and the double layer walk
+  (`haslayer` + `getlayer`) is replaced with a single `getlayer` + None check.
+- **MAC vendor lookup caching.** New `vendor_info()` in `oui_lookup.py` returns
+  all three vendor fields from one size-bounded cache hit per MAC.  Hot-path
+  callers (wifi_monitor, wifi, BLE postprocessor, LAN) switched from three
+  individual OUI extractions + dict walks to one cached call.
+- **Data file collision guards.** OUI registry and Bluetooth UUID loading now
+  warn when the same key appears in multiple files with different values,
+  guarding against silent overwrites from future IEEE/SIG data updates.
+- **Subject History field fixes.** `vendor_name`, `vendor_prefix`, and `ssids`
+  now appear in Subject History for wifi_monitor subjects (were present in
+  postprocessor records but dropped at the Subject History boundary).
+- **Documentation reorganized.** Collector-specific detail (Findings, Reports,
+  Report Scoring, Known Limitations) moved from cross-cutting sections into
+  each collector's own section in DESIGN.md.  README accuracy fixes and
+  REFERENCE.md consistency pass for `retry_interval_sec`/`retry_timeout_sec`.
+- **Production fixes.** Stale BLE group dissolution now extracts group members
+  before discarding the group.  `load_persisted_summary` catches all exceptions.
+  NOAA tsunami TEST bulletins are filtered from alerts.  Precheck failure no
+  longer aborts install.  Scan intervals relaxed to reduce radio contention.
+- **BLE grouping fixes.** Manufacturer label normalization, defensive field
+  access, manufacturer-only group threshold, and privacy-rotation name-based
+  grouping all improved.  `adv_data_hex` captured in BLE raw logs for external
+  tool cross-referencing.
+- **Wi-Fi disruption false-positive suppression.** Deauth alerts are suppressed
+  when both transmitter and receiver are known co-BSSIDs of the same SSID
+  (normal intra-AP band steering, not an attack).
+
 ## 0.3.3 - 2026-06-25
 
 - **Temporal-density Bluetooth grouping.** The all-time MAC-count threshold for

@@ -86,12 +86,16 @@ if [ "$FRESH_CONFIG" -eq 1 ]; then
   if [ ! -f "$PRECHECK_FILE" ]; then
     echo
     echo "Running install-time collector precheck"
-    "$PYTHON_BIN" "$ROOT_DIR/scripts/skannr_precheck.py" --output "$PRECHECK_FILE"
+    if ! "$PYTHON_BIN" "$ROOT_DIR/scripts/skannr_precheck.py" --output "$PRECHECK_FILE"; then
+      echo "Precheck failed (exit $?) -- continuing install." >&2
+      echo "Run 'python3 scripts/skannr_precheck.py' after install to diagnose." >&2
+    fi
   fi
-  echo
-  echo "Applying collector enabled flags from $PRECHECK_FILE"
-  "$PYTHON_BIN" "$ROOT_DIR/scripts/skannr_precheck.py" --apply --precheck "$PRECHECK_FILE" --collector-dir "$CONFIG_DIR/collectors"
-fi
+  if [ -f "$PRECHECK_FILE" ]; then
+    echo
+    echo "Applying collector enabled flags from $PRECHECK_FILE"
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/skannr_precheck.py" --apply --precheck "$PRECHECK_FILE" --collector-dir "$CONFIG_DIR/collectors"
+  fi
 
 if [ ! -d "$VENV_DIR" ]; then
   "$PYTHON_BIN" -m venv "$VENV_DIR"

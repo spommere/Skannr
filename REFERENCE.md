@@ -162,6 +162,7 @@ BLE supports two scan methods. BlueZ/Bleak is the normal primary method. `blueto
 | Parameter | Meaning |
 | --- | --- |
 | `adapters` | Ordered BlueZ adapter preference list. Empty means auto-rank adapters. |
+| `mac` | Optional MAC address of the single adapter allowed for BLE scanning. When set, only the adapter whose MAC matches is eligible — `hciN` name swaps across reboots are harmless. Leave empty to auto-select from all adapters. |
 | `scan_interval_sec` | Delay between successful BLE scan passes. |
 | `discover_timeout_sec` | Hard timeout for one Bleak discovery/callback scan pass. `0` uses scanner defaults. |
 | `device_timeout_sec` | Live-row age-out after a BLE subject stops being observed. |
@@ -181,30 +182,38 @@ BLE supports two scan methods. BlueZ/Bleak is the normal primary method. `blueto
 | `classic_name_timeout_sec` | Timeout for one Classic name lookup. |
 | `reset_after_in_progress` | Resets after repeated BlueZ "in progress" conditions. |
 | `wedged_warning_after_in_progress` | Emits wedged-adapter warning threshold. |
+| `retry_interval_sec` | Seconds between offline-to-retry and retry-to-offline attempts. |
+| `retry_timeout_sec` | Seconds of consecutive failures before transitioning to offline. |
 
 ### BLE Identify: `collectors/ble_identify.yaml`
 
 | Parameter | Meaning |
 | --- | --- |
 | `adapters` | Ordered BlueZ adapter preference list. |
+| `mac` | Optional MAC address of the single adapter allowed for BLE Identify. When set, only the adapter whose MAC matches is eligible — `hciN` name swaps across reboots are harmless. Leave empty to auto-select. |
 | `identify_timeout_sec` | Timeout for one active Device Information Service attempt. |
 | `identify_attempts` | Number of identify attempts. |
 | `identify_retry_delay_sec` | Delay between identify attempts. |
+| `retry_interval_sec` | Seconds between offline-to-retry and retry-to-offline attempts. |
+| `retry_timeout_sec` | Seconds of consecutive failures before transitioning to offline. |
 
 ### Bluetooth Classic: `collectors/bt_classic.yaml`
 
 | Parameter | Meaning |
 | --- | --- |
 | `adapters` | Ordered BlueZ adapter preference list. |
+| `mac` | Optional MAC address of the single adapter allowed for Classic inquiry. When set, only the adapter whose MAC matches is eligible — `hciN` name swaps across reboots are harmless. Leave empty to auto-select from all adapters. |
 | `scan_interval_sec` | Delay between completed Classic inquiry scans. |
 | `scan_timeout_sec` | Length of each Classic inquiry scan. |
 | `device_timeout_sec` | Live-row age-out after a Classic device disappears. |
+| `retry_interval_sec` | Seconds between offline-to-retry and retry-to-offline attempts. |
 
 ### Wi-Fi Scan: `collectors/wifi.yaml`
 
 | Parameter | Meaning |
 | --- | --- |
 | `interfaces` | Ordered managed Wi-Fi interface preference list. Empty means auto-rank. |
+| `mac` | Optional MAC address of the single adapter allowed for managed Wi-Fi scanning. When set, only the interface whose MAC matches is eligible — `wlanN` name swaps across reboots are harmless. Leave empty to auto-select from all managed interfaces. |
 | `managed_scan_interval_sec` | Delay between successful managed AP scans. |
 | `scan_tool` | Scanner backend. `auto` tries `iw` first and falls back when needed. |
 | `retry_interval_sec` | Delay after scan command/setup failure. |
@@ -233,6 +242,8 @@ BLE supports two scan methods. BlueZ/Bleak is the normal primary method. `blueto
 | `seen_channels_first` | Places learned channels before typical channels. |
 | `common_channel_fallback` | Keeps common channels when no learned channels are usable. |
 | `dwell_sec` | Seconds to stay on each channel while hopping. |
+| `retry_interval_sec` | Seconds between retry attempts after setup/capture failure. |
+| `retry_timeout_sec` | Seconds of consecutive failures before transitioning to offline. |
 
 `dwell_sec` is the normal hop cadence. Retry settings only apply after setup/capture failure.
 
@@ -251,6 +262,8 @@ BLE supports two scan methods. BlueZ/Bleak is the normal primary method. `blueto
 | `protocols` | Optional rtl_433 `-R` protocol IDs to enable. Empty means rtl_433 defaults. |
 | `disabled_protocols` | Protocol IDs passed as negative `-R` values to suppress decoders. |
 | `extra_args` | Extra raw rtl_433 CLI arguments for local experiments. |
+| `retry_interval_sec` | Seconds between retry attempts after process failure. |
+| `retry_timeout_sec` | Seconds of consecutive failures before transitioning to offline. |
 
 Protocol numbers are owned by rtl_433 and can vary by version. Use `rtl_433 -R help` on the target host before hardcoding IDs. Example shape: `protocols: [40, 60]` becomes `-R 40 -R 60`; `disabled_protocols: [40]` becomes `-R -40`.
 
@@ -291,6 +304,7 @@ Protocol numbers are owned by rtl_433 and can vary by version. Use `rtl_433 -R h
 | `store_raw` | Stores raw APRS lines when true. |
 | `log_dropped_packets` | Logs malformed/out-of-radius/rate-limited packet counts. |
 | `emit_server_messages` | Emits APRS server login/filter messages into live table events. |
+| `retry_interval_sec` | Seconds between offline-to-retry and retry-to-offline attempts. |
 
 ### NOAA: `collectors/noaa.yaml`
 
@@ -354,6 +368,7 @@ Protocol numbers are owned by rtl_433 and can vary by version. Use `rtl_433 -R h
 | Parameter | Meaning |
 | --- | --- |
 | `poll_interval_sec` | Main LAN collection cadence. |
+| `mac` | Optional MAC address of the single adapter allowed for LAN collection (ARP scan, passive listeners). When set, only the interface whose MAC matches is eligible — `wlanN` name swaps across reboots are harmless. Leave empty to use all configured or auto-discovered interfaces. |
 | `command_timeout_sec` | Default timeout for local helper commands. |
 | `collect_ip_neigh`, `collect_arp`, `collect_mdns`, `collect_ssdp` | Passive OS/service-neighbor sources. |
 | `collect_avahi_browse` | Enables `avahi-browse` service discovery. |
@@ -369,6 +384,8 @@ Protocol numbers are owned by rtl_433 and can vary by version. Use `rtl_433 -R h
 | `dhcp_lease_import_interval_sec`, `dhcp_lease_import_timeout_sec` | DHCP lease import cadence and timeout. |
 | `dhcp_lease_paths` | Local DHCP lease files to parse. |
 | `dhcp_lease_command` | Optional helper command that emits lease data. |
+| `retry_interval_sec` | Seconds between retry attempts after failure. |
+| `retry_timeout_sec` | Seconds of consecutive failures before transitioning to offline. |
 
 ### LAN Identify: `collectors/lan_identify.yaml`
 

@@ -161,6 +161,7 @@ def rtl_sdr_hardware_found():
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            errors="replace",
             timeout=8,
         )
     except subprocess.TimeoutExpired as exc:

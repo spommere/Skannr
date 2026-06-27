@@ -13,7 +13,7 @@ import subprocess
 import threading
 import time
 
-from ..oui_lookup import normalize_oui, vendor_name, vendor_prefix
+from ..oui_lookup import normalize_oui, vendor_info, vendor_name, vendor_prefix
 from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE, STATE_RETRYING
 
 
@@ -1063,7 +1063,14 @@ class LANCollector(BaseCollector):
     def active_arp_scan_records(self):
         """Run optional active ARP scan and parse discovered subjects."""
         timeout = float(self.config.get("active_arp_scan_timeout_sec", 20))
-        interfaces = self.config.get("active_arp_scan_interfaces") or [""]
+        configured = self.config.get("active_arp_scan_interfaces") or []
+        configured = [iface for iface in configured if iface and iface.strip()]
+        if configured:
+            interfaces = [iface for iface in configured if self._mac_allows_interface(iface)]
+            if not interfaces:
+                interfaces = self._discover_interfaces()
+        else:
+            interfaces = self._discover_interfaces()
         records = []
         for interface in interfaces:
             command = self.active_arp_scan_command(interface)
@@ -1286,17 +1293,56 @@ class LANCollector(BaseCollector):
             device["gateway"] = True
             self.lan_sample(device, "gateways", gateway.get("gateway_ip"))
 
+    def _mac_allows_interface(self, iface):
+        """Return True when *iface* matches the optional ``mac`` config key.
+
+        When ``mac`` is unset every interface is allowed.  When set, only the
+        adapter whose MAC matches the configured value is eligible — interface
+        name swaps across reboots are harmless.
+        """
+        raw = self.config.get("mac")
+        if not raw:
+            return True
+        configured_mac = str(raw).strip().lower()
+        actual = self._interface_mac(iface)
+        return actual == configured_mac if actual else False
+
+    def _interface_mac(self, iface):
+        """Return the lowercased MAC address for an interface, or empty string."""
+        try:
+            path = os.path.join("/sys/class/net", iface, "address")
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read().strip().lower()
+        except OSError:
+            return ""
+
+    def _discover_interfaces(self):
+        """Return all available network interfaces, filtered by optional MAC."""
+        ifaces = []
+        try:
+            for name in os.listdir("/sys/class/net"):
+                if name in (".", "..", "lo"):
+                    continue
+                if self._mac_allows_interface(name):
+                    ifaces.append(name)
+        except OSError:
+            pass
+        return ifaces or []
+
     def passive_arp_interfaces(self):
         """Return interfaces to bind raw passive ARP sockets on."""
         configured = self.config.get("passive_arp_interfaces") or []
         if configured:
-            return [compact_lan_text(item, 80) for item in configured if compact_lan_text(item, 80)]
-        interfaces = []
-        for gateway in self.default_gateways():
-            interface = gateway.get("interface")
-            if interface and interface not in interfaces:
-                interfaces.append(interface)
-        return interfaces
+            ifaces = [
+                item for item in (
+                    compact_lan_text(item, 80) for item in configured
+                    if compact_lan_text(item, 80)
+                )
+                if self._mac_allows_interface(item)
+            ]
+            if ifaces:
+                return ifaces
+        return self._discover_interfaces()
 
     def subject_key(self, record, ip_subjects=None):
         """Return stable LAN identity by MAC when available, otherwise IP."""
@@ -1542,9 +1588,10 @@ class LANCollector(BaseCollector):
     def add_vendor(self, item):
         """Fill offline vendor fields for a LAN MAC."""
         mac = item.get("mac") or item.get("subject_key") or ""
-        item["vendor_oui"] = normalize_oui(mac) or ""
-        item["vendor_prefix"] = vendor_prefix(mac) or item.get("vendor_prefix") or item["vendor_oui"]
-        item["vendor_name"] = vendor_name(mac) or item.get("vendor_name") or ""
+        vi = vendor_info(mac)
+        item["vendor_oui"] = vi["vendor_oui"] or ""
+        item["vendor_prefix"] = vi["vendor_prefix"] or item.get("vendor_prefix") or vi["vendor_oui"]
+        item["vendor_name"] = vi["vendor_name"] or item.get("vendor_name") or ""
 
 
 def normalize_mac(value):

@@ -23,7 +23,7 @@ interface_regex: wlan|^mon
 # only the interface whose MAC matches this value is eligible — interface-name
 # swaps across reboots are harmless. Leave empty to auto-select from all
 # monitor-capable USB adapters (the default).
-mac:
+# mac:
 
 # Optional host-local monitor-mode setup. Leave prepare_monitor_mode false if an
 # external script/systemd unit already creates the monitor interface. When true,

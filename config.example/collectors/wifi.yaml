@@ -10,6 +10,9 @@ validation_timeout_sec: 10
 # interfaces. Set interfaces when the host has multiple radios and one should be
 # preferred for managed AP scans.
 interfaces: []
+# Optional: pin by MAC address to survive interface name swaps across reboots.
+# Find the MAC with: ip link show wlan0
+# mac:
 
 # Steady-state scan cadence after a successful managed scan pass. This is not a
 # retry delay; retry_interval_sec below is used after command/setup failures.

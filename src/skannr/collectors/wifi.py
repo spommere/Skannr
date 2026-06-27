@@ -12,7 +12,7 @@ import subprocess
 
 from ..bus import local_now
 from ..log_utils import now_epoch
-from ..oui_lookup import normalize_oui, vendor_name, vendor_prefix
+from ..oui_lookup import normalize_oui, vendor_info, vendor_name, vendor_prefix
 from .base import (
     BaseCollector,
     STATE_OFFLINE,
@@ -65,6 +65,20 @@ class WiFiCollector(BaseCollector):
         """Check whether the configured Linux network interface exists."""
         return os.path.exists(os.path.join("/sys/class/net", interface))
 
+    def _mac_allows_interface(self, iface):
+        """Return True when *iface* matches the optional ``mac`` config key."""
+        raw = self.config.get("mac")
+        if not raw:
+            return True
+        configured_mac = str(raw).strip().lower()
+        try:
+            path = os.path.join("/sys/class/net", iface, "address")
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                actual_mac = fh.read().strip().lower()
+        except OSError:
+            return False
+        return actual_mac == configured_mac
+
     def detect(self):
         """Select the best available managed Wi-Fi interface."""
         if not shutil.which("iw") and not shutil.which("iwlist"):
@@ -84,6 +98,7 @@ class WiFiCollector(BaseCollector):
                 candidates = [route_iface] + [
                     iface for iface in candidates if iface != route_iface
                 ]
+        candidates = [iface for iface in candidates if self._mac_allows_interface(iface)]
         for interface in candidates:
             if interface in discovered or self.interface_exists(interface):
                 self.active_hardware = interface
@@ -297,11 +312,7 @@ class WiFiCollector(BaseCollector):
                     "timestamp_epoch": timestamp_epoch,
                     "scan_tool": "iw",
                 }
-                current["vendor_oui"] = self.vendor_for(current["bssid"])
-                current["vendor_prefix"] = self.vendor_prefix_for(
-                    current["bssid"]
-                )
-                current["vendor_name"] = self.vendor_name_for(current["bssid"])
+                current.update(vendor_info(current["bssid"]))
                 continue
             if not current:
                 continue
@@ -362,11 +373,7 @@ class WiFiCollector(BaseCollector):
                     "timestamp_epoch": timestamp_epoch,
                     "scan_tool": "iwlist",
                 }
-                current["vendor_oui"] = self.vendor_for(current["bssid"])
-                current["vendor_prefix"] = self.vendor_prefix_for(
-                    current["bssid"]
-                )
-                current["vendor_name"] = self.vendor_name_for(current["bssid"])
+                current.update(vendor_info(current["bssid"]))
                 continue
             if not current:
                 continue

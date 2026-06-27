@@ -5,6 +5,7 @@ files live under src/skannr/data/collectors; callers still get useful fallback
 text when a file is absent, such as locally administered / randomized.
 """
 
+import logging
 import os
 import re
 
@@ -12,6 +13,8 @@ from .paths import DATA_COLLECTORS_DIR
 
 
 _VENDORS = None
+_vendor_cache = {}
+_vendor_cache_max = 1000
 
 
 def collectors_dir():
@@ -66,6 +69,32 @@ def vendor_prefix(mac_or_oui):
     return format_prefix(match["prefix"]) if match else None
 
 
+def vendor_info(mac):
+    """Return cached {vendor_oui, vendor_prefix, vendor_name} for a MAC.
+
+    Hot-path callers (wifi_monitor, wifi, BLE postprocessor, LAN) call the
+    three individual functions per MAC — each re-extracts the OUI and
+    re-walks ``_VENDORS``.  This returns all three fields from one cache
+    hit, keyed by full MAC address (not OUI prefix) so the namespace is
+    separate from Bluetooth 16-bit IDs.
+    """
+    global _vendor_cache
+    cached = _vendor_cache.get(mac)
+    if cached is not None:
+        return cached
+    oui = normalize_oui(mac) or ""
+    match = vendor_match(mac)
+    cached = {
+        "vendor_oui": oui,
+        "vendor_prefix": vendor_prefix(mac) or oui,
+        "vendor_name": match["name"] if match else "",
+    }
+    _vendor_cache[mac] = cached
+    if len(_vendor_cache) > _vendor_cache_max:
+        _vendor_cache.clear()
+    return cached
+
+
 def vendor_match(mac_or_oui):
     """Return the longest matching vendor record for a MAC/OUI string."""
     if is_locally_administered(mac_or_oui):
@@ -113,19 +142,44 @@ def vendors(path=None):
     return loaded
 
 
+def _merge_no_overwrite(base, incoming, label):
+    """Merge *incoming* into *base*, warning on overwrites with different values.
+
+    The IEEE registry files (oui.txt, mam.txt, oui36.txt, iab.txt) are
+    independent exports that should not contain overlapping prefixes.
+    If a future update introduces one, the operator should know — a
+    silent overwrite would return the wrong vendor name for affected MACs.
+    """
+    for key, value in incoming.items():
+        if key in base and base[key] != value:
+            logging.warning(
+                "OUI registry collision: key=%s existing=%r incoming=%r source=%s",
+                key, base[key], value, label,
+            )
+        base[key] = value
+
+
 def load_all_registry_files():
     """Parse all supported local IEEE registry files into one prefix map."""
     directory = collectors_dir()
     loaded = {}
-    loaded.update(load_oui_file(os.path.join(directory, "oui.txt")))
-    loaded.update(
-        load_range_registry_file(os.path.join(directory, "mam.txt"), 7)
+    _merge_no_overwrite(
+        loaded, load_oui_file(os.path.join(directory, "oui.txt")), "oui.txt"
     )
-    loaded.update(
-        load_range_registry_file(os.path.join(directory, "oui36.txt"), 9)
+    _merge_no_overwrite(
+        loaded,
+        load_range_registry_file(os.path.join(directory, "mam.txt"), 7),
+        "mam.txt",
     )
-    loaded.update(
-        load_range_registry_file(os.path.join(directory, "iab.txt"), 9)
+    _merge_no_overwrite(
+        loaded,
+        load_range_registry_file(os.path.join(directory, "oui36.txt"), 9),
+        "oui36.txt",
+    )
+    _merge_no_overwrite(
+        loaded,
+        load_range_registry_file(os.path.join(directory, "iab.txt"), 9),
+        "iab.txt",
     )
     return loaded
 

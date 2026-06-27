@@ -11,6 +11,7 @@ import time
 
 from ..bus import local_now
 from ..log_utils import now_epoch, read_jsonl_events
+from ..oui_lookup import vendor_info
 from .base import (
     BaseCollector,
     STATE_OFFLINE,
@@ -249,27 +250,49 @@ class WiFiMonitorCollector(WiFiCollector):
         )
 
         def packet_handler(packet):
-            """Convert raw 802.11 management frames into Skannr events."""
-            if not self._running or not packet.haslayer(Dot11):
+            """Convert raw 802.11 management frames into Skannr events.
+
+            Only management frames (type 0) are processed.  Control (type 1)
+            and Data (type 2) frames are dropped by the kernel BPF filter
+            before reaching this handler.
+
+            Processed subtypes:
+              0, 2  Association / Reassociation → association_seen
+              4     Probe Request → probe_request
+              10    Disassociation → disassoc_seen
+              12    Deauthentication → deauth_seen
+
+            Subtype 8 (Beacon) is intentionally skipped.  Managed Wi-Fi Scan
+            (wifi.py) already captures every AP beacon across all supported
+            channels via ``iw scan`` on each scan cycle.  Monitor mode only
+            sees beacons on the hopper's current channel, so including them
+            would produce incomplete, channel-biased duplicates of the same
+            AP data in Subject History — an AP visible on channel 6 but not
+            channel 36 would appear and disappear depending on hopper
+            position, not on actual AP presence.  The dev Pi 4 has a separate
+            managed-scan adapter that covers all channels without the monitor
+            hopper's single-channel-at-a-time limitation.
+            """
+            if not self._running:
                 return
+            dot11 = packet.getlayer(Dot11)
+            if dot11 is None or dot11.type != 0:
+                return
+
+            # Deferred past the type gate — only management frames reach here.
             timestamp_epoch = now_epoch()
             timestamp = local_now(timestamp_epoch)
-            dot11 = packet.getlayer(Dot11)
             rssi = getattr(packet, "dBm_AntSignal", None)
             channel = (
                 self.packet_channel(packet, Dot11Elt) or self._current_channel
             )
 
-            if dot11.type != 0:
-                return
             if dot11.subtype == 4:
                 # Probe request: a client is asking for a network name. These
                 # are the rows that make Wi-Fi clients visible in history.
                 payload = {
                     "client_mac": dot11.addr2,
-                    "vendor_oui": self.vendor_for(dot11.addr2),
-                    "vendor_prefix": self.vendor_prefix_for(dot11.addr2),
-                    "vendor_name": self.vendor_name_for(dot11.addr2),
+                    **vendor_info(dot11.addr2),
                     "ssid_probed": self.get_ssid(packet, Dot11Elt),
                     "rssi": rssi,
                     "channel": channel,
@@ -280,25 +303,8 @@ class WiFiMonitorCollector(WiFiCollector):
                 asyncio.run_coroutine_threadsafe(
                     self.emit("probe_request", payload), loop
                 )
-            # elif dot11.subtype == 8:
-            #    # Beacon: monitor mode sees the same AP identity as Wi-Fi Scan,
-            #    # but on whichever channel the hopper is currently sampling.
-            #    payload = {
-            #        "bssid": dot11.addr2,
-            #        "vendor_oui": self.vendor_for(dot11.addr2),
-            #        "vendor_prefix": self.vendor_prefix_for(dot11.addr2),
-            #        "vendor_name": self.vendor_name_for(dot11.addr2),
-            #        "ssid": self.get_ssid(packet, Dot11Elt),
-            #        "channel": channel,
-            #        "encryption": self.get_encryption(packet),
-            #        "rssi": rssi,
-            #        "timestamp": timestamp,
-            #        "timestamp_epoch": timestamp_epoch,
-            #        "monitor_interface": iface,
-            #    }
-            #    asyncio.run_coroutine_threadsafe(
-            #        self.emit("ap_beacon", payload), loop
-            #    )
+            # Subtype 8 (Beacon) is intentionally skipped —
+            # see docstring above for rationale.
             elif dot11.subtype in (0, 2):
                 # Association/reassociation requests show client/AP activity but
                 # usually do not include a stable SSID.
@@ -344,6 +350,7 @@ class WiFiMonitorCollector(WiFiCollector):
                         store=False,
                         stop_filter=lambda _pkt: not self._running,
                         timeout=1,
+                        filter="type mgt",
                     )
                 except Exception as exc:
                     asyncio.run_coroutine_threadsafe(

@@ -5,6 +5,12 @@ description: Optional passive local-network neighbor observation
 acquisition_mode: scan
 enabled: false
 
+# Optional: pin LAN collection to one adapter by MAC address.  When set, only
+# the interface matching this MAC is used for ARP scan and passive listeners,
+# surviving wlanN name swaps across reboots.  Leave blank to use all configured
+# (or auto-discovered) interfaces.  Find the MAC with: ip link show wlan0
+# mac:
+
 # Main poll controls. poll_interval_sec is the normal passive/command collection
 # cadence. command_timeout_sec is the default timeout for local helper commands.
 poll_interval_sec: 60
@@ -25,7 +31,8 @@ avahi_browse_timeout_sec: 15
 avahi_browse_command: avahi-browse -a -r -p -t
 
 # Optional passive packet listeners. DHCP uses UDP 67/68 by default. Passive ARP
-# can be bound to selected interfaces; empty means the collector default.
+# can be bound to selected interfaces; empty means auto-discover (filtered by mac:
+# if set).
 collect_passive_dhcp: false
 passive_dhcp_ports: [67, 68]
 collect_passive_arp: false
@@ -38,18 +45,18 @@ active_arp_scan_interval_sec: 300
 active_arp_scan_timeout_sec: 20
 # Blank retention means Skannr derives a retention window from the scan interval.
 active_arp_scan_retention_sec: ""
-# Empty interfaces lets the command choose its default local network. Use names
-# such as [eth0, wlan0] when you need per-interface scans.
+# Empty means auto-discover (filtered by mac: if set).  Use names such as
+# [eth0, wlan0] to restrict to specific interfaces.
 active_arp_scan_interfaces: []
-# Use {interface} in the command if the command should be parameterized per
-# active_arp_scan_interfaces entry.
-active_arp_scan_command: arp-scan --localnet
+# Use {interface} in the command to scan a specific interface.  When mac: is
+# set, {interface} resolves to the pinned adapter.  Default scans all localnets.
+active_arp_scan_command: arp-scan -I {interface} --localnet
 # Set when arp-scan needs a working directory to find vendor files.
 active_arp_scan_working_dir: ""
 
-# Optional DHCP lease import. Paths are parsed directly; dhcp_lease_command can
-# be used when leases need to be emitted by a local helper. Import has a separate
-# cadence so it can be slower than the main LAN poll.
+# Optional DHCP lease import.  Paths are files (e.g. /var/lib/misc/dnsmasq.leases),
+# not interface names.  dhcp_lease_command can be used when leases need to be
+# emitted by a local helper.  Import has a separate cadence from the main poll.
 dhcp_lease_import_interval_sec: 300
 dhcp_lease_import_timeout_sec: 10
 dhcp_lease_paths: []
