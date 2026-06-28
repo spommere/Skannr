@@ -8,13 +8,15 @@ applies this final postcheck result only when it just created fresh config.
 Pass --no-write for a report-only run.
 """
 
+import os
 from pathlib import Path
 import runpy
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 PRECHECK = ROOT / "scripts" / "skannr_precheck.py"
-DEFAULT_OUTPUT = ROOT / "config" / "postcheck.yaml"
+DEFAULT_CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "skannr"
+DEFAULT_OUTPUT = DEFAULT_CONFIG_DIR / "postcheck.yaml"
 
 
 def print_help():

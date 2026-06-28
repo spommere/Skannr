@@ -20,8 +20,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT = ROOT / "config" / "precheck.yaml"
-DEFAULT_COLLECTOR_DIR = ROOT / "config" / "collectors"
+DEFAULT_CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "skannr"
+DEFAULT_OUTPUT = DEFAULT_CONFIG_DIR / "precheck.yaml"
+DEFAULT_COLLECTOR_DIR = DEFAULT_CONFIG_DIR / "collectors"
 
 COLLECTORS = [
     {

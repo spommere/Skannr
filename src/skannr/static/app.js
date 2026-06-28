@@ -5822,25 +5822,147 @@ function setupDetailPanel() {
   });
 }
 
+function escapeHtml(text) {
+  return String(text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+var _llmDetailType = "";
+var _llmDetailKey = "";
+var _llmCache = {};
+
+function _subjectTypeForAnalyze(detailType) {
+  var map = {
+    "bluetooth-device": "bluetooth_device",
+    "bluetooth-device-group": "bluetooth_device_group",
+    "wifi-ssid": "wifi_ssid",
+    "wifi-bssid": "wifi_bssid",
+    "wifi-client": "wifi_client",
+    "wifi-client-group": "wifi_client_group",
+    "aprsis-subject": "aprsis_station",
+    "rayhunter-subject": "rayhunter_status",
+    "noaa-subject": "noaa_weather_alert",
+    "usgs-subject": "usgs_earthquake",
+    "swpc-subject": "swpc_event",
+    "pws-subject": "pws_station",
+    "adsb-subject": "adsb_aircraft",
+    "rtl433-subject": "rtl433_device",
+    "lan-subject": "lan_device",
+  };
+  return map[detailType] || detailType || "";
+}
+
 function openDetail(type, key) {
-  const backdrop = document.getElementById("detail-backdrop");
-  const title = document.getElementById("detail-title");
-  const kind = document.getElementById("detail-kind");
-  const body = document.getElementById("detail-body");
+  var backdrop = document.getElementById("detail-backdrop");
+  var title = document.getElementById("detail-title");
+  var kind = document.getElementById("detail-kind");
+  var body = document.getElementById("detail-body");
+  var analyzeBtn = document.getElementById("detail-analyze");
+  var llmAnswer = document.getElementById("detail-llm-answer");
   if (!backdrop || !title || !kind || !body) return;
 
-  const detail = buildDetail(type, key);
+  _llmDetailType = type;
+  _llmDetailKey = key;
+  if (llmAnswer) llmAnswer.style.display = "none";
+  if (analyzeBtn) {
+    analyzeBtn.style.display = "";
+    analyzeBtn.disabled = false;
+    analyzeBtn.textContent = "Analyze";
+  }
+
+  var detail = buildDetail(type, key);
   title.textContent = detail.title;
   kind.textContent = detail.kind;
   body.innerHTML = "";
-  detail.sections.forEach((section) => body.appendChild(section));
+  detail.sections.forEach(function(s) { body.appendChild(s); });
   backdrop.hidden = false;
 }
 
 function closeDetail() {
-  const backdrop = document.getElementById("detail-backdrop");
+  var backdrop = document.getElementById("detail-backdrop");
   if (backdrop) backdrop.hidden = true;
 }
+
+function doAnalyze() {
+  var btn = document.getElementById("detail-analyze");
+  if (!btn) return;
+  var cacheKey = _llmDetailType + "|" + _llmDetailKey;
+  if (_llmCache[cacheKey]) {
+    _showAnalysisModal(_llmCache[cacheKey].answer, _llmCache[cacheKey].info);
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "Analyzing...";
+
+  var subjectType = _subjectTypeForAnalyze(_llmDetailType);
+  fetch("/llm/analyze", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      subject_key: _llmDetailKey,
+      subject_type: subjectType,
+    }),
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      btn.disabled = false;
+      btn.textContent = "Analyze";
+      if (!data.ok) {
+        alert("Analysis failed: " + (data.error || "Unknown"));
+        return;
+      }
+      var answer = data.answer || "";
+      if (answer.indexOf("(no text") === 0) {
+        alert("Model returned no visible text — all tokens consumed "
+          + "by reasoning. Try increasing analyze_max_tokens in "
+          + "~/.config/skannr/collectors/llm.yaml.");
+        return;
+      }
+      var usage = data.usage || {};
+      var info = "in=" + (usage.input_tokens || 0) +
+        " out=" + (usage.output_tokens || 0) +
+        " elapsed=" + (usage.elapsed_sec || 0) + "s";
+      _llmCache[cacheKey] = {answer: data.answer || "", info: info};
+      _showAnalysisModal(data.answer || "", info);
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = "Analyze";
+      alert("Request failed: " + String(err));
+    });
+}
+
+function _showAnalysisModal(text, info) {
+  var modal = document.getElementById("analysis-modal");
+  var body = document.getElementById("analysis-body");
+  var usage = document.getElementById("analysis-usage");
+  if (!modal || !body) return;
+  body.innerHTML = escapeHtml(text).replace(/\n/g, "<br>");
+  if (usage) usage.textContent = info || "";
+  modal.hidden = false;
+}
+
+function closeAnalysis() {
+  var modal = document.getElementById("analysis-modal");
+  if (modal) modal.hidden = true;
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+  var btn = document.getElementById("detail-analyze");
+  if (btn) btn.addEventListener("click", doAnalyze);
+  var modal = document.getElementById("analysis-modal");
+  if (modal) {
+    modal.addEventListener("click", function(e) {
+      if (e.target === modal) closeAnalysis();
+    });
+  }
+  document.addEventListener("keydown", function(e) {
+    if (e.key === "Escape") {
+      var m = document.getElementById("analysis-modal");
+      if (m && !m.hidden) closeAnalysis();
+    }
+  });
+});
 
 function buildDetail(type, key) {
   if (type === "bluetooth-device") return buildBluetoothDetail(key);
@@ -8848,8 +8970,8 @@ function timeRangeText(first, last) {
 function compactList(values, limit) {
   const items = valueList(values);
   if (!items.length) return "";
-  const shown = items.slice(0, limit);
-  const suffix = items.length > shown.length ? ` +${items.length - shown.length}` : "";
+  const shown = items.slice(-limit).reverse();
+  const suffix = items.length > limit ? ` +${items.length - limit}` : "";
   return `${shown.join(", ")}${suffix}`;
 }
 

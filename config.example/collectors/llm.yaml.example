@@ -1,0 +1,20 @@
+key: llm
+kind: action
+order: 120
+label: LLM
+description: Local LLM-powered subject analysis
+acquisition_mode: poll
+enabled: false
+
+provider: anthropic
+model: deepseek-v4-flash
+api_key: ""
+# Base URL for the Anthropic-compatible API endpoint.  For DeepSeek:
+#   base_url: https://api.deepseek.com/anthropic
+base_url: ""
+
+# Token budget for subject analysis.
+analyze_max_tokens: 2048
+
+# Maximum bytes to tail-read from raw log files when building context.
+context_tail_bytes: 131072

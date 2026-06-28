@@ -507,10 +507,24 @@
           <div id="detail-kind" class="detail-kind">Detail</div>
           <h2 id="detail-title">Detail</h2>
         </div>
-        <button id="detail-close" class="action-button" type="button">Close</button>
+        <span class="detail-actions">
+          <button id="detail-analyze" class="action-button" type="button">Analyze</button>
+          <button id="detail-close" class="action-button" type="button">Close</button>
+        </span>
       </div>
       <div id="detail-body" class="detail-body"></div>
     </aside>
+  </div>
+
+  <div id="analysis-modal" class="analysis-modal" hidden>
+    <div class="analysis-dialog">
+      <div class="detail-head">
+        <h2>Analysis</h2>
+        <button class="action-button" type="button" onclick="closeAnalysis()">Close</button>
+      </div>
+      <div id="analysis-body" class="llm-answer-text"></div>
+      <div id="analysis-usage" class="llm-answer-usage"></div>
+    </div>
   </div>
 
   <script src="/static/tables.js"></script>

@@ -1658,8 +1658,8 @@ class SubjectHistoryBuilder:
         text = str(value).strip()
         if not text or text in station[key]:
             return
-        if len(station[key]) < limit:
-            station[key].append(text)
+        station[key].append(text)
+        del station[key][:-limit]
 
     def aprsis_is_weather_packet(self, data, event_type):
         """Return True when an APRS event contains weather station data."""
@@ -4124,8 +4124,9 @@ class SubjectHistoryBuilder:
         if not text:
             return
         record.setdefault(key, [])
-        if text not in record[key] and len(record[key]) < limit:
+        if text not in record[key]:
             record[key].append(text)
+            del record[key][:-limit]
 
     def counter_labels(self, counter, limit=8):
         """Return compact counter labels sorted by count then name."""
@@ -4618,8 +4619,10 @@ class SubjectHistoryBuilder:
                         "sample_messages": data.get("sample_messages") or [],
                         "position_samples": data.get("position_samples") or [],
                         "packet_samples": data.get("packet_samples") or [],
-                        "first_position_time": data.get("first_position_time") or "",
-                        "latest_position_time": data.get("latest_position_time") or "",
+                        "first_position_at": data.get("first_position_at") or "",
+                        "first_position_epoch": data.get("first_position_epoch"),
+                        "last_position_at": data.get("last_position_at") or "",
+                        "last_position_epoch": data.get("last_position_epoch"),
                         "trip_rollup": data.get("trip_rollup") or "",
                         "internet_fed": True,
                     },

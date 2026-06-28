@@ -327,15 +327,29 @@ def deep_update(base, override):
 
 
 def project_dir_for_config(path):
-    """Return the standard project root for a config file path."""
+    """Return the standard project root for a config file path.
+
+    Recognises two layouts:
+    - ``<repo>/config/skannr.yaml`` (pre-0.3.5) → returns ``<repo>``
+    - ``~/.config/skannr/skannr.yaml`` (0.3.5+) → returns PROJECT_ROOT
+    """
     directory = os.path.dirname(os.path.abspath(path))
     if os.path.basename(directory) == "config":
         return os.path.dirname(directory)
+    if os.path.basename(directory) == "skannr":
+        return PROJECT_ROOT
     return directory or PROJECT_ROOT
 
 
 def collector_config_dir(config_path):
-    """Return the directory containing per-collector YAML files."""
+    """Return the directory containing per-collector YAML files.
+
+    For XDG-located config this goes straight to CONFIG_COLLECTORS_DIR.
+    For the legacy repo layout it checks ``<repo>/config/collectors`` first.
+    """
+    directory = os.path.dirname(os.path.abspath(config_path))
+    if os.path.basename(directory) == "skannr":
+        return CONFIG_COLLECTORS_DIR
     configured = os.path.join(
         project_dir_for_config(config_path), "config", "collectors"
     )

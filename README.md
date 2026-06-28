@@ -24,7 +24,7 @@ For architecture, event flow, collector internals, and extension notes, see
 - `CHANGELOG.md`: release notes and versioning policy
 - `src/skannr/`: Python package, collector code, shipped UI, and bundled lookup data
 - `config.example/`: generic config template for source upload and fresh installs
-- `config/`: local runtime configuration; precheck may create it with only `precheck.yaml`, and `install.sh` fills it from `config.example/` on fresh installs
+- `~/.config/skannr/`: local runtime configuration; precheck may create it, and `install.sh` fills it from `config.example/` on fresh installs
 - `runtime/`: generated logs, materialized views, and runtime state
 - `requirements/*.txt`: Python dependency manifests
 - `scripts/`: install checks, validation helpers, and internal regression tools
@@ -38,7 +38,30 @@ Versioning policy:
 - `0.3.x`: architecture and collector data-flow changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+> **⚠️ Configuration moved in 0.3.5**
+> Skannr config now lives at `~/.config/skannr/` instead of `<repo>/config/`.
+> On first startup your existing config is automatically copied to the new
+> location — no manual action needed. See [Upgrading from 0.3.x](#upgrading-from-03x)
+> for details.
+
 The rest of this README is the operator manual.
+
+## Upgrading from 0.3.x
+
+Starting with 0.3.5, Skannr reads its configuration from
+`~/.config/skannr/` (or `$XDG_CONFIG_HOME/skannr/` when set). This
+moves config outside the repository tree so it survives `git clone`,
+`mv skannr skannr.old; git clone …`, and `tar`-based deploys.
+
+**What happens on first startup after upgrade:**
+- If `~/.config/skannr/skannr.yaml` already exists → nothing changes.
+- If only `<repo>/~/.config/skannr/skannr.yaml` exists → the entire `config/` tree is
+  copied to `~/.config/skannr/` and a message is printed to stderr.
+  Your old config is **not deleted** — you may remove `<repo>/config/` when
+  ready.
+- If neither exists → fresh install. Skannr writes defaults to the new location.
+
+`--config /path/to/skannr.yaml` still works and skips migration.
 
 ## Install Model
 
@@ -48,16 +71,18 @@ and local collector enablement:
 1. Install OS packages for the collectors this host may use.
 2. (Optional) Run `python3 scripts/skannr_precheck.py` on a new host to preview
    which collectors have the required software/hardware before installing. This
-   creates `config/precheck.yaml`; it may create `config/` with only that file.
+   creates `~/.config/skannr/precheck.yaml`; it may create the config
+   directory with only that file.
    If you have RTL-SDR hardware, run this with `sudo` so `rtl_test -t` can
    access the USB device — otherwise the hardware probe may fail or produce
    garbled output. `install.sh` re-runs the precheck automatically on fresh
    config, so this step is purely a preview.
 3. Run `./install.sh`. On a fresh config, it copies `config.example/` into
-   `config/`, applies `precheck.yaml`, installs Python dependencies, runs
-   `scripts/skannr_postcheck.py`, writes `config/postcheck.yaml`, and applies
+   `~/.config/skannr/`, applies `precheck.yaml`, installs Python dependencies,
+   runs `scripts/skannr_postcheck.py`, writes `postcheck.yaml`, and applies
    the final postcheck result. Existing configs are not rewritten.
-4. Review `config/collectors/*.yaml` for any collector you want to enable or
+4. Review `~/.config/skannr/collectors/*.yaml` for any collector you want to
+   enable or
    disable manually, especially config-required internet/API collectors.
 5. Start Skannr and use System Status for the authoritative runtime view of
    collector state, missing required tools, and missing optional tools.
@@ -84,8 +109,8 @@ Open:
 http://127.0.0.1:5004/
 ```
 
-`install.sh` creates local `config/` from `config.example/` if
-`config/skannr.yaml` does not already exist. Existing YAML is not overwritten.
+`install.sh` creates `~/.config/skannr/` from `config.example/` if
+`~/.config/skannr/skannr.yaml` does not already exist. Existing YAML is not overwritten.
 The precheck step is recommended for a new host; it is safe to skip because
 `install.sh` runs it automatically when creating fresh config.
 
@@ -137,9 +162,9 @@ Before first install you can run the standalone collector precheck:
 python3 scripts/skannr_precheck.py
 ```
 
-The precheck writes `config/precheck.yaml`. When `install.sh` creates a fresh
+The precheck writes `~/.config/skannr/precheck.yaml`. When `install.sh` creates a fresh
 `config/` from `config.example/`, it applies those precheck results to
-`config/collectors/*.yaml`: collectors with required local tools present are
+`~/.config/skannr/collectors/*.yaml`: collectors with required local tools present are
 enabled, missing local-tool collectors are disabled, and internet/API collectors
 that need local configuration stay disabled until configured manually. For Wi-Fi,
 fresh config also seeds `wifi.interfaces` with the first non-monitor wireless
@@ -164,7 +189,7 @@ The Python dependencies include Flask, Flask-SocketIO, `simple-websocket`,
 `bleak`, and `scapy` as appropriate for the local Python version.
 
 At the end of installation, `install.sh` runs `scripts/skannr_postcheck.py`
-inside the virtual environment and writes `config/postcheck.yaml`. The postcheck
+inside the virtual environment and writes `~/.config/skannr/postcheck.yaml`. The postcheck
 repeats the collector tool/hardware inventory and also verifies Python modules
 installed by the selected requirements file. For a fresh config only,
 `install.sh` applies this final postcheck result after Python dependencies are
@@ -200,7 +225,7 @@ To use a non-default config path:
 
 ```bash
 SKANNR_DIR=/path/to/skannr
-sudo env PYTHONPATH="$SKANNR_DIR/src" "$SKANNR_DIR/.venv/bin/python" -m skannr.main --config "$SKANNR_DIR/config/skannr.yaml"
+sudo env PYTHONPATH="$SKANNR_DIR/src" "$SKANNR_DIR/.venv/bin/python" -m skannr.main --config "$SKANNR_DIR/~/.config/skannr/skannr.yaml"
 ```
 
 For live troubleshooting, start with `--debug`:
@@ -302,7 +327,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/path/to/skannr
 Environment=PYTHONPATH=/path/to/skannr/src
-ExecStart=/path/to/skannr/.venv/bin/python -m skannr.main --config /path/to/skannr/config/skannr.yaml
+ExecStart=/path/to/skannr/.venv/bin/python -m skannr.main --config /home/pi/.config/skannr/skannr.yaml
 Restart=on-failure
 RestartSec=5
 User=root
@@ -339,13 +364,13 @@ sudo systemctl restart skannr
 Global settings live in the local runtime config:
 
 ```text
-config/skannr.yaml
+~/.config/skannr/skannr.yaml
 ```
 
 Collector-specific settings live in:
 
 ```text
-config/collectors/<collector>.yaml
+~/.config/skannr/collectors/<collector>.yaml
 ```
 
 Generic defaults for source upload and fresh installs live under
@@ -364,13 +389,13 @@ After `./install.sh`, review these local files on each Skannr host. The files
 under `config/` are machine-specific; do not edit `config.example/` for a live
 Pi unless you are intentionally changing the shipped template.
 
-- `config/skannr.yaml`
+- `~/.config/skannr/skannr.yaml`
   - Set `skannr.listeners` to the HTTP endpoints Skannr should bind, such as
     `127.0.0.1:5004`, `0.0.0.0:5004`, or `[::]:5006`.
   - Review `persistence.filesystem.retention_days` and
     `persistence.filesystem.log_dir` if the host has limited storage or a
     custom runtime path.
-- `config/collectors/aprsis.yaml`
+- `~/.config/skannr/collectors/aprsis.yaml`
   - Set `enabled: true` only when this host should use APRS-IS.
   - Set `callsign` and `passcode`; use `-1` only for read-only/NOCALL-style
     testing.
@@ -380,7 +405,7 @@ Pi unless you are intentionally changing the shipped template.
     `enforce_radius: true` if the server returns out-of-range packets.
   - Use `preferred_server` only when you deliberately want to reconnect until a
     pooled backend such as `CWOP-4` is selected.
-- `config/collectors/noaa.yaml`
+- `~/.config/skannr/collectors/noaa.yaml`
   - Set `enabled: true` only when internet-fed NOAA/NWS/NHC/tsunami.gov
     context is wanted.
   - Set `latitude` and `longitude` for the monitored point.
@@ -390,30 +415,30 @@ Pi unless you are intentionally changing the shipped template.
     if you want NWS alerts/NHC advisories without local forecast context.
   - Review `nws.enabled`, `nhc.enabled`, `nhc.basins`, `tsunami.enabled`, and
     `tsunami.centers` for the local area and desired global context.
-- `config/collectors/usgs.yaml`
+- `~/.config/skannr/collectors/usgs.yaml`
   - Set `enabled: true` only when USGS earthquake context is wanted.
   - Set `latitude`, `longitude`, `radius_km`, and `min_magnitude` for the area
     and noise level you care about.
 - Optional collector files
-  - `config/collectors/rayhunter.yaml`: set `endpoint` for the Rayhunter device.
-  - `config/collectors/swpc.yaml`: enable if SWPC space-weather context is
+  - `~/.config/skannr/collectors/rayhunter.yaml`: set `endpoint` for the Rayhunter device.
+  - `~/.config/skannr/collectors/swpc.yaml`: enable if SWPC space-weather context is
     wanted; defaults focus on X flares and R3/S3/G3/Kp7+ conditions.
-  - `config/collectors/pws.yaml`: enable if this host should poll an Ambient
+  - `~/.config/skannr/collectors/pws.yaml`: enable if this host should poll an Ambient
     Weather personal weather station. Set `application_key`, `api_key`, and an
     optional stable `station_id` such as `GW0154` in local `config/` only.
-  - `config/collectors/adsb.yaml`: enable if this host runs `dump1090` or
+  - `~/.config/skannr/collectors/adsb.yaml`: enable if this host runs `dump1090` or
     `readsb`. Set `device_index` when Skannr starts the decoder, or set `url`
     or verify one of the configured `aircraft_json_paths` matches an external
     decoder's `aircraft.json`; set `latitude` and `longitude` for nearby/low-
     aircraft distance scoring.
-  - `config/collectors/rtl433.yaml`: enable only when this host should run
+  - `~/.config/skannr/collectors/rtl433.yaml`: enable only when this host should run
     `rtl_433` against an attached RTL-SDR dongle. Set `device_index` and
     `frequency_plan` for the local dongle and bands you want to decode. ADS-B
     and RTL-433 can run together only when they use different dongle indexes.
-  - `config/collectors/lan.yaml`: enable if passive LAN neighbor/default-gateway
+  - `~/.config/skannr/collectors/lan.yaml`: enable if passive LAN neighbor/default-gateway
     and mDNS/SSDP service context is wanted. Active ARP scan is optional and
     disabled by default.
-  - `config/collectors/wifi*.yaml`, `ble.yaml`, and `bt_classic.yaml`: review
+  - `~/.config/skannr/collectors/wifi*.yaml`, `ble.yaml`, and `bt_classic.yaml`: review
     adapter/interface settings for the hardware attached to this host.
 
 Restart Skannr after changing any YAML:
@@ -426,9 +451,9 @@ sudo systemctl restart skannr
 
 The only shipped YAML files are:
 
-- `config/skannr.yaml`: global runtime, persistence, analysis, report, alert,
+- `~/.config/skannr/skannr.yaml`: global runtime, persistence, analysis, report, alert,
   and UI settings
-- `config/collectors/*.yaml`: one collector or action per file
+- `~/.config/skannr/collectors/*.yaml`: one collector or action per file
 
 `config.example/` carries generic templates for source upload and fresh
 installs. `config/` is machine-specific local state.
@@ -648,7 +673,7 @@ without changing raw-log retention.
 
 ### Collector YAML Metadata
 
-Every file under `config/collectors/` can use these shared keys:
+Every file under `~/.config/skannr/collectors/` can use these shared keys:
 
 - `key`: stable collector/action key. It normally matches the filename.
 - `kind`: optional `action` for on-demand actions such as BLE Identify.
@@ -756,7 +781,7 @@ Collector-specific keys:
   `product_keyword_patterns`.
 - `pws.yaml`: `poll_interval_sec`, `request_timeout_sec`, `user_agent`,
   `station_id`, optional `mac_address` or `device_name`, `application_key`,
-  and `api_key`. Keep real keys only in local `config/collectors/pws.yaml`.
+  and `api_key`. Keep real keys only in local `~/.config/skannr/collectors/pws.yaml`.
 - `lan.yaml`: `poll_interval_sec`, `command_timeout_sec`,
   `collect_ip_neigh`, `collect_arp`, `collect_mdns`, `collect_ssdp`,
   `collect_avahi_browse`, `avahi_browse_interval_sec`,
@@ -1055,13 +1080,13 @@ Collector checks happen in three layers:
 - Install-time precheck: `scripts/skannr_precheck.py` runs before the virtual
   environment is needed. It uses only the Python standard library, reports
   required/recommended/optional local tools and selected hardware probes, writes
-  `config/precheck.yaml`, and can apply enabled flags plus Wi-Fi interface
-  suggestions to a freshly copied `config/collectors/` tree. SDR-backed
+  `~/.config/skannr/precheck.yaml`, and can apply enabled flags plus Wi-Fi interface
+  suggestions to a freshly copied `~/.config/skannr/collectors/` tree. SDR-backed
   collectors are not auto-enabled unless required software and RTL-SDR hardware
   are both present.
 - Post-install check: `install.sh` runs `scripts/skannr_postcheck.py` from the
   installed virtual environment. It reuses the same inventory, checks Python
-  modules such as `bleak` and `scapy`, writes `config/postcheck.yaml`, and is
+  modules such as `bleak` and `scapy`, writes `~/.config/skannr/postcheck.yaml`, and is
   applied to fresh config after dependencies are installed.
 - Runtime startup/status checks: each collector owns `hardware_status()` and
   `detect()` checks for its actual configuration. System Status and collector
@@ -1125,19 +1150,19 @@ interface name (`wlan1`, `hci1`) is irrelevant and can swap freely.
 **Example — Pi 4 with three WLAN dongles and two Bluetooth dongles:**
 
 ```yaml
-# config/collectors/wifi.yaml — pin managed AP scans to wlan2 (internet/uplink)
+# ~/.config/skannr/collectors/wifi.yaml — pin managed AP scans to wlan2 (internet/uplink)
 mac: "d8:3a:dd:6e:85:63"
 interfaces: []
 
-# config/collectors/wifi_monitor.yaml — pin monitor mode to the dedicated Alfa dongle
+# ~/.config/skannr/collectors/wifi_monitor.yaml — pin monitor mode to the dedicated Alfa dongle
 mac: "00:c0:ca:bb:58:e1"
 interface: auto
 
-# config/collectors/ble.yaml — pin BLE scanning to the Plugable BT 5 dongle
+# ~/.config/skannr/collectors/ble.yaml — pin BLE scanning to the Plugable BT 5 dongle
 mac: "00:1A:7D:DA:71:13"
 adapters: []
 
-# config/collectors/lan.yaml — pin LAN collection to wlan2 (the local-net interface)
+# ~/.config/skannr/collectors/lan.yaml — pin LAN collection to wlan2 (the local-net interface)
 mac: "d8:3a:dd:6e:85:63"
 ```
 
@@ -1173,7 +1198,7 @@ traffic. Those belong to `Wi-Fi Monitor`.
 Default config:
 
 ```text
-config/collectors/wifi.yaml
+~/.config/skannr/collectors/wifi.yaml
 ```
 
 ## Wi-Fi Monitor
@@ -1243,7 +1268,7 @@ interface, Skannr leaves the source interface unchanged unless
 When this runs from the Skannr service, the service user must have enough
 privilege to change Wi-Fi interface mode, usually root or equivalent
 `CAP_NET_ADMIN`. Manual `sudo iw ...` success does not prove a non-root Skannr
-service can do the same thing. After changing `config/collectors/wifi_monitor.yaml`,
+service can do the same thing. After changing `~/.config/skannr/collectors/wifi_monitor.yaml`,
 restart Skannr and then check `iw dev` for the created monitor interface.
 
 For setup debugging, check `runtime/logs/skannr.log` or `journalctl -u skannr`.
@@ -1289,7 +1314,7 @@ Wi-Fi Access Points.
 Default config:
 
 ```text
-config/collectors/wifi_monitor.yaml
+~/.config/skannr/collectors/wifi_monitor.yaml
 ```
 
 Useful settings:
@@ -1371,7 +1396,7 @@ decoded services/UUIDs, and last-seen time.
 Default config:
 
 ```text
-config/collectors/ble.yaml
+~/.config/skannr/collectors/ble.yaml
 ```
 
 Use `adapters: []` to let Skannr rank the BlueZ adapters Linux exposes. External
@@ -1399,7 +1424,7 @@ Multi-Adapter Hosts above).
 Default config:
 
 ```text
-config/collectors/bt_classic.yaml
+~/.config/skannr/collectors/bt_classic.yaml
 ```
 
 Start it manually from the Bluetooth tab or System Status.
@@ -1414,7 +1439,7 @@ device window.
 Default config:
 
 ```text
-config/collectors/ble_identify.yaml
+~/.config/skannr/collectors/ble_identify.yaml
 ```
 
 It attempts to read selected Device Information Service fields:
@@ -1440,7 +1465,7 @@ the live RTL-433 tab, Subject History, Insights, Reports, and optional alerts.
 Default config:
 
 ```text
-config/collectors/rtl433.yaml
+~/.config/skannr/collectors/rtl433.yaml
 ```
 
 Common setup:
@@ -1547,7 +1572,7 @@ live rows, Subject History, Insights, Reports, and optional alerts.
 Default config:
 
 ```text
-config/collectors/adsb.yaml
+~/.config/skannr/collectors/adsb.yaml
 ```
 
 Common setup:
@@ -1637,7 +1662,7 @@ endpoint.
 Default config:
 
 ```text
-config/collectors/rayhunter.yaml
+~/.config/skannr/collectors/rayhunter.yaml
 ```
 
 Typical local configuration:
@@ -1687,7 +1712,7 @@ APRS-IS TCP feed for the configured area.
 Default config:
 
 ```text
-config/collectors/aprsis.yaml
+~/.config/skannr/collectors/aprsis.yaml
 ```
 
 Use port `14580` with a server-side filter. Do not run an unfiltered full
@@ -1739,7 +1764,7 @@ tsunami.gov NTWC/PTWC feeds.
 Default config:
 
 ```text
-config/collectors/noaa.yaml
+~/.config/skannr/collectors/noaa.yaml
 ```
 
 The default template is disabled. Enable it and set your local point or state:
@@ -1802,7 +1827,7 @@ GeoJSON earthquake API for a configured point, radius, and minimum magnitude.
 Default config:
 
 ```text
-config/collectors/usgs.yaml
+~/.config/skannr/collectors/usgs.yaml
 ```
 
 Example:
@@ -1845,7 +1870,7 @@ events instead of retaining raw time-series samples.
 Default config:
 
 ```text
-config/collectors/swpc.yaml
+~/.config/skannr/collectors/swpc.yaml
 ```
 
 Example:
@@ -1894,7 +1919,7 @@ row per poll.
 Default config:
 
 ```text
-config/collectors/pws.yaml
+~/.config/skannr/collectors/pws.yaml
 ```
 
 Example local config:
@@ -1928,7 +1953,7 @@ coverage. A new station will only have current-day/current-week information at
 first; week/month/year patterns become meaningful after enough samples have
 been retained.
 
-Keep Ambient keys in local `config/collectors/pws.yaml` only. The
+Keep Ambient keys in local `~/.config/skannr/collectors/pws.yaml` only. The
 `config.example` template intentionally leaves them blank.
 
 ## LAN
@@ -1941,7 +1966,7 @@ an active ARP inventory scan when explicitly enabled.
 Default config:
 
 ```text
-config/collectors/lan.yaml
+~/.config/skannr/collectors/lan.yaml
 ```
 
 Example:
@@ -2176,7 +2201,7 @@ Check the configured bind address:
 
 ```bash
 SKANNR_DIR=/path/to/skannr
-grep -n "host\\|port\\|listeners" "$SKANNR_DIR/config/skannr.yaml"
+grep -n "host\\|port\\|listeners" "$SKANNR_DIR/~/.config/skannr/skannr.yaml"
 ss -ltnp | grep -E '5004|5006'
 ```
 

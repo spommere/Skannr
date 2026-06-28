@@ -4,7 +4,7 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PYTHON_BIN=${PYTHON:-python3}
 VENV_DIR=${VENV_DIR:-"$ROOT_DIR/.venv"}
-CONFIG_DIR="$ROOT_DIR/config"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/skannr"
 CONFIG_EXAMPLE_DIR="$ROOT_DIR/config.example"
 CONFIG_FILE="$CONFIG_DIR/skannr.yaml"
 PRECHECK_FILE="$CONFIG_DIR/precheck.yaml"
@@ -14,11 +14,11 @@ usage() {
   cat <<EOF
 Usage: ./install.sh
 
-Installs Skannr Python dependencies and creates local config/ from
-config.example/ when config/skannr.yaml does not exist. On fresh config it
-applies config/precheck.yaml, installs Python dependencies, runs
-scripts/skannr_postcheck.py to write config/postcheck.yaml, then applies the
-final postcheck enabled flags. Existing config/skannr.yaml is not rewritten.
+Installs Skannr Python dependencies and creates ~/.config/skannr/ from
+config.example/ when ~/.config/skannr/skannr.yaml does not exist. On fresh
+config it applies precheck.yaml, installs Python dependencies, runs
+scripts/skannr_postcheck.py to write postcheck.yaml, then applies the
+final postcheck enabled flags. Existing config is not rewritten.
 Optional system tools are reported by scripts/skannr_precheck.py and
 scripts/skannr_postcheck.py; install them with your OS package manager.
 EOF
@@ -68,8 +68,8 @@ if [ ! -f "$CONFIG_FILE" ]; then
     if [ -d "$CONFIG_DIR" ]; then
       EXTRA_CONFIG_FILES=$(find "$CONFIG_DIR" -mindepth 1 ! -name precheck.yaml -print -quit)
       if [ -n "$EXTRA_CONFIG_FILES" ]; then
-        echo "config/ is not empty but config/skannr.yaml is missing; refusing to overwrite local files." >&2
-        echo "Create config/skannr.yaml manually or move the existing config/ aside and rerun install.sh." >&2
+        echo "$CONFIG_DIR is not empty but skannr.yaml is missing; refusing to overwrite local files." >&2
+        echo "Create skannr.yaml manually or move the existing config aside and rerun install.sh." >&2
         exit 1
       fi
     fi
@@ -78,7 +78,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
     cp -R "$CONFIG_EXAMPLE_DIR/." "$CONFIG_DIR/"
     FRESH_CONFIG=1
   else
-    echo "No config/skannr.yaml or config.example/ found; Skannr will create defaults on first run."
+    echo "No config file or config.example/ found; Skannr will create defaults on first run."
   fi
 fi
 
@@ -116,7 +116,9 @@ fi
 echo
 echo "Python dependencies installed in $VENV_DIR"
 echo "Install optional system collector tools separately if needed."
-echo "Run scripts/skannr_precheck.py again after installing tools, then rerun install.sh on a fresh config or edit config/collectors/*.yaml manually."
+echo "Run scripts/skannr_precheck.py again after installing tools, then rerun install.sh on a fresh config or edit ~/.config/skannr/collectors/*.yaml manually."
+echo
+echo "Config lives at $CONFIG_DIR"
 echo
 echo "Run Skannr with:"
 echo "  sudo env PYTHONPATH=$ROOT_DIR/src $VENV_DIR/bin/python -m skannr.main"

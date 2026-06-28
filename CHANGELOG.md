@@ -7,6 +7,33 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.3.5 - 2026-06-27
+
+- **Config moved outside the repo tree.** `~/.config/skannr/` is now the default
+  config location instead of `<repo>/config/`. On first startup the old tree is
+  migrated item-by-item and a one-time `config_migration` alert is emitted
+  (re-fires on every restart while the old directory still exists — delete it
+  to dismiss). `paths.py` resolves the config home via `SUDO_USER` → uid 1000 →
+  `~/.config/skannr` so the operator's home directory is used regardless of how
+  Skannr starts. `install.sh`, `skannr_precheck.py`, and `skannr_postcheck.py`
+  all use the new location. README includes an "Upgrading from 0.3.x" section.
+- **LLM collector ("Analyze" button).** New action collector gated behind
+  `~/.config/skannr/collectors/llm.yaml` — file absent → feature hidden. An
+  "Analyze" button on subject detail panels assembles context from Subject
+  History, operator annotations, and raw JSONL tail-reads, calls the configured
+  model via the Anthropic SDK, and displays the response in a centered overlay
+  modal with token usage and cost breakdown. Responses are browser-cached by
+  subject key for the session. Guard-rail refusals are detected and logged.
+  Config template at `config.example/collectors/llm.yaml.example`.
+- **Sample list rotation fix.** APRS-IS, ADS-B, and RTL-433 sample lists were
+  frozen at their first N entries because the "hard stop at capacity" pattern
+  silently dropped new entries once the limit was reached. Fixed with a rotate
+  pattern matching the existing `append_recent_record` behavior. Also fixed
+  non-existent field references in APRS subject building that caused empty
+  position timestamps. Frontend sample lists now display newest-first.
+- **Project hygiene.** Validation scripts moved to `validation/` directory.
+  Dev-only test scripts moved to gitignored `testscripts/`.
+
 ## 0.3.4 - 2026-06-27
 
 - **Wi-Fi Monitor CPU reduction.** Three changes to `packet_handler`: a kernel

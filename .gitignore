@@ -14,10 +14,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# LLM docs — local only, not in public repo.
+/LLM_DESIGN.md
+/LLM_README.md
+
 # Local helper/output files.
-.gh_token
 /crtar.sh
-/crtarall.sh
 *.tar
 *.tar.gz
 *.tgz

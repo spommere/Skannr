@@ -138,6 +138,15 @@ FALLBACK_COLLECTOR_DEFINITIONS = [
         "has_subject_history": True,
     },
     {
+        "key": "llm",
+        "kind": "action",
+        "order": 120,
+        "label": "LLM",
+        "description": "Local LLM-powered subject analysis",
+        "acquisition_mode": ACQUISITION_POLL,
+        "has_subject_history": False,
+    },
+    {
         "key": "pws",
         "order": 100,
         "label": "PWS",

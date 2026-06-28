@@ -8,6 +8,7 @@ from .adsb import ADSBCollector
 from .aprsis import APRSISCollector
 from .lan import LANCollector
 from .lan_identify import LANIdentifyCollector
+from .llm import LLMCollector
 from .noaa import NOAACollector
 from .pws import PWSCollector
 from .rtl433 import RTL433Collector
@@ -44,6 +45,7 @@ COLLECTOR_CLASS_BY_KEY = {
 ACTION_CLASS_BY_KEY = {
     "ble_identify": BLEIdentifyCollector,
     "lan_identify": LANIdentifyCollector,
+    "llm": LLMCollector,
 }
 
 
@@ -138,7 +140,7 @@ def load_actions(config, bus):
     for key, cls in ACTION_CLASS_BY_KEY.items():
         section = dict(collector_config.get(key) or {})
         section["_global_config"] = config
-        if section.get("enabled", True):
+        if section.get("enabled", False):
             # Actions validate hardware when invoked. Running validation during
             # startup can block the dashboard on optional tools such as BlueZ.
             actions[key] = cls(section, bus)

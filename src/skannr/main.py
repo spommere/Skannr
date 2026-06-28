@@ -64,8 +64,10 @@ from .log_utils import (
 from .notifications import pushover_enabled, send_pushover_alert
 from .paths import (
     CONFIG_COLLECTORS_DIR,
+    CONFIG_DIR,
     CONFIG_PATH,
     DATA_COLLECTORS_DIR,
+    OLD_CONFIG_DIR,
     STATIC_DIR,
     VERSION_PATH,
 )
@@ -471,6 +473,29 @@ def lan_identify():
         action.identify(target, mac, subject_key, timeout), loop
     )
     return {"ok": True}
+
+
+@app.route("/llm/analyze", methods=["POST"])
+def llm_analyze():
+    """Run LLM analysis on one subject detail record."""
+    payload = request.get_json(silent=True) or {}
+    subject_key = str(payload.get("subject_key") or "").strip()
+    subject_type = str(payload.get("subject_type") or "").strip()
+    loop = runtime.get("loop")
+    action = action_by_key("llm")
+    if not loop or not action:
+        return {"ok": False, "error": "LLM is not available"}, 503
+    if not subject_key:
+        return {"ok": False, "error": "Missing subject_key"}, 400
+    future = asyncio.run_coroutine_threadsafe(
+        action.analyze(subject_key, subject_type), loop)
+    try:
+        result = future.result(timeout=120)
+    except Exception as exc:
+        return {"ok": False, "error": "LLM call failed: {}".format(exc)}, 500
+    if not result or "error" in (result or {}):
+        return {"ok": False, "error": (result or {}).get("error", "Unknown")}, 500
+    return {"ok": True, "answer": result["answer"], "usage": result["usage"]}
 
 
 @app.route("/collector_metadata", methods=["GET"])
@@ -5059,6 +5084,31 @@ def run_loop(config):
     logging.info("collector event loop starting")
     try:
         loop.run_until_complete(start_collectors(config, bus))
+
+        msg = runtime.pop("_migration_msg", None)
+        if msg:
+
+            async def _emit_migration_alert():
+                await asyncio.sleep(1)
+                epoch = now_epoch()
+                alert_events = runtime["alerts"].emit_alert(
+                    alert_type="config_migration",
+                    key="config_migration:{}".format(int(epoch)),
+                    level="warning",
+                    source="system",
+                    title="Config moved",
+                    subject="Config directory",
+                    summary=msg,
+                    timestamp=local_now(epoch),
+                    now=epoch,
+                    emit=True,
+                )
+                for alert_event in alert_events:
+                    bus.publish(alert_event)
+                broadcast("alerts_snapshot", runtime["alerts"].snapshot())
+
+            loop.create_task(_emit_migration_alert())
+
         loop.run_forever()
     except Exception as exc:
         logging.exception("collector event loop failed: %s", exc)
@@ -5209,9 +5259,54 @@ def log_aprsis_config_summary(config):
     )
 
 
+def _migrate_config_if_needed(config_path):
+    """Copy config from the pre-0.3.5 repo location to ~/.config/skannr/.
+
+    Returns an alert-worthy message string when the operator should be
+    notified, or None when there is nothing to say.  The caller emits a
+    synthetic alert so the message appears in the global alert strip.
+    """
+    import shutil
+    import sys
+
+    if config_path != CONFIG_PATH:
+        return None
+    old_config = os.path.join(OLD_CONFIG_DIR, "skannr.yaml")
+    old_exists = os.path.exists(old_config)
+
+    if not old_exists:
+        return None
+
+    if not os.path.exists(CONFIG_PATH):
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            for item in os.listdir(OLD_CONFIG_DIR):
+                src = os.path.join(OLD_CONFIG_DIR, item)
+                dst = os.path.join(CONFIG_DIR, item)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy2(src, dst)
+        except OSError as exc:
+            msg = "Config migration failed: {} — {}".format(OLD_CONFIG_DIR, exc)
+            print("skannr: {}".format(msg), file=sys.stderr)
+            logging.warning(msg)
+            return None
+        msg = "Config moved to {} — you may delete {}.".format(
+            CONFIG_DIR, OLD_CONFIG_DIR,
+        )
+        print("skannr: {}".format(msg), file=sys.stderr)
+        return msg
+
+    return "Old config {} still exists — you may delete it.".format(
+        OLD_CONFIG_DIR,
+    )
+
+
 def main():
     """Configure logging/persistence, start collectors, and serve the UI."""
     args = parse_args()
+    runtime["_migration_msg"] = _migrate_config_if_needed(args.config)
     config = load_config(args.config)
     runtime["config"] = config
     runtime["event_log"] = deque(maxlen=runtime_int("event_log_maxlen", 100, minimum=1))

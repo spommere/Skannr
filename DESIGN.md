@@ -87,8 +87,8 @@ Skannr is a single Python process with these major components:
 - `src/skannr/reports.py`: slower longitudinal summaries from Subject History.
 - `src/skannr/static/`: single-page browser dashboard.
 - `config.example/`: generic source-controlled configuration template.
-- `config/skannr.yaml`: local runtime, persistence, UI, and analysis configuration.
-- `config/collectors/*.yaml`: local collector-specific operator configuration.
+- `~/.config/skannr/skannr.yaml`: local runtime, persistence, UI, and analysis configuration.
+- `~/.config/skannr/collectors/*.yaml`: local collector-specific operator configuration.
 - `runtime/logs/`: raw JSONL logs and materialized derived-view state.
 
 Collectors run on an asyncio loop in a background thread. Flask serves the UI
@@ -223,8 +223,8 @@ parse or reformat Skannr timestamps in the browser machine's timezone.
 ## 4. Configuration Model
 
 Generic defaults live in `config.example/`. Local runtime settings live in
-`config/skannr.yaml`, and local collector-specific settings live in
-`config/collectors/<collector>.yaml`.
+`~/.config/skannr/skannr.yaml`, and local collector-specific settings live in
+`~/.config/skannr/collectors/<collector>.yaml`.
 
 The global file owns:
 
@@ -254,14 +254,14 @@ Collector YAML files own:
   active LAN inventory settings where applicable
 
 `config.load_config()` loads defaults from `src/skannr/config.py`, overlays
-`config/skannr.yaml`, loads collector YAML files, normalizes retention, resolves
+`~/.config/skannr/skannr.yaml`, loads collector YAML files, normalizes retention, resolves
 relative `log_dir` against the project root, and asks each configured collector
 for its hardware/software probes for System Status.
 
 Collector availability has three levels. `scripts/skannr_precheck.py` is a
 standalone standard-library script that can run before install, writes
-`config/precheck.yaml`, and can apply enabled flags plus Wi-Fi interface
-suggestions to a freshly copied `config/collectors/` tree. `install.sh` uses
+`~/.config/skannr/precheck.yaml`, and can apply enabled flags plus Wi-Fi interface
+suggestions to a freshly copied `~/.config/skannr/collectors/` tree. `install.sh` uses
 that file when it creates a new local config: collectors with required local
 tools are enabled, collectors with missing required tools stay disabled, and
 config-required internet/API collectors stay disabled until the operator edits
@@ -276,7 +276,7 @@ collector.
 
 After Python dependencies are installed, `install.sh` runs
 `scripts/skannr_postcheck.py` from the virtual environment. The postcheck reuses
-the precheck inventory, writes `config/postcheck.yaml`, and also verifies Python
+the precheck inventory, writes `~/.config/skannr/postcheck.yaml`, and also verifies Python
 modules such as `bleak` and `scapy`. On a fresh config, `install.sh` applies the
 postcheck result as the final enabled/disabled decision, so the final seed
 reflects required software, selected hardware probes, and Python dependencies.
@@ -285,7 +285,7 @@ collector-owned: each collector exposes `hardware_status()` for System Status
 and `detect()` for actual startup. This keeps install output helpful without
 turning disabled optional collectors into installation failures.
 
-`install.sh` copies `config.example/` to `config/` when `config/skannr.yaml` is
+`install.sh` copies `config.example/` to `config/` when `~/.config/skannr/skannr.yaml` is
 missing. Existing YAML is not rewritten on startup, so comments and user
 formatting are preserved.
 
@@ -968,7 +968,7 @@ Implementation:
   Warning, Watch, Advisory, or Threat products open Alerts; information-only
   statements remain in the feed/history/report layers without paging the
   operator.
-- Uses poll cadence from `config/collectors/noaa.yaml`, default `300` seconds.
+- Uses poll cadence from `~/.config/skannr/collectors/noaa.yaml`, default `300` seconds.
 
 Important events:
 
@@ -1007,7 +1007,7 @@ Implementation:
   global-major subfeeds.
 - Includes event time plus magnitude, place, status, felt/CDI/MMI, alert color,
   and tsunami flag in the material fingerprint.
-- Uses poll cadence from `config/collectors/usgs.yaml`, default `300` seconds.
+- Uses poll cadence from `~/.config/skannr/collectors/usgs.yaml`, default `300` seconds.
 
 Important events:
 
@@ -1052,7 +1052,7 @@ Implementation:
   succeeds, successful rows are emitted and failed product names are surfaced in
   collector status. The collector only enters retrying when all enabled SWPC
   products fail.
-- Uses poll cadence from `config/collectors/swpc.yaml`, default `300` seconds.
+- Uses poll cadence from `~/.config/skannr/collectors/swpc.yaml`, default `300` seconds.
 
 Important events:
 
@@ -1087,7 +1087,7 @@ Purpose: current local personal weather station context from Ambient Weather.
 Implementation:
 
 - Polls Ambient Weather's `/v1/devices` API with local
-  `application_key`/`api_key` credentials from `config/collectors/pws.yaml`.
+  `application_key`/`api_key` credentials from `~/.config/skannr/collectors/pws.yaml`.
 - Uses a scan-style cadence, default `60` seconds, because the endpoint returns
   current station state rather than a historical event feed.
 - Emits one `pws_weather` event per station when material weather fields change.
@@ -1173,7 +1173,7 @@ Implementation:
   an explicit LAN feed column. Skannr runs `arp-scan` from a known vendor-data
   directory when possible so `ieee-oui.txt` / `mac-vendor.txt` lookup does not
   depend on systemd's working directory.
-- Uses poll cadence from `config/collectors/lan.yaml`, default `60` seconds.
+- Uses poll cadence from `~/.config/skannr/collectors/lan.yaml`, default `60` seconds.
 - An optional `mac` config key can pin all LAN collection (ARP scan, passive
   listeners) to one specific adapter by MAC address, regardless of which
   `wlanN` name the kernel assigns after reboot. When `mac` is set, only the
@@ -1731,7 +1731,7 @@ The header contains:
 - view-window selector
 
 The connection badge reflects the browser event stream. The view-window selector
-is populated from `config/skannr.yaml`, `retention_days`, and optional
+is populated from `~/.config/skannr/skannr.yaml`, `retention_days`, and optional
 `view_window.default_days`. System Status uses concise availability wording for
 hardware and keeps software checks in a separate column.
 
@@ -1869,7 +1869,7 @@ network, VPN, SSH tunnel, or reverse proxy with appropriate access control.
 
 Adding a collector currently requires:
 
-1. Add `config/collectors/<key>.yaml` with key, label, order,
+1. Add `~/.config/skannr/collectors/<key>.yaml` with key, label, order,
    `acquisition_mode`, validation commands, and collector-specific settings.
    Choose `scan`, `poll`, or `listen` based on how the collector obtains data.
 2. Add `src/skannr/collectors/<key>.py` implementing a `BaseCollector` subclass.

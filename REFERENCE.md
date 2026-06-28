@@ -4,7 +4,7 @@ This file documents the example configuration tree. The YAML files in `config.ex
 
 ## Configuration Model
 
-Skannr loads the main application file from `config/skannr.yaml` and collector files from `config/collectors/*.yaml`. The `config.example/` tree is the source-controlled reference template.
+Skannr loads the main application file from `~/.config/skannr/skannr.yaml` and collector files from `~/.config/skannr/collectors/*.yaml`. The `config.example/` tree is the source-controlled reference template.
 
 Collector files share these top-level fields:
 
