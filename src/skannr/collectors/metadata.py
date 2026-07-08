@@ -6,7 +6,6 @@ logic. Hardware probes and event parsing still live with the modules that know
 those domains.
 """
 
-
 ACQUISITION_SCAN = "scan"
 ACQUISITION_POLL = "poll"
 ACQUISITION_LISTEN = "listen"
@@ -180,7 +179,8 @@ def collector_definitions(config=None, include_system=True):
             "label": item.get("label") or base.get("label") or key,
             "description": item.get("description") or base.get("description") or "",
             "acquisition_mode": acquisition_mode(
-                item.get("acquisition_mode"), base.get("acquisition_mode", ACQUISITION_SCAN)
+                item.get("acquisition_mode"),
+                base.get("acquisition_mode", ACQUISITION_SCAN),
             ),
             "source_group": item.get("source_group")
             or base.get("source_group")
@@ -235,9 +235,7 @@ def source_definition_from_config(key, item, base=None):
 
 def all_source_definitions(config=None, include_system=True):
     """Return collector/action source metadata for UI source grouping."""
-    definitions = {
-        item["key"]: dict(item) for item in FALLBACK_COLLECTOR_DEFINITIONS
-    }
+    definitions = {item["key"]: dict(item) for item in FALLBACK_COLLECTOR_DEFINITIONS}
     for key, item in ((config or {}).get("collectors") or {}).items():
         definitions[key] = source_definition_from_config(
             key, item, definitions.get(key)

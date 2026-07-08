@@ -29,6 +29,7 @@ from .hardware import (
     wireless_interfaces,
 )
 
+
 def managed_scan_interfaces():
     """Return Wi-Fi interfaces that are not currently in monitor mode."""
     monitors = set(monitor_mode_interfaces())
@@ -98,7 +99,9 @@ class WiFiCollector(BaseCollector):
                 candidates = [route_iface] + [
                     iface for iface in candidates if iface != route_iface
                 ]
-        candidates = [iface for iface in candidates if self._mac_allows_interface(iface)]
+        candidates = [
+            iface for iface in candidates if self._mac_allows_interface(iface)
+        ]
         for interface in candidates:
             if interface in discovered or self.interface_exists(interface):
                 self.active_hardware = interface
@@ -114,9 +117,7 @@ class WiFiCollector(BaseCollector):
         """Start managed AP scans on the selected interface."""
         self._running = True
         if not self.detect():
-            await self.emit(
-                "collector_offline", {"reason": self.warning}, "warning"
-            )
+            await self.emit("collector_offline", {"reason": self.warning}, "warning")
             return
         await self.emit(
             "interface_mode",
@@ -223,9 +224,7 @@ class WiFiCollector(BaseCollector):
             summary = result.stdout.strip() or result.stderr.strip()
         except Exception as exc:
             summary = "ip link unavailable: {}".format(exc)
-        return "operstate={}, flags={}, link={}".format(
-            operstate, flags, summary
-        )
+        return "operstate={}, flags={}, link={}".format(operstate, flags, summary)
 
     def read_sys_value(self, iface, name):
         """Read one /sys/class/net value, returning 'unknown' on failure."""
@@ -254,9 +253,7 @@ class WiFiCollector(BaseCollector):
 
     def selected_scan_tool(self, iface):
         """Return the configured or auto-selected scan tool for this run."""
-        configured = (
-            str(self.config.get("scan_tool", "auto") or "auto").strip().lower()
-        )
+        configured = str(self.config.get("scan_tool", "auto") or "auto").strip().lower()
         if configured in ("iw", "iwlist"):
             # Honor an explicit admin choice, even if auto would prefer another
             # tool. This is useful on older distributions with partial iw data.
@@ -319,9 +316,7 @@ class WiFiCollector(BaseCollector):
             if line.startswith("SSID:"):
                 current["ssid"] = line.split("SSID:", 1)[1].strip()
             elif line.startswith("signal:"):
-                current["rssi"] = self.parse_signal_dbm(
-                    line.split("signal:", 1)[1]
-                )
+                current["rssi"] = self.parse_signal_dbm(line.split("signal:", 1)[1])
             elif line.startswith("freq:"):
                 frequency = line.split("freq:", 1)[1].strip()
                 current["frequency_mhz"] = self.parse_frequency_mhz(frequency)
@@ -355,9 +350,7 @@ class WiFiCollector(BaseCollector):
         current = None
         for raw_line in output.splitlines():
             line = raw_line.strip()
-            match = re.match(
-                r"Cell\s+\d+\s+-\s+Address:\s+([0-9a-fA-F:]+)", line
-            )
+            match = re.match(r"Cell\s+\d+\s+-\s+Address:\s+([0-9a-fA-F:]+)", line)
             if match:
                 # Each Cell block corresponds to one visible access point.
                 if current:
@@ -383,17 +376,13 @@ class WiFiCollector(BaseCollector):
                 channel = re.search(r"Channel\s+(\d+)", line)
                 if channel:
                     current["channel"] = int(channel.group(1))
-                    current["frequency_band"] = self.channel_band(
-                        current["channel"]
-                    )
+                    current["frequency_band"] = self.channel_band(current["channel"])
             elif "Signal level=" in line:
                 current["rssi"] = self.parse_signal_dbm(
                     line.split("Signal level=", 1)[1]
                 )
             elif line.startswith("Encryption key:"):
-                current["encryption"] = (
-                    "WEP/unknown" if line.endswith("on") else "open"
-                )
+                current["encryption"] = "WEP/unknown" if line.endswith("on") else "open"
             elif line.startswith("IE: IEEE 802.11i/WPA2"):
                 current["encryption"] = self.merge_encryption(
                     current["encryption"], "WPA2"

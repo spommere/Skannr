@@ -11,7 +11,6 @@ from .bus import local_now
 from .identity_policy import bluetooth_property_like_name
 from .log_utils import now_epoch, record_time_epoch, save_json_atomic, timestamp_epoch
 
-
 DEFAULT_ANALYSIS_CONFIG = {
     "new_device_window_sec": 3600,
     "strong_wifi_rssi": -50,
@@ -89,9 +88,7 @@ class HistoryAnalyzer:
                 "warning": sum(
                     1 for item in observations if item["severity"] == "warning"
                 ),
-                "info": sum(
-                    1 for item in observations if item["severity"] == "info"
-                ),
+                "info": sum(1 for item in observations if item["severity"] == "info"),
             },
         }
 
@@ -132,9 +129,7 @@ class HistoryAnalyzer:
                         "{} ({}) advertises {}".format(
                             ssid, bssid, ", ".join(encryptions)
                         ),
-                        self.with_extra_evidence(
-                            evidence, {"encryption": encryptions}
-                        ),
+                        self.with_extra_evidence(evidence, {"encryption": encryptions}),
                         70,
                     )
                 )
@@ -151,9 +146,7 @@ class HistoryAnalyzer:
                         "{} ({}) has mixed encryption history: {}".format(
                             ssid, bssid, ", ".join(encryptions)
                         ),
-                        self.with_extra_evidence(
-                            evidence, {"encryption": encryptions}
-                        ),
+                        self.with_extra_evidence(evidence, {"encryption": encryptions}),
                         82,
                     )
                 )
@@ -190,9 +183,7 @@ class HistoryAnalyzer:
                         "{} ({}) was seen on channels {}".format(
                             ssid, bssid, ", ".join(channels)
                         ),
-                        self.with_extra_evidence(
-                            evidence, {"channels": channels}
-                        ),
+                        self.with_extra_evidence(evidence, {"channels": channels}),
                         30 + min(len(channels), 5),
                     )
                 )
@@ -303,9 +294,7 @@ class HistoryAnalyzer:
                 )
             )
             same_ap_family = self.same_ap_bssid_family(bssids)
-            same_vendor_sibling_pairs = self.same_vendor_sibling_bssid_pairs(
-                bssids
-            )
+            same_vendor_sibling_pairs = self.same_vendor_sibling_bssid_pairs(bssids)
             vendor_mismatch = self.vendor_mismatch(
                 vendor_ouis, vendor_prefixes, vendor_names
             )
@@ -317,11 +306,7 @@ class HistoryAnalyzer:
             # BSSIDs. Same-vendor, same-security sets are also common for
             # Apple/eero/mesh deployments even when OUI blocks differ.
             likely_normal_multiband = (
-                (
-                    same_ap_family
-                    or same_vendor_sibling_pairs
-                    or same_vendor_name
-                )
+                (same_ap_family or same_vendor_sibling_pairs or same_vendor_name)
                 and not crypto_mismatch
                 and not vendor_mismatch
             )
@@ -369,17 +354,17 @@ class HistoryAnalyzer:
                         "vendor_prefixes": vendor_prefixes,
                         "vendor_names": vendor_names,
                         "new_bssids": [ap.get("bssid") for ap in new_aps],
-                        "strong_new_bssids": [
-                            ap.get("bssid") for ap in strong_new_aps
-                        ],
+                        "strong_new_bssids": [ap.get("bssid") for ap in strong_new_aps],
                         "same_ap_bssid_family": same_ap_family,
                         "same_vendor_sibling_bssid_pairs": same_vendor_sibling_pairs,
                         "same_vendor_name": same_vendor_name,
                         "vendor_mismatch": vendor_mismatch,
                     },
-                    88
-                    if severity == "warning" and strong_new_aps
-                    else (80 if severity == "warning" else 45),
+                    (
+                        88
+                        if severity == "warning" and strong_new_aps
+                        else (80 if severity == "warning" else 45)
+                    ),
                 )
             )
         return observations
@@ -426,9 +411,7 @@ class HistoryAnalyzer:
                         "{} probed watched SSID(s): {}".format(
                             mac, ", ".join(sensitive)
                         ),
-                        self.with_extra_evidence(
-                            evidence, {"ssids": sensitive}
-                        ),
+                        self.with_extra_evidence(evidence, {"ssids": sensitive}),
                         85,
                     )
                 )
@@ -447,11 +430,7 @@ class HistoryAnalyzer:
                         ),
                         self.with_extra_evidence(
                             evidence,
-                            {
-                                "blank_ssid_count": client.get(
-                                    "blank_ssid_count"
-                                )
-                            },
+                            {"blank_ssid_count": client.get("blank_ssid_count")},
                         ),
                         35,
                     )
@@ -520,18 +499,12 @@ class HistoryAnalyzer:
                         "ble_device_strong",
                         "Strong nearby BLE device",
                         "{} max RSSI is {} dBm".format(name, signal_max),
-                        self.with_extra_evidence(
-                            evidence, {"signal_max": signal_max}
-                        ),
+                        self.with_extra_evidence(evidence, {"signal_max": signal_max}),
                         60,
                     )
                 )
             duration = self.record_duration_seconds(device)
-            if (
-                recent
-                and worthy
-                and duration >= float(self.config["ble_linger_sec"])
-            ):
+            if recent and worthy and duration >= float(self.config["ble_linger_sec"]):
                 observations.append(
                     self.observation(
                         timestamp,
@@ -607,10 +580,14 @@ class HistoryAnalyzer:
             and self.to_number(device.get("signal_max")) >= strong_threshold
         ]
         anonymous_devices = [
-            device for device in devices if not self.ble_individual_insight_worthy(device)
+            device
+            for device in devices
+            if not self.ble_individual_insight_worthy(device)
         ]
         anonymous_strong = [
-            device for device in strong_devices if not self.ble_individual_insight_worthy(device)
+            device
+            for device in strong_devices
+            if not self.ble_individual_insight_worthy(device)
         ]
         min_count = int(self.config.get("ble_population_min_count", 10))
         min_strong = int(self.config.get("ble_population_min_strong_count", 3))
@@ -631,9 +608,7 @@ class HistoryAnalyzer:
             float(self.config.get("recent_activity_window_sec", 1800)) / 60
         )
         parts = [
-            "{} BLE device(s) seen in the last {} min".format(
-                len(devices), window_min
-            ),
+            "{} BLE device(s) seen in the last {} min".format(len(devices), window_min),
             "{} anonymous/randomized".format(len(anonymous_devices)),
             "{} strong".format(len(strong_devices)),
         ]
@@ -646,9 +621,7 @@ class HistoryAnalyzer:
             "anonymous_strong_count": len(anonymous_strong),
             "manufacturers": manufacturers,
             "sample_macs": [
-                device.get("mac")
-                for device in strongest[:12]
-                if device.get("mac")
+                device.get("mac") for device in strongest[:12] if device.get("mac")
             ],
             "signal_max": strongest_signal,
             "last_seen": (latest or {}).get("last_seen"),
@@ -725,7 +698,9 @@ class HistoryAnalyzer:
         """Suppress old one-off anonymous BLE rows from short-horizon Insights."""
         if not isinstance(device, dict):
             return True
-        transports = set(value.lower() for value in self.list_values(device.get("transports")))
+        transports = set(
+            value.lower() for value in self.list_values(device.get("transports"))
+        )
         if "classic" in transports or "bt_classic" in transports:
             return False
         if self.meaningful_bluetooth_names(device):
@@ -753,9 +728,8 @@ class HistoryAnalyzer:
         last_seen = record_time_epoch(device, "last_seen")
         if last_seen is None:
             return False
-        return (
-            self._generated_at_epoch - last_seen
-            > float(self.config["ble_ignore_stale_single_seen_sec"])
+        return self._generated_at_epoch - last_seen > float(
+            self.config["ble_ignore_stale_single_seen_sec"]
         )
 
     def meaningful_bluetooth_names(self, device):
@@ -807,9 +781,7 @@ class HistoryAnalyzer:
                         "mac_count": len(randomized),
                         "sample": randomized[:25],
                         "last_seen": (latest or {}).get("last_seen"),
-                        "last_seen_epoch": record_time_epoch(
-                            latest, "last_seen"
-                        ),
+                        "last_seen_epoch": record_time_epoch(latest, "last_seen"),
                     },
                     75,
                 )
@@ -830,15 +802,18 @@ class HistoryAnalyzer:
                 continue
             title = "RTL-433 decoded device activity"
             severity = "warning" if category in ("tpms", "security") else "info"
-            label = " ".join(
-                part
-                for part in (
-                    data.get("model") or "",
-                    data.get("id") or "",
-                    data.get("channel") or "",
-                )
-                if part
-            ).strip() or "RTL-433 device"
+            label = (
+                " ".join(
+                    part
+                    for part in (
+                        data.get("model") or "",
+                        data.get("id") or "",
+                        data.get("channel") or "",
+                    )
+                    if part
+                ).strip()
+                or "RTL-433 device"
+            )
             detail = "{}; {}; {} event(s)".format(
                 label,
                 self.rtl433_category_label(category),
@@ -912,8 +887,7 @@ class HistoryAnalyzer:
             "timestamp": display_timestamp,
             "timestamp_epoch": display_epoch,
             "generated_at": timestamp,
-            "generated_at_epoch": self._generated_at_epoch
-            or self.to_epoch(timestamp),
+            "generated_at_epoch": self._generated_at_epoch or self.to_epoch(timestamp),
             "severity": severity,
             "source": source,
             "type": obs_type,
@@ -943,9 +917,7 @@ class HistoryAnalyzer:
             "ssid": ssid,
             "bssid": bssid,
             "vendor_oui": ap.get("vendor_oui") or "",
-            "vendor_prefix": ap.get("vendor_prefix")
-            or ap.get("vendor_oui")
-            or "",
+            "vendor_prefix": ap.get("vendor_prefix") or ap.get("vendor_oui") or "",
             "vendor_name": ap.get("vendor_name") or "",
             "first_seen": ap.get("first_seen") or "",
             "first_seen_epoch": record_time_epoch(ap, "first_seen"),
@@ -1012,9 +984,7 @@ class HistoryAnalyzer:
         if len(normalized) < 2:
             return False
 
-        prefix_bytes = int(
-            self.config.get("wifi_same_ap_bssid_prefix_bytes", 5)
-        )
+        prefix_bytes = int(self.config.get("wifi_same_ap_bssid_prefix_bytes", 5))
         prefix_len = max(1, min(prefix_bytes, 5)) * 2
         prefixes = set(value[:prefix_len] for value in normalized)
         if len(prefixes) != 1:
@@ -1034,9 +1004,7 @@ class HistoryAnalyzer:
         evil twin by itself.
         """
         normalized = sorted(
-            value
-            for value in (self.normalized_mac(item) for item in bssids)
-            if value
+            value for value in (self.normalized_mac(item) for item in bssids) if value
         )
         if len(normalized) < 2:
             return False
@@ -1080,11 +1048,7 @@ class HistoryAnalyzer:
             return False
         if len(name_values) > 1:
             return True
-        return (
-            len(oui_values) > 1
-            or len(prefix_values) > 1
-            or len(name_values) > 1
-        )
+        return len(oui_values) > 1 or len(prefix_values) > 1 or len(name_values) > 1
 
     def vendor_value_set(self, values):
         """Normalize vendor evidence while ignoring unknown placeholders."""
@@ -1155,10 +1119,7 @@ class HistoryAnalyzer:
         state = (
             "recent"
             if age
-            <= (
-                float(self.config.get("recent_activity_window_sec", 1800))
-                / 60.0
-            )
+            <= (float(self.config.get("recent_activity_window_sec", 1800)) / 60.0)
             else "stale"
         )
         return {
@@ -1210,27 +1171,21 @@ class HistoryAnalyzer:
         durations = [
             self.to_number(session.get("duration_sec")) for session in sessions
         ]
-        durations = [
-            value for value in durations if value is not None and value > 0
-        ]
+        durations = [value for value in durations if value is not None and value > 0]
         return {
             "arrival": self.format_minute(start_center),
             "departure": self.format_minute(end_center),
             "arrival_matches": start_count,
             "departure_matches": end_count,
             "session_count": len(sessions),
-            "typical_duration_min": int((sum(durations) / len(durations)) / 60)
-            if durations
-            else 0,
+            "typical_duration_min": (
+                int((sum(durations) / len(durations)) / 60) if durations else 0
+            ),
         }
 
     def minute_of_day(self, record, field=None):
         """Convert a timestamp into local minute-of-day for pattern grouping."""
-        epoch = (
-            record_time_epoch(record, field)
-            if field
-            else timestamp_epoch(record)
-        )
+        epoch = record_time_epoch(record, field) if field else timestamp_epoch(record)
         if epoch is not None:
             parsed = datetime.fromtimestamp(epoch)
             return parsed.hour * 60 + parsed.minute
@@ -1270,16 +1225,13 @@ class HistoryAnalyzer:
     def has_weak_crypto(self, encryptions):
         """Treat open/WEP as weak, and legacy WPA as weaker than WPA2/WPA3."""
         lowered = [value.lower() for value in encryptions]
-        return any(
-            value in ("open", "wep", "wep/unknown", "wpa") for value in lowered
-        )
+        return any(value in ("open", "wep", "wep/unknown", "wpa") for value in lowered)
 
     def has_crypto_mismatch(self, encryptions):
         """Flag SSIDs with both strong and weak/open encryption present."""
         lowered = [value.lower() for value in encryptions]
         has_strong = any(
-            "wpa2" in value or "wpa3" in value or "rsn" in value
-            for value in lowered
+            "wpa2" in value or "wpa3" in value or "rsn" in value for value in lowered
         )
         return has_strong and self.has_weak_crypto(encryptions)
 

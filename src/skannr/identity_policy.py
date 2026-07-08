@@ -79,7 +79,9 @@ def generated_bluetooth_group_label(value):
         "randomized device found",
         "randomized devices found",
     )
-    return any(text == suffix or text.endswith(" " + suffix) for suffix in generated_suffixes)
+    return any(
+        text == suffix or text.endswith(" " + suffix) for suffix in generated_suffixes
+    )
 
 
 def meaningful_bluetooth_names(record):
@@ -143,7 +145,7 @@ def cleaned_bluetooth_manufacturer_text(value):
     text = re.sub(r"\s*\(0x[0-9a-f]{4,}\)\s*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*\[0x[0-9a-f]{4,}\]\s*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+0x[0-9a-f]{4,}\s*$", "", text, flags=re.IGNORECASE)
-    return text.strip(' ,;-')
+    return text.strip(" ,;-")
 
 
 def bluetooth_visible_manufacturer_label(value):
@@ -197,7 +199,9 @@ def low_identity_bluetooth_record(record):
     ):
         if (record or {}).get(field):
             return False
-    transports = set(str(item).lower() for item in list_values((record or {}).get("transports")))
+    transports = set(
+        str(item).lower() for item in list_values((record or {}).get("transports"))
+    )
     if "bt_classic" in transports or "classic" in transports:
         return False
     return True
@@ -213,11 +217,17 @@ def stable_bluetooth_mac_record(record):
     """
     if (record or {}).get("grouped_randomized"):
         return False
-    if (record or {}).get("randomized_mac") or locally_administered_mac((record or {}).get("mac")):
+    if (record or {}).get("randomized_mac") or locally_administered_mac(
+        (record or {}).get("mac")
+    ):
         return False
     first_seen = numeric_epoch((record or {}).get("first_seen_epoch"))
     last_seen = numeric_epoch((record or {}).get("last_seen_epoch"))
-    time_span = (last_seen - first_seen) if first_seen is not None and last_seen is not None else 0
+    time_span = (
+        (last_seen - first_seen)
+        if first_seen is not None and last_seen is not None
+        else 0
+    )
     if (record or {}).get("active_session") and time_span >= 3600:
         return True
     try:
@@ -278,7 +288,9 @@ def bluetooth_group_label(record):
         return "Apple Find My accessory randomized devices"
     if kind == "name":
         return "{} randomized Bluetooth devices".format(label)
-    display = bluetooth_visible_manufacturer_label(record) or bluetooth_visible_manufacturer_label(label)
+    display = bluetooth_visible_manufacturer_label(
+        record
+    ) or bluetooth_visible_manufacturer_label(label)
     if display:
         return "{} randomized Bluetooth devices".format(display)
     return "Randomized Bluetooth devices"
@@ -286,7 +298,10 @@ def bluetooth_group_label(record):
 
 def low_identity_wifi_client(record):
     """Return True for randomized Wi-Fi client/probe MACs."""
-    return bool((record or {}).get("randomized_mac") or locally_administered_mac((record or {}).get("mac")))
+    return bool(
+        (record or {}).get("randomized_mac")
+        or locally_administered_mac((record or {}).get("mac"))
+    )
 
 
 def wifi_client_group_label(_record=None):

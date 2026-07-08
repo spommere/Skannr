@@ -23,7 +23,6 @@ from .wifi_monitor import WiFiMonitorCollector
 from .base import STATE_DISABLED
 from .metadata import collector_keys
 
-
 # Startup order controls the row order in System Status. The class map stays
 # explicit, while collectors.metadata owns the shared display order and labels.
 COLLECTOR_CLASS_BY_KEY = {
@@ -113,7 +112,9 @@ def disabled_collector_statuses(config):
                 "events_this_session": 0,
                 "last_event": None,
                 "last_event_epoch": None,
-                "warning": "" if section is not None else "No local collector config file.",
+                "warning": (
+                    "" if section is not None else "No local collector config file."
+                ),
                 "enabled": False,
             }
         )

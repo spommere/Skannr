@@ -22,7 +22,6 @@ from .collectors.swpc import clean_swpc_data, number_or_none, swpc_event_is_aler
 from .collectors.usgs import clean_usgs_data
 from .log_utils import event_time_epoch, now_epoch, timestamp_epoch
 
-
 DEFAULT_FINDINGS_CONFIG = {
     "enabled": True,
     "max_items": 200,
@@ -109,9 +108,7 @@ class FindingsEngine:
         if not self.enabled:
             return None
         replayed = 0
-        for event in sorted(
-            events or [], key=lambda item: event_time_epoch(item) or 0
-        ):
+        for event in sorted(events or [], key=lambda item: event_time_epoch(item) or 0):
             if event.get("collector") == "findings":
                 continue
             self.process(event, emit=False)
@@ -156,21 +153,25 @@ class FindingsEngine:
                 or 0,
                 "ssid": ap.get("ssid") or "",
                 "rssi": ap.get("signal_latest"),
-                "channel": (ap.get("channels") or [None])[-1]
-                if isinstance(ap.get("channels"), list)
-                else None,
-                "source": "wifi_monitor"
-                if "wifi_monitor" in (ap.get("sources") or [])
-                else "wifi",
+                "channel": (
+                    (ap.get("channels") or [None])[-1]
+                    if isinstance(ap.get("channels"), list)
+                    else None
+                ),
+                "source": (
+                    "wifi_monitor"
+                    if "wifi_monitor" in (ap.get("sources") or [])
+                    else "wifi"
+                ),
                 "vendor_oui": ap.get("vendor_oui") or "",
-                "vendor_prefix": ap.get("vendor_prefix")
-                or ap.get("vendor_oui")
-                or "",
+                "vendor_prefix": ap.get("vendor_prefix") or ap.get("vendor_oui") or "",
                 "vendor_name": ap.get("vendor_name") or "",
                 "strong_reported": self._is_strong(
-                    ap.get("signal_max")
-                    if ap.get("signal_max") is not None
-                    else ap.get("signal_latest"),
+                    (
+                        ap.get("signal_max")
+                        if ap.get("signal_max") is not None
+                        else ap.get("signal_latest")
+                    ),
                     self.config["strong_wifi_ap_rssi"],
                 ),
             }
@@ -180,9 +181,7 @@ class FindingsEngine:
                 continue
             self.wifi_clients[mac] = {
                 "active": False,
-                "last_seen": client.get("last_seen")
-                or client.get("first_seen")
-                or "",
+                "last_seen": client.get("last_seen") or client.get("first_seen") or "",
                 "last_seen_epoch": self._to_epoch(
                     client.get("last_seen") or client.get("first_seen")
                 )
@@ -190,9 +189,11 @@ class FindingsEngine:
                 "ssid": "",
                 "rssi": client.get("signal_latest"),
                 "blank_reported": bool(client.get("blank_ssid_count")),
-                "source": "wifi_monitor"
-                if "wifi_monitor" in (client.get("sources") or [])
-                else "wifi",
+                "source": (
+                    "wifi_monitor"
+                    if "wifi_monitor" in (client.get("sources") or [])
+                    else "wifi"
+                ),
                 "vendor_oui": client.get("vendor_oui") or "",
                 "vendor_prefix": client.get("vendor_prefix")
                 or client.get("vendor_oui")
@@ -217,68 +218,44 @@ class FindingsEngine:
         event_type = event.get("type")
         if collector in ("wifi", "wifi_monitor"):
             findings.extend(
-                self._process_wifi(
-                    collector, event_type, event, timestamp, now, emit
-                )
+                self._process_wifi(collector, event_type, event, timestamp, now, emit)
             )
         elif collector == "ble":
-            findings.extend(
-                self._process_ble(event_type, event, timestamp, now, emit)
-            )
+            findings.extend(self._process_ble(event_type, event, timestamp, now, emit))
         elif collector == "ble_identify":
             findings.extend(
                 self._process_ble_identify(event_type, event, timestamp, emit)
             )
         elif collector == "bt_classic":
             findings.extend(
-                self._process_bt_classic(
-                    event_type, event, timestamp, now, emit
-                )
+                self._process_bt_classic(event_type, event, timestamp, now, emit)
             )
         elif collector == "rtl433":
-            findings.extend(
-                self._process_rtl433(event_type, event, timestamp, emit)
-            )
+            findings.extend(self._process_rtl433(event_type, event, timestamp, emit))
         elif collector == "adsb":
-            findings.extend(
-                self._process_adsb(event_type, event, timestamp, emit)
-            )
+            findings.extend(self._process_adsb(event_type, event, timestamp, emit))
         elif collector == "rayhunter":
-            findings.extend(
-                self._process_rayhunter(event_type, event, timestamp, emit)
-            )
+            findings.extend(self._process_rayhunter(event_type, event, timestamp, emit))
         elif collector == "aprsis":
             findings.extend(
                 self._process_aprsis(event_type, event, timestamp, now, emit)
             )
         elif collector == "noaa":
-            findings.extend(
-                self._process_noaa(event_type, event, timestamp, emit)
-            )
+            findings.extend(self._process_noaa(event_type, event, timestamp, emit))
         elif collector == "usgs":
-            findings.extend(
-                self._process_usgs(event_type, event, timestamp, emit)
-            )
+            findings.extend(self._process_usgs(event_type, event, timestamp, emit))
         elif collector == "swpc":
-            findings.extend(
-                self._process_swpc(event_type, event, timestamp, emit)
-            )
+            findings.extend(self._process_swpc(event_type, event, timestamp, emit))
         elif collector == "pws":
-            findings.extend(
-                self._process_pws(event_type, event, timestamp, now, emit)
-            )
+            findings.extend(self._process_pws(event_type, event, timestamp, now, emit))
         elif collector == "lan":
-            findings.extend(
-                self._process_lan(event_type, event, timestamp, emit)
-            )
+            findings.extend(self._process_lan(event_type, event, timestamp, emit))
         elif collector == "lan_identify":
             findings.extend(
                 self._process_lan_identify(event_type, event, timestamp, emit)
             )
         elif collector == "system":
-            findings.extend(
-                self._process_system(event_type, event, timestamp, emit)
-            )
+            findings.extend(self._process_system(event_type, event, timestamp, emit))
 
         if emit:
             for finding in findings:
@@ -297,13 +274,9 @@ class FindingsEngine:
         if event_type == "ap_beacon":
             return self._wifi_ap_beacon(source, data, timestamp, now, emit)
         if event_type in ("deauth_seen", "disassoc_seen"):
-            return self._wifi_disruption(
-                source, event_type, data, timestamp, emit
-            )
+            return self._wifi_disruption(source, event_type, data, timestamp, emit)
         if event_type in ("collector_offline", "collector_retrying"):
-            return self._collector_warning(
-                source, event_type, data, timestamp, emit
-            )
+            return self._collector_warning(source, event_type, data, timestamp, emit)
         if event_type == "interface_mode" and data.get("warning"):
             return self._finding_list(
                 timestamp,
@@ -350,9 +323,7 @@ class FindingsEngine:
             "blank_reported": blank_reported or not ssid,
             "source": source,
             "vendor_oui": data.get("vendor_oui") or "",
-            "vendor_prefix": data.get("vendor_prefix")
-            or data.get("vendor_oui")
-            or "",
+            "vendor_prefix": data.get("vendor_prefix") or data.get("vendor_oui") or "",
             "vendor_name": data.get("vendor_name") or "",
         }
 
@@ -365,7 +336,9 @@ class FindingsEngine:
             )
             or (
                 source != "wifi_monitor"
-                and (previous is None or not was_active or self._is_return(previous, now))
+                and (
+                    previous is None or not was_active or self._is_return(previous, now)
+                )
             )
         ):
             findings.extend(
@@ -394,9 +367,7 @@ class FindingsEngine:
                     source,
                     "wifi_probe_blank_ssid",
                     "Blank Wi-Fi probe",
-                    "Client {} sent a probe request without an SSID".format(
-                        mac
-                    ),
+                    "Client {} sent a probe request without an SSID".format(mac),
                     "wifi-blank-probe:{}".format(mac),
                     emit,
                     self.wifi_client_attributes(mac, "", data),
@@ -444,9 +415,7 @@ class FindingsEngine:
         findings.extend(
             self._wifi_sensitive_probe(source, mac, ssid, timestamp, emit, data)
         )
-        findings.extend(
-            self._wifi_probe_burst(source, mac, ssid, timestamp, now, emit)
-        )
+        findings.extend(self._wifi_probe_burst(source, mac, ssid, timestamp, now, emit))
         return findings
 
     def _wifi_sensitive_probe(self, source, mac, ssid, timestamp, emit, data):
@@ -499,9 +468,7 @@ class FindingsEngine:
             ),
             "wifi-probe-burst:{}".format(mac),
             emit,
-            self.wifi_client_attributes(
-                mac, ssid, self.wifi_clients.get(mac) or {}
-            ),
+            self.wifi_client_attributes(mac, ssid, self.wifi_clients.get(mac) or {}),
         )
 
     def wifi_client_attributes(self, mac, ssid, data):
@@ -510,9 +477,7 @@ class FindingsEngine:
             "ssid": ssid,
             "mac": mac,
             "vendor_oui": data.get("vendor_oui") or "",
-            "vendor_prefix": data.get("vendor_prefix")
-            or data.get("vendor_oui")
-            or "",
+            "vendor_prefix": data.get("vendor_prefix") or data.get("vendor_oui") or "",
             "vendor_name": data.get("vendor_name") or "",
         }
 
@@ -522,9 +487,7 @@ class FindingsEngine:
             "ssid": ssid,
             "bssid": bssid,
             "vendor_oui": data.get("vendor_oui") or "",
-            "vendor_prefix": data.get("vendor_prefix")
-            or data.get("vendor_oui")
-            or "",
+            "vendor_prefix": data.get("vendor_prefix") or data.get("vendor_oui") or "",
             "vendor_name": data.get("vendor_name") or "",
         }
 
@@ -558,9 +521,7 @@ class FindingsEngine:
             "channel": data.get("channel"),
             "source": source,
             "vendor_oui": data.get("vendor_oui") or "",
-            "vendor_prefix": data.get("vendor_prefix")
-            or data.get("vendor_oui")
-            or "",
+            "vendor_prefix": data.get("vendor_prefix") or data.get("vendor_oui") or "",
             "vendor_name": data.get("vendor_name") or "",
             "strong_reported": strong_reported or strong_now,
         }
@@ -622,9 +583,7 @@ class FindingsEngine:
             event_type,
             title,
             detail,
-            "{}:{}:{}".format(
-                event_type, transmitter, receiver
-            ),
+            "{}:{}:{}".format(event_type, transmitter, receiver),
             emit,
             {
                 "mac": transmitter,
@@ -654,9 +613,7 @@ class FindingsEngine:
                 emit,
             )
         if event_type in ("collector_offline", "collector_retrying"):
-            return self._collector_warning(
-                "ble", event_type, data, timestamp, emit
-            )
+            return self._collector_warning("ble", event_type, data, timestamp, emit)
         return []
 
     def _ble_device_seen(self, data, timestamp, now, emit):
@@ -693,9 +650,8 @@ class FindingsEngine:
             "findmy_hint": data.get("findmy_hint") or "",
         }
 
-        if (
-            self.ble_live_finding_worthy(data)
-            and (previous is None or not was_active or self._is_return(previous, now))
+        if self.ble_live_finding_worthy(data) and (
+            previous is None or not was_active or self._is_return(previous, now)
         ):
             findings.extend(
                 self._finding_list(
@@ -774,9 +730,7 @@ class FindingsEngine:
             "ble",
             "ble_rssi_change",
             "BLE signal changed",
-            "{} moved {}: {} dBm to {} dBm".format(
-                mac, direction, old_rssi, new_rssi
-            ),
+            "{} moved {}: {} dBm to {} dBm".format(mac, direction, old_rssi, new_rssi),
             "ble-rssi-change:{}".format(mac),
             emit,
             self.ble_attributes(mac, current.get("name") or "", current),
@@ -868,8 +822,7 @@ class FindingsEngine:
                 "ble_identify",
                 "ble_identity_failed",
                 "BLE identify failed",
-                data.get("reason")
-                or "Device Information Service was not readable",
+                data.get("reason") or "Device Information Service was not readable",
                 "ble-identify-failed:{}".format(mac),
                 emit,
                 {"mac": mac},
@@ -893,11 +846,7 @@ class FindingsEngine:
                 "manufacturer": data.get("vendor_name") or "",
                 "transport": "classic",
             }
-            if (
-                previous is None
-                or not was_active
-                or self._is_return(previous, now)
-            ):
+            if previous is None or not was_active or self._is_return(previous, now):
                 title = (
                     "New classic Bluetooth device"
                     if previous is None
@@ -956,9 +905,7 @@ class FindingsEngine:
             "name": data.get("name") or "",
             "transport": "classic",
             "vendor_prefix": data.get("vendor_prefix") or "",
-            "vendor_name": data.get("vendor_name")
-            or data.get("manufacturer")
-            or "",
+            "vendor_name": data.get("vendor_name") or data.get("manufacturer") or "",
             "class": data.get("class") or "",
         }
 
@@ -977,10 +924,27 @@ class FindingsEngine:
 
     def _collector_warning(self, source, event_type, data, timestamp, emit):
         """Return a normalized collector health finding."""
-        severity = "warning" if event_type in ("collector_offline", "collector_retrying") else "info"
-        state = "offline" if event_type == "collector_offline" else "retrying" if event_type == "collector_retrying" else event_type.replace("_", " ")
+        severity = (
+            "warning"
+            if event_type in ("collector_offline", "collector_retrying")
+            else "info"
+        )
+        state = (
+            "offline"
+            if event_type == "collector_offline"
+            else (
+                "retrying"
+                if event_type == "collector_retrying"
+                else event_type.replace("_", " ")
+            )
+        )
         name = data.get("name") or data.get("collector") or source
-        detail = data.get("warning") or data.get("reason") or data.get("message") or "{} is {}".format(name, state)
+        detail = (
+            data.get("warning")
+            or data.get("reason")
+            or data.get("message")
+            or "{} is {}".format(name, state)
+        )
         return self._finding_list(
             timestamp,
             severity,
@@ -1005,27 +969,48 @@ class FindingsEngine:
         if previous is not None:
             return []
         return self._finding_list(
-            timestamp, "info", "aprsis", "aprsis_subject_seen",
-            "New APRS-IS subject", "{} observed on APRS-IS".format(callsign),
-            "aprsis-subject:{}".format(callsign), emit, data
+            timestamp,
+            "info",
+            "aprsis",
+            "aprsis_subject_seen",
+            "New APRS-IS subject",
+            "{} observed on APRS-IS".format(callsign),
+            "aprsis-subject:{}".format(callsign),
+            emit,
+            data,
         )
 
     def _process_noaa(self, event_type, event, timestamp, emit):
         data = clean_noaa_data(event.get("data") or {})
         if event_type in ("collector_offline", "collector_retrying"):
             return self._collector_warning("noaa", event_type, data, timestamp, emit)
-        event_id = data.get("event_id") or data.get("source_event_id") or data.get("headline") or event_type
+        event_id = (
+            data.get("event_id")
+            or data.get("source_event_id")
+            or data.get("headline")
+            or event_type
+        )
         self.noaa_alerts[event_id] = data
-        alertish = event_type in ("noaa_weather_alert", "noaa_tsunami_alert", "noaa_tropical_advisory")
+        alertish = event_type in (
+            "noaa_weather_alert",
+            "noaa_tsunami_alert",
+            "noaa_tropical_advisory",
+        )
         if event_type == "noaa_tsunami_alert":
             alertish = tsunami_is_alertworthy(data)
         if not alertish:
             return []
         title = data.get("headline") or data.get("event") or "NOAA alert"
         return self._finding_list(
-            timestamp, "warning", "noaa", event_type, title,
+            timestamp,
+            "warning",
+            "noaa",
+            event_type,
+            title,
             data.get("description") or data.get("summary") or title,
-            "noaa:{}".format(event_id), emit, data
+            "noaa:{}".format(event_id),
+            emit,
+            data,
         )
 
     def _process_usgs(self, event_type, event, timestamp, emit):
@@ -1041,23 +1026,41 @@ class FindingsEngine:
             return []
         title = data.get("title") or "USGS earthquake"
         return self._finding_list(
-            timestamp, "warning", "usgs", "usgs_significant_earthquake",
-            title, "Magnitude {} earthquake reported".format(magnitude),
-            "usgs:{}".format(event_id), emit, data
+            timestamp,
+            "warning",
+            "usgs",
+            "usgs_significant_earthquake",
+            title,
+            "Magnitude {} earthquake reported".format(magnitude),
+            "usgs:{}".format(event_id),
+            emit,
+            data,
         )
 
     def _process_swpc(self, event_type, event, timestamp, emit):
         data = clean_swpc_data(event.get("data") or {})
         if event_type in ("collector_offline", "collector_retrying"):
             return self._collector_warning("swpc", event_type, data, timestamp, emit)
-        event_id = data.get("event_id") or data.get("product_id") or data.get("message_id") or event_type
+        event_id = (
+            data.get("event_id")
+            or data.get("product_id")
+            or data.get("message_id")
+            or event_type
+        )
         self.swpc_events[event_id] = data
         if not swpc_event_is_alert(data):
             return []
         title = data.get("title") or data.get("message") or "SWPC space weather alert"
         return self._finding_list(
-            timestamp, "warning", "swpc", "swpc_alert", title,
-            data.get("summary") or title, "swpc:{}".format(event_id), emit, data
+            timestamp,
+            "warning",
+            "swpc",
+            "swpc_alert",
+            title,
+            data.get("summary") or title,
+            "swpc:{}".format(event_id),
+            emit,
+            data,
         )
 
     def _process_pws(self, event_type, event, timestamp, now, emit):
@@ -1071,23 +1074,43 @@ class FindingsEngine:
     def _process_rayhunter(self, event_type, event, timestamp, emit):
         data = clean_rayhunter_data(event.get("data") or {})
         if event_type in ("collector_offline", "collector_retrying"):
-            return self._collector_warning("rayhunter", event_type, data, timestamp, emit)
-        endpoint = clean_rayhunter_field(data.get("endpoint") or data.get("url") or "rayhunter")
+            return self._collector_warning(
+                "rayhunter", event_type, data, timestamp, emit
+            )
+        endpoint = clean_rayhunter_field(
+            data.get("endpoint") or data.get("url") or "rayhunter"
+        )
         self.rayhunter_endpoints[endpoint] = data
-        status_text = " ".join(str(data.get(key) or "") for key in ("status", "warning", "error", "recording"))
-        if not any(word in status_text.lower() for word in ("warn", "error", "fail", "missing")):
+        status_text = " ".join(
+            str(data.get(key) or "")
+            for key in ("status", "warning", "error", "recording")
+        )
+        if not any(
+            word in status_text.lower() for word in ("warn", "error", "fail", "missing")
+        ):
             return []
         return self._finding_list(
-            timestamp, "warning", "rayhunter", "rayhunter_status_warning",
-            "Rayhunter status warning", status_text.strip() or "Rayhunter reported a warning",
-            "rayhunter:{}".format(endpoint), emit, data
+            timestamp,
+            "warning",
+            "rayhunter",
+            "rayhunter_status_warning",
+            "Rayhunter status warning",
+            status_text.strip() or "Rayhunter reported a warning",
+            "rayhunter:{}".format(endpoint),
+            emit,
+            data,
         )
 
     def _process_lan(self, event_type, event, timestamp, emit):
         data = clean_lan_data(event.get("data") or {})
         if event_type in ("collector_offline", "collector_retrying"):
             return self._collector_warning("lan", event_type, data, timestamp, emit)
-        key = data.get("subject_key") or data.get("mac") or data.get("ip") or data.get("hostname")
+        key = (
+            data.get("subject_key")
+            or data.get("mac")
+            or data.get("ip")
+            or data.get("hostname")
+        )
         if key:
             self.lan_devices[key] = data
         if event_type == "lan_gateway_seen":
@@ -1098,14 +1121,27 @@ class FindingsEngine:
     def _process_lan_identify(self, event_type, event, timestamp, emit):
         data = clean_lan_data(event.get("data") or {})
         if event_type in ("collector_offline", "collector_retrying"):
-            return self._collector_warning("lan_identify", event_type, data, timestamp, emit)
+            return self._collector_warning(
+                "lan_identify", event_type, data, timestamp, emit
+            )
         if event_type != "identify_failed":
             return []
-        target = data.get("ip") or data.get("mac") or data.get("subject_key") or "LAN subject"
+        target = (
+            data.get("ip")
+            or data.get("mac")
+            or data.get("subject_key")
+            or "LAN subject"
+        )
         return self._finding_list(
-            timestamp, "warning", "lan_identify", "lan_identify_failed",
-            "LAN identify failed", data.get("reason") or "LAN identify failed for {}".format(target),
-            "lan-identify-failed:{}".format(target), emit, data
+            timestamp,
+            "warning",
+            "lan_identify",
+            "lan_identify_failed",
+            "LAN identify failed",
+            data.get("reason") or "LAN identify failed for {}".format(target),
+            "lan-identify-failed:{}".format(target),
+            emit,
+            data,
         )
 
     def _process_rtl433(self, event_type, event, timestamp, emit):
@@ -1120,15 +1156,18 @@ class FindingsEngine:
             return []
         previous = self.rtl433_subjects.get(key)
         self.rtl433_subjects[key] = data
-        label = " ".join(
-            part
-            for part in (
-                data.get("model") or "",
-                data.get("id") or "",
-                data.get("channel") or "",
-            )
-            if part
-        ).strip() or "RTL-433 device"
+        label = (
+            " ".join(
+                part
+                for part in (
+                    data.get("model") or "",
+                    data.get("id") or "",
+                    data.get("channel") or "",
+                )
+                if part
+            ).strip()
+            or "RTL-433 device"
+        )
         category = data.get("category") or "device"
         severity = "warning" if category in ("tpms", "security") else "info"
         title = "RTL-433 decoded signal"
@@ -1215,10 +1254,9 @@ class FindingsEngine:
         distance = self._to_number(data.get("distance_km"))
         if altitude is None or distance is None:
             return False
-        return (
-            altitude <= float(self.config.get("adsb_low_altitude_ft", 1500))
-            and distance <= float(self.config.get("adsb_nearby_radius_km", 10))
-        )
+        return altitude <= float(
+            self.config.get("adsb_low_altitude_ft", 1500)
+        ) and distance <= float(self.config.get("adsb_nearby_radius_km", 10))
 
     def _process_system(self, event_type, event, timestamp, emit):
         data = event.get("data") or {}

@@ -54,9 +54,7 @@ def bluetooth_adapters():
     """Return Bluetooth adapter names currently visible to Linux."""
     directory = "/sys/class/bluetooth"
     try:
-        return sorted(
-            name for name in os.listdir(directory) if name.startswith("hci")
-        )
+        return sorted(name for name in os.listdir(directory) if name.startswith("hci"))
     except OSError:
         return ["hci0"] if bluetoothctl_has_controller() else []
 
@@ -98,16 +96,20 @@ def bluetooth_adapter_mac(adapter):
     6.12).  ``hciconfig`` is the reliable fallback.
     """
     # Try sysfs first (works on x86, some ARM kernels).
-    mac = sysfs_read(
-        os.path.join("/sys/class/bluetooth", adapter, "address")
-    ).strip().lower()
+    mac = (
+        sysfs_read(os.path.join("/sys/class/bluetooth", adapter, "address"))
+        .strip()
+        .lower()
+    )
     if mac:
         return mac
     # Fall back to hciconfig output.
     try:
         output = subprocess.run(
             ["hciconfig", adapter],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         ).stdout
     except Exception:
         return ""
@@ -203,13 +205,9 @@ def configured_candidates(config, list_key, extra_keys=()):
     values = []
     configured = config.get(list_key)
     if isinstance(configured, str):
-        values.extend(
-            item.strip() for item in configured.split(",") if item.strip()
-        )
+        values.extend(item.strip() for item in configured.split(",") if item.strip())
     elif isinstance(configured, list):
-        values.extend(
-            str(item).strip() for item in configured if str(item).strip()
-        )
+        values.extend(str(item).strip() for item in configured if str(item).strip())
     for key in extra_keys:
         value = str(config.get(key) or "").strip()
         if value:
@@ -232,9 +230,7 @@ def sysfs_read(path):
 
 def wireless_interface_details(interface):
     """Return lightweight metadata useful for choosing Wi-Fi adapters."""
-    device_path = os.path.realpath(
-        os.path.join("/sys/class/net", interface, "device")
-    )
+    device_path = os.path.realpath(os.path.join("/sys/class/net", interface, "device"))
     driver_path = os.path.join(device_path, "driver")
     driver = (
         os.path.basename(os.path.realpath(driver_path))
@@ -250,9 +246,7 @@ def wireless_interface_details(interface):
         "product": "",
         "usb": False,
         "alfa_like": False,
-        "mac": sysfs_read(
-            os.path.join("/sys/class/net", interface, "address")
-        ).lower(),
+        "mac": sysfs_read(os.path.join("/sys/class/net", interface, "address")).lower(),
     }
     current = device_path
     for _ in range(8):

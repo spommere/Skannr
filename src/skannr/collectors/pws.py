@@ -11,7 +11,6 @@ import urllib.request
 from ..log_utils import format_epoch
 from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE, STATE_RETRYING
 
-
 AMBIENT_DEVICES_ENDPOINT = "https://api.ambientweather.net/v1/devices"
 PWS_FIELD_MAX = 240
 PWS_TEXT_MAX = 500
@@ -138,7 +137,11 @@ class PWSCollector(BaseCollector):
     name = "PWS"
     tab_label = "PWS"
     required_hardware = "Ambient Weather API"
-    subject_history_event_types = ("pws_weather", "collector_offline", "collector_retrying")
+    subject_history_event_types = (
+        "pws_weather",
+        "collector_offline",
+        "collector_retrying",
+    )
 
     @classmethod
     def hardware_status(cls, config):
@@ -318,12 +321,18 @@ class PWSCollector(BaseCollector):
             "timezone": compact_pws_text(last_data.get("tz")),
             "temperature_f": first_number(last_data, ("tempf", "tempF")),
             "humidity_percent": first_number(last_data, ("humidity", "humidityout")),
-            "dewpoint_f": first_number(last_data, ("dewPoint", "dewpoint", "dewpointf")),
+            "dewpoint_f": first_number(
+                last_data, ("dewPoint", "dewpoint", "dewpointf")
+            ),
             "feels_like_f": first_number(last_data, ("feelsLike", "feelslike")),
-            "indoor_temperature_f": first_number(last_data, ("tempinf", "tempin", "tempinF")),
+            "indoor_temperature_f": first_number(
+                last_data, ("tempinf", "tempin", "tempinF")
+            ),
             "indoor_humidity_percent": first_number(last_data, ("humidityin",)),
             "indoor_dewpoint_f": first_number(last_data, ("dewPointin", "dewpointin")),
-            "indoor_feels_like_f": first_number(last_data, ("feelsLikein", "feelslikein")),
+            "indoor_feels_like_f": first_number(
+                last_data, ("feelsLikein", "feelslikein")
+            ),
             "wind_direction_deg": first_number(last_data, ("winddir",)),
             "wind_direction_avg_10m_deg": first_number(last_data, ("winddir_avg10m",)),
             "wind_speed_mph": first_number(last_data, ("windspeedmph",)),
@@ -424,7 +433,9 @@ class PWSCollector(BaseCollector):
     def battery_text(self, data):
         """Return compact battery/status fields from Ambient lastData."""
         parts = []
-        for key in sorted(str(k) for k in (data or {}).keys() if str(k).startswith("batt")):
+        for key in sorted(
+            str(k) for k in (data or {}).keys() if str(k).startswith("batt")
+        ):
             value = data.get(key)
             if value in (None, ""):
                 continue

@@ -11,7 +11,6 @@ import re
 
 from .paths import DATA_COLLECTORS_DIR
 
-
 _VENDORS = None
 _vendor_cache = {}
 _vendor_cache_max = 1000
@@ -26,9 +25,7 @@ def normalize_oui(mac_or_oui):
     """Return AA:BB:CC from a MAC/OUI string, or None when not parseable."""
     text = str(mac_or_oui or "").strip().upper().replace("-", ":")
     parts = text.split(":")
-    if len(parts) >= 3 and all(
-        re.match(r"^[0-9A-F]{2}$", part) for part in parts[:3]
-    ):
+    if len(parts) >= 3 and all(re.match(r"^[0-9A-F]{2}$", part) for part in parts[:3]):
         return ":".join(parts[:3])
     compact = re.sub(r"[^0-9A-F]", "", text)
     if len(compact) >= 6:
@@ -45,9 +42,7 @@ def format_prefix(prefix):
     """Format a compact IEEE prefix as colon-separated display text."""
     if not prefix:
         return ""
-    pairs = [
-        prefix[index : index + 2] for index in range(0, len(prefix) - 1, 2)
-    ]
+    pairs = [prefix[index : index + 2] for index in range(0, len(prefix) - 1, 2)]
     if len(prefix) % 2:
         pairs.append(prefix[-1])
     return ":".join(pairs)
@@ -154,7 +149,10 @@ def _merge_no_overwrite(base, incoming, label):
         if key in base and base[key] != value:
             logging.warning(
                 "OUI registry collision: key=%s existing=%r incoming=%r source=%s",
-                key, base[key], value, label,
+                key,
+                base[key],
+                value,
+                label,
             )
         base[key] = value
 

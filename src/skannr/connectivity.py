@@ -2,7 +2,6 @@
 
 import socket
 
-
 DEFAULT_INTERNET_TARGETS = (
     ("1.1.1.1", 53),
     ("8.8.8.8", 53),

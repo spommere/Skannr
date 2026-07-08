@@ -26,7 +26,6 @@ from .collectors.swpc import (
 from .collectors.usgs import clean_usgs_data
 from .log_utils import event_time_epoch, now_epoch
 
-
 DEFAULT_ALERT_CONFIG = {
     "enabled": True,
     "max_items": 50,
@@ -258,13 +257,17 @@ class AlertEngine:
         event_type = event.get("type")
         data = event.get("data") or {}
         if collector in ("wifi", "wifi_monitor"):
-            alerts.extend(self.process_wifi(collector, event_type, data, timestamp, now, emit))
+            alerts.extend(
+                self.process_wifi(collector, event_type, data, timestamp, now, emit)
+            )
         elif collector == "ble":
             alerts.extend(self.process_ble(event_type, data, timestamp, now, emit))
         elif collector == "aprsis":
             alerts.extend(self.process_aprsis(event_type, data, timestamp, now, emit))
         elif collector == "rayhunter":
-            alerts.extend(self.process_rayhunter(event_type, data, timestamp, now, emit))
+            alerts.extend(
+                self.process_rayhunter(event_type, data, timestamp, now, emit)
+            )
         elif collector == "noaa":
             alerts.extend(self.process_noaa(event_type, data, timestamp, now, emit))
         elif collector == "usgs":
@@ -382,24 +385,28 @@ class AlertEngine:
         if event_type == "ap_beacon":
             return self.wifi_ap_alerts(source, data, timestamp, now, emit)
         if event_type in ("deauth_seen", "disassoc_seen"):
-            return self.wifi_disruption_alerts(source, event_type, data, timestamp, now, emit)
+            return self.wifi_disruption_alerts(
+                source, event_type, data, timestamp, now, emit
+            )
         if event_type in ("collector_offline", "collector_retrying"):
-            return self.collector_issue_alert(source, event_type, data, timestamp, now, emit)
+            return self.collector_issue_alert(
+                source, event_type, data, timestamp, now, emit
+            )
         return []
 
     def wifi_ap_alerts(self, source, data, timestamp, now, emit):
         """Return AP-level alerts such as drone or sensitive open SSID."""
         alerts = []
         drone_rule = self.rule("drone_wifi")
-        if drone_rule.get("enabled", True) and self.matches_drone_wifi(data, drone_rule):
+        if drone_rule.get("enabled", True) and self.matches_drone_wifi(
+            data, drone_rule
+        ):
             ssid = data.get("ssid") or "(blank)"
             bssid = data.get("bssid") or "unknown"
             rssi = self.to_number(data.get("rssi"))
             remote_id = self.is_remote_id_ssid(ssid)
             title = (
-                "Drone Remote ID broadcast seen"
-                if remote_id
-                else "Drone Wi-Fi AP seen"
+                "Drone Remote ID broadcast seen" if remote_id else "Drone Wi-Fi AP seen"
             )
             summary = "{}: {}; {}; {}".format(
                 "Drone Remote ID broadcast" if remote_id else "Drone Wi-Fi AP seen",
@@ -444,7 +451,9 @@ class AlertEngine:
             alerts.extend(
                 self.emit_alert(
                     "wifi_sensitive_open",
-                    "wifi-sensitive-open:{}:{}".format(ssid.lower(), normalized_key(bssid)),
+                    "wifi-sensitive-open:{}:{}".format(
+                        ssid.lower(), normalized_key(bssid)
+                    ),
                     sensitive_rule.get("level", "critical"),
                     source,
                     "Sensitive SSID is open",
@@ -473,7 +482,9 @@ class AlertEngine:
             return False
         ssid_match = pattern_match(data.get("ssid"), rule.get("ssid_patterns"))
         vendor_match = pattern_match(
-            "{} {}".format(data.get("vendor_name") or "", data.get("vendor_prefix") or ""),
+            "{} {}".format(
+                data.get("vendor_name") or "", data.get("vendor_prefix") or ""
+            ),
             rule.get("vendor_patterns"),
         )
         oui_match = normalized_oui(data.get("bssid")) in {
@@ -484,7 +495,9 @@ class AlertEngine:
     def drone_confidence(self, data, rule):
         """Return a compact confidence label for drone alerts."""
         ssid_match = pattern_match(data.get("ssid"), rule.get("ssid_patterns"))
-        vendor_match = pattern_match(data.get("vendor_name"), rule.get("vendor_patterns"))
+        vendor_match = pattern_match(
+            data.get("vendor_name"), rule.get("vendor_patterns")
+        )
         oui_match = normalized_oui(data.get("bssid")) in {
             normalized_oui(item) for item in rule.get("oui_prefixes") or []
         }
@@ -522,7 +535,9 @@ class AlertEngine:
         )
         bssid = data.get("bssid") or data.get("ap_mac") or transmitter
         receiver_key = normalized_key(receiver)
-        broadcast = bool(data.get("receiver_is_broadcast")) or self.is_broadcast_mac(receiver)
+        broadcast = bool(data.get("receiver_is_broadcast")) or self.is_broadcast_mac(
+            receiver
+        )
         key = "{}:{}".format(event_type, normalized_key(transmitter))
         history = self.wifi_disruptions.setdefault(key, deque())
         history.append(
@@ -555,10 +570,7 @@ class AlertEngine:
         attack_pattern = None
         if broadcast_count >= required_broadcast and total_count >= min_total:
             attack_pattern = "broadcast"
-        elif (
-            len(distinct_receivers) >= required_receivers
-            and total_count >= min_total
-        ):
+        elif len(distinct_receivers) >= required_receivers and total_count >= min_total:
             attack_pattern = "multi-receiver"
         elif per_receiver_count >= required_single:
             attack_pattern = "high-rate single-receiver"
@@ -620,7 +632,9 @@ class AlertEngine:
         """Return BLE tracker-style alerts."""
         if event_type not in ("device_seen", "device_updated"):
             if event_type in ("collector_offline", "collector_retrying"):
-                return self.collector_issue_alert("ble", event_type, data, timestamp, now, emit)
+                return self.collector_issue_alert(
+                    "ble", event_type, data, timestamp, now, emit
+                )
             return []
         rule = self.rule("ble_tracker")
         if not rule.get("enabled", True):
@@ -656,9 +670,11 @@ class AlertEngine:
                 "findmy_status": data.get("findmy_status") or "",
                 "findmy_hint": data.get("findmy_hint") or "",
                 "rssi": self.to_number(data.get("rssi")),
-                "confidence": "High"
-                if data.get("name") or data.get("findmy_accessory")
-                else "Medium",
+                "confidence": (
+                    "High"
+                    if data.get("name") or data.get("findmy_accessory")
+                    else "Medium"
+                ),
             },
         )
 
@@ -680,7 +696,9 @@ class AlertEngine:
     def process_aprsis(self, event_type, data, timestamp, now, emit):
         """Return APRS-IS weather alerts."""
         if event_type in ("collector_offline", "collector_retrying"):
-            return self.collector_issue_alert("aprsis", event_type, data, timestamp, now, emit)
+            return self.collector_issue_alert(
+                "aprsis", event_type, data, timestamp, now, emit
+            )
         packet_type = data.get("packet_type") or event_type.replace("aprs_", "")
         if packet_type != "weather" and not data.get("weather_summary"):
             return []
@@ -702,7 +720,11 @@ class AlertEngine:
         if not reasons:
             return []
         callsign = data.get("callsign") or "weather station"
-        level = rule.get("critical_level", "critical") if critical else rule.get("level", "warning")
+        level = (
+            rule.get("critical_level", "critical")
+            if critical
+            else rule.get("level", "warning")
+        )
         summary = "APRS-IS weather alert for {}: {}".format(
             callsign, "; ".join(reasons)
         )
@@ -731,7 +753,9 @@ class AlertEngine:
     def process_pws(self, event_type, data, timestamp, now, emit):
         """Return PWS weather alerts."""
         if event_type in ("collector_offline", "collector_retrying"):
-            return self.collector_issue_alert("pws", event_type, data, timestamp, now, emit)
+            return self.collector_issue_alert(
+                "pws", event_type, data, timestamp, now, emit
+            )
         if event_type != "pws_weather":
             return []
         rule = self.rule("pws_weather")
@@ -753,10 +777,12 @@ class AlertEngine:
         if not reasons:
             return []
         station = data.get("station_id") or data.get("station_name") or "PWS"
-        level = rule.get("critical_level", "critical") if critical else rule.get("level", "warning")
-        summary = "PWS weather alert for {}: {}".format(
-            station, "; ".join(reasons)
+        level = (
+            rule.get("critical_level", "critical")
+            if critical
+            else rule.get("level", "warning")
         )
+        summary = "PWS weather alert for {}: {}".format(station, "; ".join(reasons))
         return self.emit_alert(
             "pws_weather",
             "pws-weather:{}".format(station),
@@ -783,7 +809,9 @@ class AlertEngine:
     def process_rayhunter(self, event_type, data, timestamp, now, emit):
         """Return Rayhunter warning alerts."""
         if event_type in ("collector_offline", "collector_retrying"):
-            return self.collector_issue_alert("rayhunter", event_type, data, timestamp, now, emit)
+            return self.collector_issue_alert(
+                "rayhunter", event_type, data, timestamp, now, emit
+            )
         if event_type != "rayhunter_status":
             return []
         rule = self.rule("rayhunter_warning")
@@ -817,7 +845,9 @@ class AlertEngine:
     def process_noaa(self, event_type, data, timestamp, now, emit):
         """Return NOAA hazard alerts."""
         if event_type in ("collector_offline", "collector_retrying"):
-            return self.collector_issue_alert("noaa", event_type, data, timestamp, now, emit)
+            return self.collector_issue_alert(
+                "noaa", event_type, data, timestamp, now, emit
+            )
         if event_type not in (
             "noaa_weather_alert",
             "noaa_tropical_advisory",
@@ -832,9 +862,15 @@ class AlertEngine:
             return []
         if not self.noaa_matches_alert(data, rule):
             return []
-        event_id = data.get("event_id") or data.get("headline") or data.get("event") or "noaa"
+        event_id = (
+            data.get("event_id") or data.get("headline") or data.get("event") or "noaa"
+        )
         critical = self.noaa_is_critical(data, rule)
-        level = rule.get("critical_level", "critical") if critical else rule.get("level", "warning")
+        level = (
+            rule.get("critical_level", "critical")
+            if critical
+            else rule.get("level", "warning")
+        )
         event_name = data.get("event") or data.get("headline") or "NOAA hazard"
         feed_source = self.noaa_feed_source(event_type, data)
         summary = "{}: {}; {}".format(
@@ -896,9 +932,15 @@ class AlertEngine:
         source = str((data or {}).get("source") or "").strip()
         if source:
             return source
-        if event_type == "noaa_tsunami_alert" or (data or {}).get("alert_kind") == "tsunami":
+        if (
+            event_type == "noaa_tsunami_alert"
+            or (data or {}).get("alert_kind") == "tsunami"
+        ):
             return "NOAA Tsunami"
-        if event_type == "noaa_tropical_advisory" or (data or {}).get("alert_kind") == "tropical":
+        if (
+            event_type == "noaa_tropical_advisory"
+            or (data or {}).get("alert_kind") == "tropical"
+        ):
             return "NHC"
         if event_type == "noaa_weather_alert":
             return "NWS"
@@ -926,8 +968,7 @@ class AlertEngine:
         """Return True when a NOAA alert should use the critical level."""
         severity = str((data or {}).get("severity") or "").lower()
         critical_severities = {
-            str(item or "").lower()
-            for item in rule.get("critical_severities") or []
+            str(item or "").lower() for item in rule.get("critical_severities") or []
         }
         event = "{} {}".format(
             (data or {}).get("event") or "",
@@ -940,7 +981,9 @@ class AlertEngine:
     def process_usgs(self, event_type, data, timestamp, now, emit):
         """Return USGS earthquake alerts."""
         if event_type in ("collector_offline", "collector_retrying"):
-            return self.collector_issue_alert("usgs", event_type, data, timestamp, now, emit)
+            return self.collector_issue_alert(
+                "usgs", event_type, data, timestamp, now, emit
+            )
         if event_type != "usgs_earthquake":
             return []
         rule = self.rule("usgs_earthquake")
@@ -958,19 +1001,26 @@ class AlertEngine:
         global_major = magnitude >= global_warning_mag
         alert_color = str(data.get("alert_color") or "").lower()
         critical = bool(data.get("tsunami")) or alert_color in {
-            str(item or "").lower()
-            for item in rule.get("critical_alert_colors") or []
+            str(item or "").lower() for item in rule.get("critical_alert_colors") or []
         }
         if nearby and magnitude >= float(rule.get("critical_magnitude_nearby", 5.0)):
             critical = True
         if global_major and magnitude >= global_critical_mag:
             critical = True
-        warning = critical or (
-            nearby and magnitude >= float(rule.get("warning_magnitude_nearby", 4.0))
-        ) or global_major
+        warning = (
+            critical
+            or (
+                nearby and magnitude >= float(rule.get("warning_magnitude_nearby", 4.0))
+            )
+            or global_major
+        )
         if not warning:
             return []
-        level = rule.get("critical_level", "critical") if critical else rule.get("level", "warning")
+        level = (
+            rule.get("critical_level", "critical")
+            if critical
+            else rule.get("level", "warning")
+        )
         place = data.get("place") or data.get("event_id") or "earthquake"
         summary = "USGS earthquake M{:.1f}: {}".format(magnitude, place)
         if global_major and not nearby:
@@ -1010,7 +1060,9 @@ class AlertEngine:
     def process_swpc(self, event_type, data, timestamp, now, emit):
         """Return SWPC space-weather alerts."""
         if event_type in ("collector_offline", "collector_retrying"):
-            return self.collector_issue_alert("swpc", event_type, data, timestamp, now, emit)
+            return self.collector_issue_alert(
+                "swpc", event_type, data, timestamp, now, emit
+            )
         if event_type != "swpc_event":
             return []
         rule = self.rule("swpc_space_weather")
@@ -1020,9 +1072,18 @@ class AlertEngine:
         if not swpc_event_is_alert(data, rule):
             return []
         critical = swpc_event_is_critical(data, rule)
-        level = rule.get("critical_level", "critical") if critical else rule.get("level", "warning")
+        level = (
+            rule.get("critical_level", "critical")
+            if critical
+            else rule.get("level", "warning")
+        )
         event_id = data.get("event_id") or data.get("summary") or "swpc"
-        subject = data.get("xray_class") or data.get("scale_label") or data.get("event") or "SWPC"
+        subject = (
+            data.get("xray_class")
+            or data.get("scale_label")
+            or data.get("event")
+            or "SWPC"
+        )
         summary = self.swpc_alert_summary(data)
         return self.emit_alert(
             "swpc_space_weather",
@@ -1070,7 +1131,9 @@ class AlertEngine:
     def process_lan(self, event_type, data, timestamp, now, emit):
         """Return LAN alerts."""
         if event_type in ("collector_offline", "collector_retrying"):
-            return self.collector_issue_alert("lan", event_type, data, timestamp, now, emit)
+            return self.collector_issue_alert(
+                "lan", event_type, data, timestamp, now, emit
+            )
         data = clean_lan_data(data)
         if event_type == "lan_gateway_changed":
             return self.lan_gateway_alert(data, timestamp, now, emit)
@@ -1122,7 +1185,9 @@ class AlertEngine:
         rule = self.rule("lan_new_device")
         if not rule.get("enabled", False):
             return []
-        subject = data.get("hostname") or data.get("mac") or data.get("ip") or "LAN device"
+        subject = (
+            data.get("hostname") or data.get("mac") or data.get("ip") or "LAN device"
+        )
         summary = "New LAN device observed: {}".format(
             "; ".join(
                 str(part)
@@ -1158,7 +1223,9 @@ class AlertEngine:
     def process_adsb(self, event_type, data, timestamp, now, emit):
         """Return ADS-B alerts for emergency or low nearby aircraft."""
         if event_type == "collector_offline" or event_type == "collector_retrying":
-            return self.collector_issue_alert("adsb", event_type, data, timestamp, now, emit)
+            return self.collector_issue_alert(
+                "adsb", event_type, data, timestamp, now, emit
+            )
         if event_type != "adsb_aircraft":
             return []
         rule = self.rule("adsb_aircraft")
@@ -1218,7 +1285,9 @@ class AlertEngine:
     def process_rtl433(self, event_type, data, timestamp, now, emit):
         """Return optional rtl_433 alerts for configured decoded signals."""
         if event_type == "collector_offline" or event_type == "collector_retrying":
-            return self.collector_issue_alert("rtl433", event_type, data, timestamp, now, emit)
+            return self.collector_issue_alert(
+                "rtl433", event_type, data, timestamp, now, emit
+            )
         if event_type != "rtl433_event":
             return []
         rule = self.rule("rtl433_signal")
@@ -1240,18 +1309,23 @@ class AlertEngine:
         )
         if not matched:
             return []
-        subject = " ".join(
-            part
-            for part in (
-                data.get("model") or "",
-                data.get("id") or "",
-                data.get("channel") or "",
-            )
-            if part
-        ).strip() or "RTL-433 device"
+        subject = (
+            " ".join(
+                part
+                for part in (
+                    data.get("model") or "",
+                    data.get("id") or "",
+                    data.get("channel") or "",
+                )
+                if part
+            ).strip()
+            or "RTL-433 device"
+        )
         alert = self.emit_alert(
             "rtl433_signal",
-            "rtl433:{}:{}".format(category or "device", data.get("subject_key") or subject),
+            "rtl433:{}:{}".format(
+                category or "device", data.get("subject_key") or subject
+            ),
             rule.get("level", "warning"),
             "rtl433",
             "RTL-433 decoded signal",
@@ -1318,7 +1392,9 @@ class AlertEngine:
             return []
         name = data.get("name") or data.get("key") or source
         state = str(data.get("state") or event_type).replace("collector_", "")
-        reason = data.get("warning") or data.get("reason") or "{} is {}".format(name, state)
+        reason = (
+            data.get("warning") or data.get("reason") or "{} is {}".format(name, state)
+        )
         if pattern_match(reason, rule.get("ignored_reason_patterns")):
             return []
         return self.emit_alert(
@@ -1439,7 +1515,9 @@ class AlertEngine:
         evidence = dict(alert.get("evidence") or {})
         if evidence.get("alert_kind") == "tsunami":
             event_type = "noaa_tsunami_alert"
-        elif evidence.get("source") == "NHC" or evidence.get("alert_kind") == "tropical":
+        elif (
+            evidence.get("source") == "NHC" or evidence.get("alert_kind") == "tropical"
+        ):
             event_type = "noaa_tropical_advisory"
         else:
             event_type = "noaa_weather_alert"
@@ -1457,14 +1535,18 @@ class AlertEngine:
             "alert_kind": evidence.get("alert_kind") or "",
             "event_id": evidence.get("event_id") or "",
         }
-        return normalized_key("noaa-hazard:{}".format(stable_noaa_event_key(data, event_type)))
+        return normalized_key(
+            "noaa-hazard:{}".format(stable_noaa_event_key(data, event_type))
+        )
 
     def is_nhc_noaa_alert(self, alert):
         """Return True when a persisted alert came from an NHC NOAA item."""
         if (alert or {}).get("alert_type") != "noaa_hazard":
             return False
         evidence = dict((alert or {}).get("evidence") or {})
-        return evidence.get("source") == "NHC" or evidence.get("alert_kind") == "tropical"
+        return (
+            evidence.get("source") == "NHC" or evidence.get("alert_kind") == "tropical"
+        )
 
     def alert_source_disabled(self, alert):
         """Return True when a restored alert belongs to a disabled source."""
@@ -1554,10 +1636,19 @@ class AlertEngine:
         current_last = float(current.get("last_seen_epoch") or 0)
         incoming_last = float(incoming.get("last_seen_epoch") or 0)
         if incoming_last >= current_last:
-            for field in ("last_seen", "last_seen_epoch", "summary", "subject", "title", "evidence"):
+            for field in (
+                "last_seen",
+                "last_seen_epoch",
+                "summary",
+                "subject",
+                "title",
+                "evidence",
+            ):
                 if incoming.get(field) not in (None, ""):
                     current[field] = incoming.get(field)
-        if LEVEL_PRIORITY.get(incoming.get("level"), 0) > LEVEL_PRIORITY.get(current.get("level"), 0):
+        if LEVEL_PRIORITY.get(incoming.get("level"), 0) > LEVEL_PRIORITY.get(
+            current.get("level"), 0
+        ):
             current["level"] = incoming.get("level")
             current["acked"] = False
             current.pop("acked_at", None)
@@ -1571,7 +1662,9 @@ class AlertEngine:
                 current["ack_key_version"] = incoming.get(
                     "ack_key_version", ACK_KEY_VERSION
                 )
-        current["count"] = max(int(current.get("count") or 1), int(incoming.get("count") or 1))
+        current["count"] = max(
+            int(current.get("count") or 1), int(incoming.get("count") or 1)
+        )
         return current
 
     def ack(self, alert_id):
@@ -1631,14 +1724,18 @@ class AlertEngine:
         if not key:
             return
         target = self.ack_memory if memory is None else memory
-        acked_at_epoch = float((alert or {}).get("acked_at_epoch") or now or now_epoch())
+        acked_at_epoch = float(
+            (alert or {}).get("acked_at_epoch") or now or now_epoch()
+        )
         target[key] = {
             "alert_type": (alert or {}).get("alert_type") or "",
             "level": normalized_level((alert or {}).get("level")),
             "ack_key_version": ACK_KEY_VERSION,
             "acked_at_epoch": acked_at_epoch,
             "acked_at": (alert or {}).get("acked_at") or local_now(acked_at_epoch),
-            "last_seen_epoch": float((alert or {}).get("last_seen_epoch") or now or acked_at_epoch),
+            "last_seen_epoch": float(
+                (alert or {}).get("last_seen_epoch") or now or acked_at_epoch
+            ),
         }
 
     def load_ack_memory(self, state, target, now):
@@ -1660,7 +1757,9 @@ class AlertEngine:
             ):
                 continue
             try:
-                remembered = float(item.get("last_seen_epoch") or item.get("acked_at_epoch") or 0)
+                remembered = float(
+                    item.get("last_seen_epoch") or item.get("acked_at_epoch") or 0
+                )
             except (TypeError, ValueError):
                 remembered = 0
             if cutoff is not None and remembered and remembered < cutoff:
@@ -1668,8 +1767,12 @@ class AlertEngine:
             target[normalized] = {
                 "alert_type": item.get("alert_type") or "",
                 "level": normalized_level(item.get("level")),
-                "ack_key_version": int(float(item.get("ack_key_version") or ACK_KEY_VERSION)),
-                "acked_at_epoch": float(item.get("acked_at_epoch") or remembered or now),
+                "ack_key_version": int(
+                    float(item.get("ack_key_version") or ACK_KEY_VERSION)
+                ),
+                "acked_at_epoch": float(
+                    item.get("acked_at_epoch") or remembered or now
+                ),
                 "acked_at": item.get("acked_at") or "",
                 "last_seen_epoch": remembered or now,
             }
@@ -1681,7 +1784,9 @@ class AlertEngine:
         cutoff = now - self.ack_memory_ttl_sec
         for key, item in list(self.ack_memory.items()):
             try:
-                remembered = float(item.get("last_seen_epoch") or item.get("acked_at_epoch") or 0)
+                remembered = float(
+                    item.get("last_seen_epoch") or item.get("acked_at_epoch") or 0
+                )
             except (TypeError, ValueError):
                 remembered = 0
             if remembered and remembered < cutoff:
@@ -1713,7 +1818,9 @@ class AlertEngine:
         if data.get("manufacturer"):
             parts.append(str(data.get("manufacturer")))
         if data.get("service_uuids"):
-            parts.append("services {}".format(", ".join(data.get("service_uuids") or [])))
+            parts.append(
+                "services {}".format(", ".join(data.get("service_uuids") or []))
+            )
         return "; ".join(parts) or "BLE advertisement"
 
     def to_number(self, value):

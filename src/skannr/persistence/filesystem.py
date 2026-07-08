@@ -8,7 +8,13 @@ separate from the raw audit logs.
 import json
 import os
 
-from ..log_utils import format_epoch, normalize_retention_days, now_epoch, sanitize_json_line
+from ..log_utils import (
+    format_epoch,
+    normalize_retention_days,
+    now_epoch,
+    sanitize_json_line,
+)
+from ..paths import ensure_owner
 from .base import BasePersistence
 
 
@@ -20,10 +26,9 @@ class FilesystemPersistence(BasePersistence):
     def __init__(self, config):
         super().__init__(config)
         self.log_dir = config.get("log_dir", "runtime/logs")
-        self.retention_days = normalize_retention_days(
-            config.get("retention_days", 30)
-        )
+        self.retention_days = normalize_retention_days(config.get("retention_days", 30))
         os.makedirs(self.log_dir, exist_ok=True)
+        ensure_owner(self.log_dir)
         self.rotate()
 
     def write(self, event):
@@ -32,9 +37,13 @@ class FilesystemPersistence(BasePersistence):
         date = format_epoch(event.get("timestamp_epoch") or now_epoch())[:10]
         directory = os.path.join(self.log_dir, collector)
         os.makedirs(directory, exist_ok=True)
+        ensure_owner(directory)
         path = os.path.join(directory, "{}.jsonl".format(date))
+        existed = os.path.exists(path)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(event, sort_keys=True) + "\n")
+        if not existed:
+            ensure_owner(path)
 
     def query(self, collector=None, since=None, until=None, limit=100):
         """Read recent JSONL events.
@@ -49,10 +58,7 @@ class FilesystemPersistence(BasePersistence):
         roots = (
             [os.path.join(self.log_dir, collector)]
             if collector
-            else [
-                os.path.join(self.log_dir, name)
-                for name in os.listdir(self.log_dir)
-            ]
+            else [os.path.join(self.log_dir, name) for name in os.listdir(self.log_dir)]
         )
         for root in roots:
             if not os.path.isdir(root):
@@ -88,10 +94,7 @@ class FilesystemPersistence(BasePersistence):
         for root, _dirs, files in os.walk(self.log_dir):
             for filename in files:
                 path = os.path.join(root, filename)
-                if (
-                    filename.endswith(".jsonl")
-                    and os.path.getmtime(path) < cutoff
-                ):
+                if filename.endswith(".jsonl") and os.path.getmtime(path) < cutoff:
                     # Only raw/event JSONL files are retention-managed here.
                     # Materialized JSON summaries are rebuilt/overwritten by
                     # their own refresh paths.

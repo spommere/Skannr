@@ -119,13 +119,17 @@ class SubjectHistoryBuilder:
     def active_device_collectors(self):
         """Return enabled Device History collectors."""
         return tuple(
-            collector for collector in self.DEVICE_COLLECTORS if self.collector_enabled(collector)
+            collector
+            for collector in self.DEVICE_COLLECTORS
+            if self.collector_enabled(collector)
         )
 
     def active_direct_collectors(self):
         """Return enabled direct Subject History collectors."""
         return tuple(
-            collector for collector in self.DIRECT_COLLECTORS if self.collector_enabled(collector)
+            collector
+            for collector in self.DIRECT_COLLECTORS
+            if self.collector_enabled(collector)
         )
 
     def active_collectors(self):
@@ -230,7 +234,9 @@ class SubjectHistoryBuilder:
             direct_observations.get("pws") or [],
             None,
         )
-        lan_enabled = self.collector_enabled("lan") or self.collector_enabled("lan_identify")
+        lan_enabled = self.collector_enabled("lan") or self.collector_enabled(
+            "lan_identify"
+        )
         if lan_enabled:
             lan_events, lan_records = self.build_or_keep_direct_history(
                 previous_summary,
@@ -245,7 +251,9 @@ class SubjectHistoryBuilder:
             lan_records = 0
         previous_generated_epoch = 0
         try:
-            previous_generated_epoch = int((previous_summary or {}).get("generated_at_epoch") or 0)
+            previous_generated_epoch = int(
+                (previous_summary or {}).get("generated_at_epoch") or 0
+            )
         except (TypeError, ValueError):
             previous_generated_epoch = 0
         generated_at_epoch = max(now_epoch(), previous_generated_epoch + 1)
@@ -348,7 +356,6 @@ class SubjectHistoryBuilder:
         )
         return summary
 
-
     def build_or_keep_direct_history(
         self, previous_summary, collector, builder, observations, window_days
     ):
@@ -359,9 +366,10 @@ class SubjectHistoryBuilder:
         new_events, records_read = builder(observations, window_days)
         if not observations:
             return previous_events, 0
-        return self.merge_direct_compact_history(
-            collector, previous_events, new_events
-        ), records_read
+        return (
+            self.merge_direct_compact_history(collector, previous_events, new_events),
+            records_read,
+        )
 
     def merge_direct_compact_history(self, collector, previous_events, new_events):
         """Merge compact direct summary rows without replaying old raw events."""
@@ -424,9 +432,13 @@ class SubjectHistoryBuilder:
         """Preserve earliest first_seen and latest last_seen fields."""
         first_candidates = []
         for source, fallback in ((old_data, old_epoch), (new_data, new_epoch)):
-            epoch = self.direct_epoch_candidate(source.get("first_seen_epoch"), fallback)
+            epoch = self.direct_epoch_candidate(
+                source.get("first_seen_epoch"), fallback
+            )
             if epoch is not None:
-                first_candidates.append((epoch, source.get("first_seen") or local_now(epoch)))
+                first_candidates.append(
+                    (epoch, source.get("first_seen") or local_now(epoch))
+                )
         if first_candidates:
             first_epoch, first_text = min(first_candidates, key=lambda item: item[0])
             data["first_seen_epoch"] = first_epoch
@@ -436,7 +448,9 @@ class SubjectHistoryBuilder:
         for source, fallback in ((old_data, old_epoch), (new_data, new_epoch)):
             epoch = self.direct_epoch_candidate(source.get("last_seen_epoch"), fallback)
             if epoch is not None:
-                last_candidates.append((epoch, source.get("last_seen") or local_now(epoch)))
+                last_candidates.append(
+                    (epoch, source.get("last_seen") or local_now(epoch))
+                )
         if last_candidates:
             last_epoch, last_text = max(last_candidates, key=lambda item: item[0])
             data["last_seen_epoch"] = last_epoch
@@ -493,7 +507,9 @@ class SubjectHistoryBuilder:
     def merge_direct_lists(self, data, old_data, new_data):
         """Merge compact sample/list fields without duplicating entries."""
         for key in set(old_data) | set(new_data):
-            if not isinstance(old_data.get(key), list) and not isinstance(new_data.get(key), list):
+            if not isinstance(old_data.get(key), list) and not isinstance(
+                new_data.get(key), list
+            ):
                 continue
             data[key] = []
             limit = self.direct_list_limit(key)
@@ -518,7 +534,11 @@ class SubjectHistoryBuilder:
             new_value = number_or_none(new_data.get(key))
             if old_value is None and new_value is None:
                 continue
-            values = [value for value in (old_value, new_value) if isinstance(value, (int, float))]
+            values = [
+                value
+                for value in (old_value, new_value)
+                if isinstance(value, (int, float))
+            ]
             if not values:
                 continue
             if self.direct_min_key(key):
@@ -554,18 +574,49 @@ class SubjectHistoryBuilder:
         if collector == "rtl433":
             return "warning" if data.get("category") in ("tpms", "security") else "info"
         if collector == "rayhunter":
-            return "warning" if int(data.get("warning_events_in_window") or data.get("warning_count") or 0) else event.get("severity") or "info"
+            return (
+                "warning"
+                if int(
+                    data.get("warning_events_in_window")
+                    or data.get("warning_count")
+                    or 0
+                )
+                else event.get("severity") or "info"
+            )
         if collector == "adsb":
-            return "warning" if data.get("emergency") else event.get("severity") or "info"
+            return (
+                "warning" if data.get("emergency") else event.get("severity") or "info"
+            )
         if collector == "noaa":
             severe = str(data.get("severity") or "").lower() in ("severe", "extreme")
-            return "warning" if severe or data.get("nws_hazard_count") or data.get("tsunami_incident_count") or data.get("tropical_system_count") else event.get("severity") or "info"
+            return (
+                "warning"
+                if severe
+                or data.get("nws_hazard_count")
+                or data.get("tsunami_incident_count")
+                or data.get("tropical_system_count")
+                else event.get("severity") or "info"
+            )
         if collector == "usgs":
-            return "warning" if data.get("tsunami") or data.get("global_major") or data.get("notable_count") else event.get("severity") or "info"
+            return (
+                "warning"
+                if data.get("tsunami")
+                or data.get("global_major")
+                or data.get("notable_count")
+                else event.get("severity") or "info"
+            )
         if collector == "swpc":
-            return "warning" if data.get("alert_count") or data.get("critical_count") else event.get("severity") or "info"
+            return (
+                "warning"
+                if data.get("alert_count") or data.get("critical_count")
+                else event.get("severity") or "info"
+            )
         if collector == "lan":
-            return "warning" if event_type == "lan_gateway_summary" and data.get("change_count") else event.get("severity") or "info"
+            return (
+                "warning"
+                if event_type == "lan_gateway_summary" and data.get("change_count")
+                else event.get("severity") or "info"
+            )
         return event.get("severity") or "info"
 
     def direct_compact_event_key(self, collector, event):
@@ -575,12 +626,18 @@ class SubjectHistoryBuilder:
         if collector == "aprsis":
             return (
                 event_type,
-                data.get("callsign") or data.get("station") or data.get("feed_name") or "aprsis",
+                data.get("callsign")
+                or data.get("station")
+                or data.get("feed_name")
+                or "aprsis",
                 data.get("period_kind") or "",
                 data.get("period_key") or "",
             )
         if collector == "rayhunter":
-            return (event_type, clean_rayhunter_field(data.get("endpoint")) or "rayhunter")
+            return (
+                event_type,
+                clean_rayhunter_field(data.get("endpoint")) or "rayhunter",
+            )
         if collector == "rtl433":
             return (
                 event_type,
@@ -641,7 +698,11 @@ class SubjectHistoryBuilder:
         counts = {}
         source = (device_history_summary or {}).get("raw_records_read") or {}
         for collector in self.DEVICE_COLLECTORS:
-            counts[collector] = int(source.get(collector) or 0) if self.collector_enabled(collector) else 0
+            counts[collector] = (
+                int(source.get(collector) or 0)
+                if self.collector_enabled(collector)
+                else 0
+            )
         for collector, value in direct_records.items():
             counts[collector] = int(value or 0)
         return counts
@@ -649,14 +710,15 @@ class SubjectHistoryBuilder:
     def incremental_records_by_collector(self, device_history_summary, direct_records):
         """Return per-refresh record counts across device and direct collectors."""
         counts = {}
-        source = (
-            (device_history_summary or {}).get(
-                "incremental_records_read_by_collector"
-            )
-            or {}
-        )
+        source = (device_history_summary or {}).get(
+            "incremental_records_read_by_collector"
+        ) or {}
         for collector in self.DEVICE_COLLECTORS:
-            counts[collector] = int(source.get(collector) or 0) if self.collector_enabled(collector) else 0
+            counts[collector] = (
+                int(source.get(collector) or 0)
+                if self.collector_enabled(collector)
+                else 0
+            )
         for collector, value in direct_records.items():
             counts[collector] = int(value or 0)
         return counts
@@ -698,9 +760,10 @@ class SubjectHistoryBuilder:
                 )
                 event_types = target.setdefault("event_types", {})
                 for event_type, count in (values.get("event_types") or {}).items():
-                    event_types[event_type] = int(event_types.get(event_type) or 0) + int(count or 0)
+                    event_types[event_type] = int(
+                        event_types.get(event_type) or 0
+                    ) + int(count or 0)
         return merged
-
 
     def merge_jsonl_checkpoints(self, *checkpoints):
         """Merge device and direct collector offsets into one Subject checkpoint."""
@@ -727,7 +790,7 @@ class SubjectHistoryBuilder:
                 "bluetooth",
                 "aprsis",
                 "rayhunter",
-            "rtl433",
+                "rtl433",
                 "adsb",
                 "noaa",
                 "usgs",
@@ -807,8 +870,7 @@ class SubjectHistoryBuilder:
                 "incremental_records_read": int(
                     (incremental_records or {}).get(collector) or 0
                 ),
-                "incremental_jsonl_read_stats": (read_stats or {}).get(collector)
-                or {},
+                "incremental_jsonl_read_stats": (read_stats or {}).get(collector) or {},
             }
             save_json_atomic(path, collector_state)
         state = {
@@ -872,7 +934,9 @@ class SubjectHistoryBuilder:
         incremental_records = defaultdict(int)
         read_stats = {}
         collectors_to_read = tuple(
-            dict.fromkeys(self.active_direct_collectors() + tuple(disabled_with_pending))
+            dict.fromkeys(
+                self.active_direct_collectors() + tuple(disabled_with_pending)
+            )
         )
         for collector in collectors_to_read:
             for event in read_incremental_jsonl_events(
@@ -901,7 +965,6 @@ class SubjectHistoryBuilder:
             },
             read_stats,
         )
-
 
     def advance_disabled_direct_checkpoints(self, checkpoint, preserve_collectors=None):
         """Advance disabled direct collectors without replaying old raw logs."""
@@ -940,7 +1003,9 @@ class SubjectHistoryBuilder:
                 return True
         return False
 
-    def recover_empty_enabled_direct_checkpoints(self, checkpoint, previous_records, previous):
+    def recover_empty_enabled_direct_checkpoints(
+        self, checkpoint, previous_records, previous
+    ):
         """Re-read today's raw file when an enabled direct collector has no retained state.
 
         Disabled direct collectors intentionally advance checkpoints so old logs are
@@ -990,7 +1055,9 @@ class SubjectHistoryBuilder:
             return False
         return False
 
-    def recover_newer_direct_events_after_advanced_checkpoint(self, checkpoint, previous):
+    def recover_newer_direct_events_after_advanced_checkpoint(
+        self, checkpoint, previous
+    ):
         """Re-read the newest file when retained rows lag already-checkpointed data."""
         if not isinstance(previous, dict):
             return
@@ -1067,7 +1134,9 @@ class SubjectHistoryBuilder:
         previous = self.load_persisted_summary()
         if isinstance(previous, dict) and previous.get("checkpoint"):
             return {
-                "direct_observation_version": previous.get("direct_observation_version"),
+                "direct_observation_version": previous.get(
+                    "direct_observation_version"
+                ),
                 "checkpoint": previous.get("checkpoint"),
                 "records_read": previous.get("raw_records_read") or {},
             }
@@ -1210,7 +1279,9 @@ class SubjectHistoryBuilder:
                     "collector_retrying": "RETRYING",
                 }.get(event_type, "")
                 latest_health_epoch = epoch
-                latest_epoch = epoch if latest_epoch is None else max(latest_epoch, epoch)
+                latest_epoch = (
+                    epoch if latest_epoch is None else max(latest_epoch, epoch)
+                )
                 continue
 
             callsign = data.get("callsign") or "unknown"
@@ -1255,7 +1326,9 @@ class SubjectHistoryBuilder:
                 {
                     "collector": "aprsis",
                     "type": "aprsis_station_summary",
-                    "timestamp": local_now(summary.get("last_seen_epoch") or latest_epoch),
+                    "timestamp": local_now(
+                        summary.get("last_seen_epoch") or latest_epoch
+                    ),
                     "timestamp_epoch": summary.get("last_seen_epoch") or latest_epoch,
                     "severity": "info",
                     "data": clean_aprs_data(summary),
@@ -1297,9 +1370,11 @@ class SubjectHistoryBuilder:
                     "type": "aprsis_collector_summary",
                     "timestamp": local_now(latest_health_epoch),
                     "timestamp_epoch": latest_health_epoch,
-                    "severity": "warning"
-                    if latest_health.get("collector_state") != "ONLINE"
-                    else "info",
+                    "severity": (
+                        "warning"
+                        if latest_health.get("collector_state") != "ONLINE"
+                        else "info"
+                    ),
                     "data": clean_aprs_data(health),
                 }
             )
@@ -1354,9 +1429,7 @@ class SubjectHistoryBuilder:
             station["first_seen_epoch"] = epoch
             station["first_seen"] = local_now(epoch)
         if epoch >= station.get("last_seen_epoch", 0):
-            self.aprsis_update_latest_station_fields(
-                station, data, packet_type, epoch
-            )
+            self.aprsis_update_latest_station_fields(station, data, packet_type, epoch)
 
         self.aprsis_sample(station, "sample_destinations", data.get("destination"))
         self.aprsis_sample(station, "sample_paths", data.get("via_path"))
@@ -1543,8 +1616,8 @@ class SubjectHistoryBuilder:
                 station["rain_episode_started_at"] = (
                     station.get("rain_episode_started_at") or ""
                 )
-                station["rain_episode_started_epoch"] = (
-                    station.get("rain_episode_started_epoch")
+                station["rain_episode_started_epoch"] = station.get(
+                    "rain_episode_started_epoch"
                 )
                 station["rain_episode_stopped_at"] = local_now(epoch)
                 station["rain_episode_stopped_epoch"] = epoch
@@ -1564,9 +1637,7 @@ class SubjectHistoryBuilder:
     def aprsis_finalize_station_summary(self, station):
         """Return a JSON-safe APRS station summary with movement fields."""
         summary = {
-            key: value
-            for key, value in station.items()
-            if not str(key).startswith("_")
+            key: value for key, value in station.items() if not str(key).startswith("_")
         }
         if all(
             summary.get(key) is not None
@@ -1736,10 +1807,17 @@ class SubjectHistoryBuilder:
             record, "temperature", data.get("temperature_f"), "temperature_avg_f"
         )
         self.update_pws_first_latest_change(
-            record, "temperature", data.get("temperature_f"), epoch, "temperature_change_f"
+            record,
+            "temperature",
+            data.get("temperature_f"),
+            epoch,
+            "temperature_change_f",
         )
         self.update_min_max_numeric(
-            record, "humidity_min_percent", "humidity_max_percent", data.get("humidity_percent")
+            record,
+            "humidity_min_percent",
+            "humidity_max_percent",
+            data.get("humidity_percent"),
         )
         self.update_pws_average(
             record, "humidity", data.get("humidity_percent"), "humidity_avg_percent"
@@ -1758,7 +1836,9 @@ class SubjectHistoryBuilder:
             "pressure_change_hpa",
             digits=1,
         )
-        self.update_max_numeric(record, "wind_speed_max_mph", data.get("wind_speed_mph"))
+        self.update_max_numeric(
+            record, "wind_speed_max_mph", data.get("wind_speed_mph")
+        )
         self.update_max_numeric(record, "wind_gust_max_mph", data.get("wind_gust_mph"))
         self.update_pws_wind_direction(record, data.get("wind_direction_deg"))
         self.update_max_numeric(record, "rain_1h_max_in", data.get("rain_1h_in"))
@@ -1767,7 +1847,9 @@ class SubjectHistoryBuilder:
             record, "rain_since_midnight_max_in", data.get("rain_since_midnight_in")
         )
         self.update_pws_rain_episode_totals(record, data.get("rain_1h_in"), epoch)
-        self.update_max_numeric(record, "luminosity_max_w_m2", data.get("luminosity_w_m2"))
+        self.update_max_numeric(
+            record, "luminosity_max_w_m2", data.get("luminosity_w_m2")
+        )
 
     def limit_period_summaries(self, records, weekly=4, monthly=12):
         """Limit rolling period summaries while keeping all yearly rows."""
@@ -1814,15 +1896,21 @@ class SubjectHistoryBuilder:
         """Fold one APRS weather daily aggregate into a longer period."""
         self.update_aprsis_weather_period_metadata(record, day)
         record["day_count"] = int(record.get("day_count") or 0) + 1
-        record["sample_count"] = int(record.get("sample_count") or 0) + int(day.get("sample_count") or 0)
+        record["sample_count"] = int(record.get("sample_count") or 0) + int(
+            day.get("sample_count") or 0
+        )
         self.update_period_bounds_from_day(record, day)
         for target_min, target_max in (
             ("temperature_min_f", "temperature_max_f"),
             ("humidity_min_percent", "humidity_max_percent"),
             ("pressure_min_hpa", "pressure_max_hpa"),
         ):
-            self.update_min_max_numeric(record, target_min, target_max, day.get(target_min))
-            self.update_min_max_numeric(record, target_min, target_max, day.get(target_max))
+            self.update_min_max_numeric(
+                record, target_min, target_max, day.get(target_min)
+            )
+            self.update_min_max_numeric(
+                record, target_min, target_max, day.get(target_max)
+            )
         self.update_pws_weighted_average(record, "temperature", day)
         self.update_pws_weighted_average(record, "humidity", day)
         self.update_aprsis_pressure_weighted_average(record, day)
@@ -1832,18 +1920,30 @@ class SubjectHistoryBuilder:
         self.update_pws_first_latest_from_day(
             record, "pressure_hpa", day, "pressure_change_hpa", digits=1
         )
-        self.update_max_numeric(record, "wind_speed_max_mph", day.get("wind_speed_max_mph"))
-        self.update_max_numeric(record, "wind_gust_max_mph", day.get("wind_gust_max_mph"))
+        self.update_max_numeric(
+            record, "wind_speed_max_mph", day.get("wind_speed_max_mph")
+        )
+        self.update_max_numeric(
+            record, "wind_gust_max_mph", day.get("wind_gust_max_mph")
+        )
         self.update_max_numeric(record, "rain_1h_max_in", day.get("rain_1h_max_in"))
         self.update_max_numeric(record, "rain_24h_max_in", day.get("rain_24h_max_in"))
         self.update_max_numeric(
             record, "rain_since_midnight_max_in", day.get("rain_since_midnight_max_in")
         )
-        self.update_max_numeric(record, "luminosity_max_w_m2", day.get("luminosity_max_w_m2"))
+        self.update_max_numeric(
+            record, "luminosity_max_w_m2", day.get("luminosity_max_w_m2")
+        )
         self.update_pws_wind_direction(record, day.get("wind_direction_avg_deg"))
-        record["rain_episode_count"] = int(record.get("rain_episode_count") or 0) + int(day.get("rain_episode_count") or 0)
-        record["rain_active_sample_count"] = int(record.get("rain_active_sample_count") or 0) + int(day.get("rain_active_sample_count") or 0)
-        record["rain_active_span_sec"] = float(record.get("rain_active_span_sec") or 0) + float(day.get("rain_active_span_sec") or 0)
+        record["rain_episode_count"] = int(record.get("rain_episode_count") or 0) + int(
+            day.get("rain_episode_count") or 0
+        )
+        record["rain_active_sample_count"] = int(
+            record.get("rain_active_sample_count") or 0
+        ) + int(day.get("rain_active_sample_count") or 0)
+        record["rain_active_span_sec"] = float(
+            record.get("rain_active_span_sec") or 0
+        ) + float(day.get("rain_active_span_sec") or 0)
         if (day.get("last_seen_epoch") or 0) >= record.get("last_seen_epoch", 0):
             for key in (
                 "temperature_f",
@@ -1872,7 +1972,8 @@ class SubjectHistoryBuilder:
             int(record.get("_pressure_hpa_weighted_count") or 0) + weight
         )
         record["pressure_avg_hpa"] = round(
-            record["_pressure_hpa_weighted_sum"] / record["_pressure_hpa_weighted_count"],
+            record["_pressure_hpa_weighted_sum"]
+            / record["_pressure_hpa_weighted_count"],
             1,
         )
 
@@ -1929,11 +2030,22 @@ class SubjectHistoryBuilder:
                 continue
             records_read += 1
             data = clean_rtl433_data(event.get("data") or {})
-            if event_type in ("collector_online", "collector_offline", "collector_retrying", "scanner_started"):
+            if event_type in (
+                "collector_online",
+                "collector_offline",
+                "collector_retrying",
+                "scanner_started",
+            ):
                 latest_health = {
-                    "collector_state": "ONLINE"
-                    if event_type in ("collector_online", "scanner_started")
-                    else ("OFFLINE" if event_type == "collector_offline" else "RETRYING"),
+                    "collector_state": (
+                        "ONLINE"
+                        if event_type in ("collector_online", "scanner_started")
+                        else (
+                            "OFFLINE"
+                            if event_type == "collector_offline"
+                            else "RETRYING"
+                        )
+                    ),
                     "frequency_plan": data.get("frequency_plan") or "",
                     "frequency_summary": data.get("frequency_summary") or "",
                     "reason": data.get("reason") or "",
@@ -1945,7 +2057,12 @@ class SubjectHistoryBuilder:
                     continue
             if event_type != "rtl433_event":
                 continue
-            key = data.get("subject_key") or data.get("model") or data.get("id") or "unknown"
+            key = (
+                data.get("subject_key")
+                or data.get("model")
+                or data.get("id")
+                or "unknown"
+            )
             record = subjects.setdefault(
                 key,
                 {
@@ -1992,7 +2109,9 @@ class SubjectHistoryBuilder:
                 record["protocol"] = data.get("protocol", record.get("protocol"))
                 record["latest_raw"] = data.get("raw") or {}
                 record["latest_frequency_mhz"] = data.get("frequency_mhz")
-                record["latest_tuned_frequency_mhz"] = data.get("tuned_frequency_mhz") or data.get("frequency_mhz")
+                record["latest_tuned_frequency_mhz"] = data.get(
+                    "tuned_frequency_mhz"
+                ) or data.get("frequency_mhz")
                 record["latest_rssi_db"] = data.get("rssi_db")
                 record["latest_snr_db"] = data.get("snr_db")
                 record["latest_noise_db"] = data.get("noise_db")
@@ -2013,9 +2132,11 @@ class SubjectHistoryBuilder:
                 "type": "rtl433_subject_summary",
                 "timestamp": record.get("last_seen"),
                 "timestamp_epoch": record.get("last_seen_epoch"),
-                "severity": "warning"
-                if record.get("category") in ("tpms", "security")
-                else "info",
+                "severity": (
+                    "warning"
+                    if record.get("category") in ("tpms", "security")
+                    else "info"
+                ),
                 "data": record,
             }
             for record in sorted(
@@ -2031,15 +2152,15 @@ class SubjectHistoryBuilder:
                     "type": "rtl433_collector_summary",
                     "timestamp": local_now(latest_health_epoch),
                     "timestamp_epoch": latest_health_epoch,
-                    "severity": "warning"
-                    if latest_health.get("collector_state") != "ONLINE"
-                    else "info",
+                    "severity": (
+                        "warning"
+                        if latest_health.get("collector_state") != "ONLINE"
+                        else "info"
+                    ),
                     "data": latest_health,
                 }
             )
         return output, records_read
-
-
 
     def rtl433_update_tpms_evidence(self, record, data, epoch):
         """Fold one TPMS decode into retained tire-pressure evidence."""
@@ -2071,7 +2192,9 @@ class SubjectHistoryBuilder:
             record, "temperature_c_min", "temperature_c_max", data.get("temperature_c")
         )
         self.sample_direct_value(record, "tpms_statuses", data.get("tpms_status"), 8)
-        self.sample_direct_value(record, "tpms_battery_statuses", data.get("battery_status"), 8)
+        self.sample_direct_value(
+            record, "tpms_battery_statuses", data.get("battery_status"), 8
+        )
         sample = {
             "time": local_now(epoch),
             "pressure_psi": data.get("pressure_psi"),
@@ -2079,7 +2202,8 @@ class SubjectHistoryBuilder:
             "temperature_f": data.get("temperature_f"),
             "battery_status": data.get("battery_status"),
             "tpms_status": data.get("tpms_status"),
-            "frequency_mhz": data.get("frequency_mhz") or data.get("tuned_frequency_mhz"),
+            "frequency_mhz": data.get("frequency_mhz")
+            or data.get("tuned_frequency_mhz"),
         }
         self.append_recent_record(record.setdefault("tpms_samples", []), sample, 12)
         event_count = int(record.get("event_count") or 0)
@@ -2123,7 +2247,9 @@ class SubjectHistoryBuilder:
                 for key in sorted(raw)[:8]
                 if raw.get(key) not in (None, "", [], {})
             }
-        self.append_recent_record(record.setdefault("recent_observations", []), observation, 12)
+        self.append_recent_record(
+            record.setdefault("recent_observations", []), observation, 12
+        )
 
     def rtl433_record_burst_gap(self, record, gap):
         """Retain bounded short-gap timing evidence for repeated decodes."""
@@ -2139,14 +2265,21 @@ class SubjectHistoryBuilder:
 
     def rtl433_finalize_pattern_evidence(self, record):
         """Convert retained rtl_433 counters into stable compact summaries."""
-        for key in ("hour_histogram", "weekday_histogram", "day_night_counts", "frequency_counts"):
+        for key in (
+            "hour_histogram",
+            "weekday_histogram",
+            "day_night_counts",
+            "frequency_counts",
+        ):
             record[key] = self.sorted_counter_map(record.get(key) or {})
         gaps = [float(value) for value in record.get("burst_gaps_sec") or []]
         if gaps:
             record["burst_gap_min_sec"] = round(min(gaps), 1)
             record["burst_gap_max_sec"] = round(max(gaps), 1)
             record["burst_gap_avg_sec"] = round(sum(gaps) / len(gaps), 1)
-        record["recent_observation_count"] = len(record.get("recent_observations") or [])
+        record["recent_observation_count"] = len(
+            record.get("recent_observations") or []
+        )
 
     def rtl433_frequency_label(self, value):
         """Return a stable MHz label for rtl_433 frequency histograms."""
@@ -2211,30 +2344,38 @@ class SubjectHistoryBuilder:
                     latest_health = copy.deepcopy(event)
                     latest_health_epoch = epoch
                 continue
-            if event_type in ("collector_online", "collector_offline", "collector_retrying"):
+            if event_type in (
+                "collector_online",
+                "collector_offline",
+                "collector_retrying",
+            ):
                 if latest_health_epoch is None or epoch >= latest_health_epoch:
                     latest_health = {
                         "collector": "adsb",
                         "type": "adsb_collector_summary",
                         "timestamp": local_now(epoch),
                         "timestamp_epoch": epoch,
-                        "severity": "warning"
-                        if event_type != "collector_online"
-                        else "info",
+                        "severity": (
+                            "warning" if event_type != "collector_online" else "info"
+                        ),
                         "data": {
-                            "collector_state": "ONLINE"
-                            if event_type == "collector_online"
-                            else (
-                                "OFFLINE"
-                                if event_type == "collector_offline"
-                                else "RETRYING"
+                            "collector_state": (
+                                "ONLINE"
+                                if event_type == "collector_online"
+                                else (
+                                    "OFFLINE"
+                                    if event_type == "collector_offline"
+                                    else "RETRYING"
+                                )
                             ),
                             "source": data.get("source") or "",
                             "reason": data.get("reason") or "",
                             "decoder": data.get("decoder") or "",
                             "device_index": data.get("device_index"),
                             "poll_interval_sec": data.get("poll_interval_sec"),
-                            "decoder_health": self.adsb_decoder_health_label(event_type, data),
+                            "decoder_health": self.adsb_decoder_health_label(
+                                event_type, data
+                            ),
                             "rtlsdr_scheduling": self.adsb_rtlsdr_scheduling_text(data),
                             "last_seen": local_now(epoch),
                             "last_seen_epoch": epoch,
@@ -2321,7 +2462,9 @@ class SubjectHistoryBuilder:
         self.update_min_max_numeric(
             record, "min_altitude_ft", "max_altitude_ft", data.get("altitude_ft")
         )
-        self.update_max_numeric(record, "max_ground_speed_kt", data.get("ground_speed_kt"))
+        self.update_max_numeric(
+            record, "max_ground_speed_kt", data.get("ground_speed_kt")
+        )
         self.update_min_numeric(record, "min_distance_km", data.get("distance_km"))
         self.aprsis_sample(record, "sample_callsigns", data.get("callsign"), limit=6)
         self.aprsis_sample(record, "sample_squawks", data.get("squawk"), limit=6)
@@ -2350,7 +2493,9 @@ class SubjectHistoryBuilder:
         device = data.get("device_index")
         if device in (None, ""):
             return "ADS-B shares RTL-SDR ownership with RTL-433 unless separate devices are configured."
-        return "{} uses RTL-SDR device {}; configure RTL-433 for another device or stop one collector when only one dongle is attached.".format(decoder, device)
+        return "{} uses RTL-SDR device {}; configure RTL-433 for another device or stop one collector when only one dongle is attached.".format(
+            decoder, device
+        )
 
     def update_adsb_session_summary(self, record, epoch):
         """Fold ADS-B updates into compact pass/session evidence."""
@@ -2362,7 +2507,11 @@ class SubjectHistoryBuilder:
         record["_last_update_epoch"] = epoch
         record["session_count"] = int(record.get("pass_count") or 0)
         start = record.get("_active_pass_start") or local_now(epoch)
-        span = "{} to {}".format(start, local_now(epoch)) if start != local_now(epoch) else start
+        span = (
+            "{} to {}".format(start, local_now(epoch))
+            if start != local_now(epoch)
+            else start
+        )
         samples = record.setdefault("session_spans", [])
         if samples and samples[-1].startswith(str(start)):
             samples[-1] = span
@@ -2453,9 +2602,11 @@ class SubjectHistoryBuilder:
                     "type": "adsb_collector_summary",
                     "timestamp": local_now(latest_health_epoch),
                     "timestamp_epoch": latest_health_epoch,
-                    "severity": "warning"
-                    if latest_health.get("collector_state") != "ONLINE"
-                    else "info",
+                    "severity": (
+                        "warning"
+                        if latest_health.get("collector_state") != "ONLINE"
+                        else "info"
+                    ),
                     "data": latest_health,
                 }
             )
@@ -2516,14 +2667,16 @@ class SubjectHistoryBuilder:
             if epoch is None:
                 continue
             retained_events.append((epoch, event_type, event))
-        for epoch, event_type, event in sorted(retained_events, key=lambda item: item[0]):
+        for epoch, event_type, event in sorted(
+            retained_events, key=lambda item: item[0]
+        ):
             records_read += 1
             data = clean_noaa_data(event.get("data") or {})
             if event_type in ("collector_offline", "collector_retrying"):
                 latest_health = {
-                    "collector_state": "OFFLINE"
-                    if event_type == "collector_offline"
-                    else "RETRYING",
+                    "collector_state": (
+                        "OFFLINE" if event_type == "collector_offline" else "RETRYING"
+                    ),
                     "reason": data.get("reason") or "",
                     "last_seen": local_now(epoch),
                     "last_seen_epoch": epoch,
@@ -2558,7 +2711,13 @@ class SubjectHistoryBuilder:
             else:
                 fingerprint = data.get("fingerprint") or "|".join(
                     str(data.get(field) or "")
-                    for field in ("event", "headline", "updated", "summary", "source_url")
+                    for field in (
+                        "event",
+                        "headline",
+                        "updated",
+                        "summary",
+                        "source_url",
+                    )
                 )
             if data.get("alert_kind") == "forecast":
                 previous = previous_forecasts.get(event_id)
@@ -2584,15 +2743,18 @@ class SubjectHistoryBuilder:
                 "type": record.get("event_type") or "noaa_alert_summary",
                 "timestamp": record.get("last_seen"),
                 "timestamp_epoch": record.get("last_seen_epoch"),
-                "severity": "warning"
-                if (
-                    str(record.get("severity") or "").lower() in ("severe", "extreme")
-                    or (
-                        record.get("alert_kind") == "tsunami"
-                        and tsunami_is_alertworthy(record)
+                "severity": (
+                    "warning"
+                    if (
+                        str(record.get("severity") or "").lower()
+                        in ("severe", "extreme")
+                        or (
+                            record.get("alert_kind") == "tsunami"
+                            and tsunami_is_alertworthy(record)
+                        )
                     )
-                )
-                else "info",
+                    else "info"
+                ),
                 "data": clean_noaa_data(record),
             }
             for record in sorted(
@@ -2607,11 +2769,13 @@ class SubjectHistoryBuilder:
                 "type": "noaa_period_summary",
                 "timestamp": record.get("last_seen"),
                 "timestamp_epoch": record.get("last_seen_epoch"),
-                "severity": "warning"
-                if record.get("tropical_system_count")
-                or record.get("nws_hazard_count")
-                or record.get("tsunami_incident_count")
-                else "info",
+                "severity": (
+                    "warning"
+                    if record.get("tropical_system_count")
+                    or record.get("nws_hazard_count")
+                    or record.get("tsunami_incident_count")
+                    else "info"
+                ),
                 "data": clean_noaa_data(record),
             }
             for record in sorted(
@@ -2639,16 +2803,45 @@ class SubjectHistoryBuilder:
             )
         return output, records_read
 
-
     def noaa_forecast_delta_fields(self, previous, current):
         """Return compact previous-vs-current NWS point forecast deltas."""
         deltas = {}
         numeric_pairs = (
-            ("current_temperature_f", "previous_current_temperature_f", "current_temperature_delta_f", 5, "current temperature"),
-            ("temperature_min_f", "previous_temperature_min_f", "temperature_min_delta_f", 5, "low temperature"),
-            ("temperature_max_f", "previous_temperature_max_f", "temperature_max_delta_f", 5, "high temperature"),
-            ("max_precip_probability", "previous_max_precip_probability", "max_precip_probability_delta", 20, "rain probability"),
-            ("next_precip_probability", "previous_next_precip_probability", "next_precip_probability_delta", 20, "near-term rain probability"),
+            (
+                "current_temperature_f",
+                "previous_current_temperature_f",
+                "current_temperature_delta_f",
+                5,
+                "current temperature",
+            ),
+            (
+                "temperature_min_f",
+                "previous_temperature_min_f",
+                "temperature_min_delta_f",
+                5,
+                "low temperature",
+            ),
+            (
+                "temperature_max_f",
+                "previous_temperature_max_f",
+                "temperature_max_delta_f",
+                5,
+                "high temperature",
+            ),
+            (
+                "max_precip_probability",
+                "previous_max_precip_probability",
+                "max_precip_probability_delta",
+                20,
+                "rain probability",
+            ),
+            (
+                "next_precip_probability",
+                "previous_next_precip_probability",
+                "next_precip_probability_delta",
+                20,
+                "near-term rain probability",
+            ),
             ("max_wind_mph", "previous_max_wind_mph", "max_wind_delta_mph", 5, "wind"),
         )
         findings = []
@@ -2663,11 +2856,21 @@ class SubjectHistoryBuilder:
             if abs(delta) < threshold:
                 continue
             if label == "rain probability":
-                findings.append("Rain probability increased" if delta > 0 else "Rain probability decreased")
+                findings.append(
+                    "Rain probability increased"
+                    if delta > 0
+                    else "Rain probability decreased"
+                )
             elif label == "near-term rain probability":
-                findings.append("Near-term rain probability increased" if delta > 0 else "Near-term rain probability decreased")
+                findings.append(
+                    "Near-term rain probability increased"
+                    if delta > 0
+                    else "Near-term rain probability decreased"
+                )
             elif label == "wind":
-                findings.append("Stronger wind forecast" if delta > 0 else "Lower wind forecast")
+                findings.append(
+                    "Stronger wind forecast" if delta > 0 else "Lower wind forecast"
+                )
             else:
                 findings.append("Large {} shift".format(label))
         hazard_delta = self.noaa_forecast_hazard_delta(previous, current)
@@ -2681,7 +2884,9 @@ class SubjectHistoryBuilder:
             deltas["previous_forecast_generated_epoch"] = previous_epoch
         if findings:
             deltas["forecast_delta_findings"] = self.unique_text_list(findings, 8)
-            deltas["forecast_delta_summary"] = "; ".join(deltas["forecast_delta_findings"])
+            deltas["forecast_delta_summary"] = "; ".join(
+                deltas["forecast_delta_findings"]
+            )
             direction = self.noaa_forecast_change_direction(deltas, hazard_delta)
             if direction:
                 deltas["forecast_change_direction"] = direction
@@ -2729,7 +2934,11 @@ class SubjectHistoryBuilder:
         """Return deterioration/improvement text for meaningful forecast deltas."""
         worse = 0
         better = 0
-        for key in ("max_precip_probability_delta", "next_precip_probability_delta", "max_wind_delta_mph"):
+        for key in (
+            "max_precip_probability_delta",
+            "next_precip_probability_delta",
+            "max_wind_delta_mph",
+        ):
             value = self.safe_float(deltas.get(key))
             if value is None:
                 continue
@@ -2832,7 +3041,9 @@ class SubjectHistoryBuilder:
             if system:
                 record["_tropical_systems"].add(str(system))
             self.sample_direct_value(record, "basins", item.get("basin"), 12)
-            record["nhc_product_count_total"] = int(record.get("nhc_product_count_total") or 0) + int(item.get("nhc_product_count") or 1)
+            record["nhc_product_count_total"] = int(
+                record.get("nhc_product_count_total") or 0
+            ) + int(item.get("nhc_product_count") or 1)
         elif kind == "tsunami":
             incident = (
                 item.get("incident_id")
@@ -2841,14 +3052,18 @@ class SubjectHistoryBuilder:
             )
             if incident:
                 record["_tsunami_incidents"].add(str(incident))
-            record["tsunami_message_count"] = int(record.get("tsunami_message_count") or 0) + 1
+            record["tsunami_message_count"] = (
+                int(record.get("tsunami_message_count") or 0) + 1
+            )
         elif kind == "forecast":
             record["forecast_count"] = int(record.get("forecast_count") or 0) + 1
         else:
             record["nws_hazard_count"] = int(record.get("nws_hazard_count") or 0) + 1
             self.sample_direct_value(record, "hazard_events", item.get("event"), 16)
             self.sample_direct_value(record, "hazard_areas", item.get("area_desc"), 16)
-            self.sample_direct_value(record, "hazard_severities", item.get("severity"), 8)
+            self.sample_direct_value(
+                record, "hazard_severities", item.get("severity"), 8
+            )
         event_seen = item.get("last_seen_epoch") or epoch
         if event_seen >= record.get("last_seen_epoch", 0):
             record["last_seen_epoch"] = event_seen
@@ -2903,9 +3118,9 @@ class SubjectHistoryBuilder:
             data = clean_usgs_data(event.get("data") or {})
             if event_type in ("collector_offline", "collector_retrying"):
                 latest_health = {
-                    "collector_state": "OFFLINE"
-                    if event_type == "collector_offline"
-                    else "RETRYING",
+                    "collector_state": (
+                        "OFFLINE" if event_type == "collector_offline" else "RETRYING"
+                    ),
                     "reason": data.get("reason") or "",
                     "last_seen": local_now(epoch),
                     "last_seen_epoch": epoch,
@@ -2941,11 +3156,14 @@ class SubjectHistoryBuilder:
                 "type": "usgs_earthquake_summary",
                 "timestamp": record.get("last_seen"),
                 "timestamp_epoch": record.get("last_seen_epoch"),
-                "severity": "warning"
-                if record.get("tsunami")
-                or record.get("global_major")
-                or str(record.get("alert_color") or "").lower() in ("yellow", "orange", "red")
-                else "info",
+                "severity": (
+                    "warning"
+                    if record.get("tsunami")
+                    or record.get("global_major")
+                    or str(record.get("alert_color") or "").lower()
+                    in ("yellow", "orange", "red")
+                    else "info"
+                ),
                 "data": clean_usgs_data(record),
             }
             for record in sorted(
@@ -3027,7 +3245,9 @@ class SubjectHistoryBuilder:
         """Fold one unique earthquake into a USGS period summary."""
         record["event_count"] = int(record.get("event_count") or 0) + 1
         if quake.get("global_major") or str(quake.get("scope") or "") == "global":
-            record["global_major_count"] = int(record.get("global_major_count") or 0) + 1
+            record["global_major_count"] = (
+                int(record.get("global_major_count") or 0) + 1
+            )
         else:
             record["local_count"] = int(record.get("local_count") or 0) + 1
         magnitude = self.safe_float(quake.get("magnitude"))
@@ -3039,11 +3259,15 @@ class SubjectHistoryBuilder:
         nearest = self.safe_float(quake.get("distance_km"))
         if nearest is not None:
             old = record.get("nearest_distance_km")
-            record["nearest_distance_km"] = nearest if old is None else min(float(old), nearest)
+            record["nearest_distance_km"] = (
+                nearest if old is None else min(float(old), nearest)
+            )
         depth = self.safe_float(quake.get("depth_km"))
         if depth is not None:
             old = record.get("shallowest_depth_km")
-            record["shallowest_depth_km"] = depth if old is None else min(float(old), depth)
+            record["shallowest_depth_km"] = (
+                depth if old is None else min(float(old), depth)
+            )
         for list_key, value in (
             ("event_ids", quake.get("event_id")),
             ("alert_colors", quake.get("alert_color")),
@@ -3051,11 +3275,20 @@ class SubjectHistoryBuilder:
             ("feeds", quake.get("feed")),
         ):
             self.sample_direct_value(record, list_key, value, 24)
-        event_seen = quake.get("last_seen_epoch") or quake.get("event_time_epoch") or epoch
+        event_seen = (
+            quake.get("last_seen_epoch") or quake.get("event_time_epoch") or epoch
+        )
         if event_seen >= record.get("last_seen_epoch", 0):
             record["last_seen_epoch"] = event_seen
             record["last_seen"] = local_now(event_seen)
-            for key in ("event_id", "place", "magnitude", "event_time", "depth_km", "alert_color"):
+            for key in (
+                "event_id",
+                "place",
+                "magnitude",
+                "event_time",
+                "depth_km",
+                "alert_color",
+            ):
                 if quake.get(key) not in (None, "", []):
                     record["latest_{}".format(key)] = quake.get(key)
         first_seen = quake.get("first_seen_epoch") or epoch
@@ -3086,9 +3319,9 @@ class SubjectHistoryBuilder:
             data = clean_swpc_data(event.get("data") or {})
             if event_type in ("collector_offline", "collector_retrying"):
                 latest_health = {
-                    "collector_state": "OFFLINE"
-                    if event_type == "collector_offline"
-                    else "RETRYING",
+                    "collector_state": (
+                        "OFFLINE" if event_type == "collector_offline" else "RETRYING"
+                    ),
                     "reason": data.get("reason") or "",
                     "last_seen": local_now(epoch),
                     "last_seen_epoch": epoch,
@@ -3227,25 +3460,40 @@ class SubjectHistoryBuilder:
                 record.get("highest_xray_class"), item.get("xray_class")
             )
         elif kind == "radio_blackout":
-            record["radio_blackout_count"] = int(record.get("radio_blackout_count") or 0) + 1
+            record["radio_blackout_count"] = (
+                int(record.get("radio_blackout_count") or 0) + 1
+            )
             self.update_scale_max(record, "max_radio_blackout", item)
         elif kind == "solar_radiation_storm":
-            record["solar_radiation_storm_count"] = int(record.get("solar_radiation_storm_count") or 0) + 1
+            record["solar_radiation_storm_count"] = (
+                int(record.get("solar_radiation_storm_count") or 0) + 1
+            )
             self.update_scale_max(record, "max_solar_radiation_storm", item)
         elif kind == "geomagnetic_storm":
-            record["geomagnetic_storm_count"] = int(record.get("geomagnetic_storm_count") or 0) + 1
+            record["geomagnetic_storm_count"] = (
+                int(record.get("geomagnetic_storm_count") or 0) + 1
+            )
             self.update_scale_max(record, "max_geomagnetic_storm", item)
         kp = number_or_none(item.get("kp_index"))
         if kp is not None:
             old = record.get("max_kp")
             record["max_kp"] = kp if old is None else max(float(old), kp)
-        self.sample_direct_value(record, "events", item.get("event") or item.get("summary"), 24)
+        self.sample_direct_value(
+            record, "events", item.get("event") or item.get("summary"), 24
+        )
         self.sample_direct_value(record, "scale_labels", item.get("scale_label"), 24)
         event_seen = item.get("last_seen_epoch") or epoch
         if event_seen >= record.get("last_seen_epoch", 0):
             record["last_seen_epoch"] = event_seen
             record["last_seen"] = local_now(event_seen)
-            for key in ("event_id", "event", "event_kind", "scale_label", "xray_class", "kp_index"):
+            for key in (
+                "event_id",
+                "event",
+                "event_kind",
+                "scale_label",
+                "xray_class",
+                "kp_index",
+            ):
                 if item.get(key) not in (None, "", []):
                     record["latest_{}".format(key)] = item.get(key)
         first_seen = item.get("first_seen_epoch") or epoch
@@ -3301,9 +3549,9 @@ class SubjectHistoryBuilder:
             data = clean_pws_data(event.get("data") or {})
             if event_type in ("collector_offline", "collector_retrying"):
                 latest_health = {
-                    "collector_state": "OFFLINE"
-                    if event_type == "collector_offline"
-                    else "RETRYING",
+                    "collector_state": (
+                        "OFFLINE" if event_type == "collector_offline" else "RETRYING"
+                    ),
                     "reason": data.get("reason") or "",
                     "last_seen": local_now(epoch),
                     "last_seen_epoch": epoch,
@@ -3433,13 +3681,17 @@ class SubjectHistoryBuilder:
         """Expand period start/end and first/last fields using one daily record."""
         first_epoch = day.get("period_start_epoch") or day.get("first_seen_epoch")
         last_epoch = day.get("period_end_epoch") or day.get("last_seen_epoch")
-        if first_epoch is not None and first_epoch < record.get("period_start_epoch", first_epoch):
+        if first_epoch is not None and first_epoch < record.get(
+            "period_start_epoch", first_epoch
+        ):
             record["period_start_epoch"] = first_epoch
             record["period_start"] = local_now(first_epoch)
         if last_epoch is not None and last_epoch >= record.get("period_end_epoch", 0):
             record["period_end_epoch"] = last_epoch
             record["period_end"] = local_now(last_epoch)
-        if first_epoch is not None and first_epoch < record.get("first_seen_epoch", first_epoch):
+        if first_epoch is not None and first_epoch < record.get(
+            "first_seen_epoch", first_epoch
+        ):
             record["first_seen_epoch"] = first_epoch
             record["first_seen"] = local_now(first_epoch)
         if last_epoch is not None and last_epoch >= record.get("last_seen_epoch", 0):
@@ -3524,10 +3776,17 @@ class SubjectHistoryBuilder:
             record, "temperature", data.get("temperature_f"), "temperature_avg_f"
         )
         self.update_pws_first_latest_change(
-            record, "temperature", data.get("temperature_f"), epoch, "temperature_change_f"
+            record,
+            "temperature",
+            data.get("temperature_f"),
+            epoch,
+            "temperature_change_f",
         )
         self.update_min_max_numeric(
-            record, "humidity_min_percent", "humidity_max_percent", data.get("humidity_percent")
+            record,
+            "humidity_min_percent",
+            "humidity_max_percent",
+            data.get("humidity_percent"),
         )
         self.update_pws_average(
             record, "humidity", data.get("humidity_percent"), "humidity_avg_percent"
@@ -3535,7 +3794,9 @@ class SubjectHistoryBuilder:
         self.update_min_max_numeric(
             record, "dewpoint_min_f", "dewpoint_max_f", data.get("dewpoint_f")
         )
-        self.update_pws_average(record, "dewpoint", data.get("dewpoint_f"), "dewpoint_avg_f")
+        self.update_pws_average(
+            record, "dewpoint", data.get("dewpoint_f"), "dewpoint_avg_f"
+        )
         self.update_min_max_numeric(
             record,
             "pressure_rel_min_inhg",
@@ -3550,9 +3811,13 @@ class SubjectHistoryBuilder:
             "pressure_rel_change_inhg",
             digits=3,
         )
-        self.update_max_numeric(record, "wind_speed_max_mph", data.get("wind_speed_mph"))
+        self.update_max_numeric(
+            record, "wind_speed_max_mph", data.get("wind_speed_mph")
+        )
         self.update_max_numeric(record, "wind_gust_max_mph", data.get("wind_gust_mph"))
-        self.update_max_numeric(record, "max_daily_gust_mph", data.get("max_daily_gust_mph"))
+        self.update_max_numeric(
+            record, "max_daily_gust_mph", data.get("max_daily_gust_mph")
+        )
         self.update_pws_wind_direction(record, data.get("wind_direction_deg"))
         self.update_max_numeric(record, "rain_1h_max_in", data.get("rain_1h_in"))
         self.update_max_numeric(record, "rain_period_total_in", data.get("rain_day_in"))
@@ -3587,11 +3852,15 @@ class SubjectHistoryBuilder:
         if record.get(first_epoch_key) is None or epoch < record.get(first_epoch_key):
             record[first_epoch_key] = epoch
             record[first_key] = number
-        if record.get(latest_epoch_key) is None or epoch >= record.get(latest_epoch_key):
+        if record.get(latest_epoch_key) is None or epoch >= record.get(
+            latest_epoch_key
+        ):
             record[latest_epoch_key] = epoch
             record[latest_key] = number
         if record.get(first_key) is not None and record.get(latest_key) is not None:
-            record[output_key] = round(float(record[latest_key]) - float(record[first_key]), digits)
+            record[output_key] = round(
+                float(record[latest_key]) - float(record[first_key]), digits
+            )
 
     def update_pws_wind_direction(self, record, value):
         """Update a circular mean wind direction."""
@@ -3600,8 +3869,12 @@ class SubjectHistoryBuilder:
         except (TypeError, ValueError):
             return
         radians = math.radians(degrees)
-        record["_wind_dir_sin_sum"] = float(record.get("_wind_dir_sin_sum") or 0) + math.sin(radians)
-        record["_wind_dir_cos_sum"] = float(record.get("_wind_dir_cos_sum") or 0) + math.cos(radians)
+        record["_wind_dir_sin_sum"] = float(
+            record.get("_wind_dir_sin_sum") or 0
+        ) + math.sin(radians)
+        record["_wind_dir_cos_sum"] = float(
+            record.get("_wind_dir_cos_sum") or 0
+        ) + math.cos(radians)
         record["_wind_dir_count"] = int(record.get("_wind_dir_count") or 0) + 1
         angle = math.degrees(
             math.atan2(record["_wind_dir_sin_sum"], record["_wind_dir_cos_sum"])
@@ -3618,14 +3891,22 @@ class SubjectHistoryBuilder:
         previous_epoch = record.get("_last_sample_epoch")
         if previous_epoch is not None and previous:
             delta = max(0, float(epoch) - float(previous_epoch))
-            record["rain_active_span_sec"] = float(record.get("rain_active_span_sec") or 0) + min(delta, 600)
+            record["rain_active_span_sec"] = float(
+                record.get("rain_active_span_sec") or 0
+            ) + min(delta, 600)
         if previous is None:
             if current:
-                record["rain_episode_count"] = int(record.get("rain_episode_count") or 0) + 1
+                record["rain_episode_count"] = (
+                    int(record.get("rain_episode_count") or 0) + 1
+                )
         elif not previous and current:
-            record["rain_episode_count"] = int(record.get("rain_episode_count") or 0) + 1
+            record["rain_episode_count"] = (
+                int(record.get("rain_episode_count") or 0) + 1
+            )
         if current:
-            record["rain_active_sample_count"] = int(record.get("rain_active_sample_count") or 0) + 1
+            record["rain_active_sample_count"] = (
+                int(record.get("rain_active_sample_count") or 0) + 1
+            )
         record["_last_rain_active"] = current
         record["_last_sample_epoch"] = epoch
 
@@ -3633,7 +3914,9 @@ class SubjectHistoryBuilder:
         """Return one display-safe PWS aggregate record."""
         record = dict(record or {})
         if record.get("rain_active_span_sec") is not None:
-            record["rain_active_span_min"] = round(float(record.get("rain_active_span_sec") or 0) / 60.0, 1)
+            record["rain_active_span_min"] = round(
+                float(record.get("rain_active_span_sec") or 0) / 60.0, 1
+            )
         record["coverage_days"] = max(1, int(record.get("day_count") or 1))
         for key in list(record):
             if key.startswith("_"):
@@ -3652,7 +3935,9 @@ class SubjectHistoryBuilder:
                 key, label = self.pws_period_key(epoch, kind)
                 record = periods.setdefault(
                     (station_id, kind, key),
-                    self.new_pws_period_record(station_id, day, epoch, kind, key, label),
+                    self.new_pws_period_record(
+                        station_id, day, epoch, kind, key, label
+                    ),
                 )
                 self.update_pws_period_from_day(record, day)
         return [self.finalize_pws_period_record(record) for record in periods.values()]
@@ -3661,10 +3946,14 @@ class SubjectHistoryBuilder:
         """Fold one daily aggregate into a longer PWS period aggregate."""
         self.update_pws_latest_metadata(record, day)
         record["day_count"] = int(record.get("day_count") or 0) + 1
-        record["sample_count"] = int(record.get("sample_count") or 0) + int(day.get("sample_count") or 0)
+        record["sample_count"] = int(record.get("sample_count") or 0) + int(
+            day.get("sample_count") or 0
+        )
         first_epoch = day.get("period_start_epoch") or day.get("first_seen_epoch")
         last_epoch = day.get("period_end_epoch") or day.get("last_seen_epoch")
-        if first_epoch is not None and first_epoch < record.get("period_start_epoch", first_epoch):
+        if first_epoch is not None and first_epoch < record.get(
+            "period_start_epoch", first_epoch
+        ):
             record["period_start_epoch"] = first_epoch
             record["period_start"] = local_now(first_epoch)
         if last_epoch is not None and last_epoch >= record.get("period_end_epoch", 0):
@@ -3676,8 +3965,12 @@ class SubjectHistoryBuilder:
             ("dewpoint", "dewpoint_min_f", "dewpoint_max_f"),
             ("pressure_rel", "pressure_rel_min_inhg", "pressure_rel_max_inhg"),
         ):
-            self.update_min_max_numeric(record, target_min, target_max, day.get(target_min))
-            self.update_min_max_numeric(record, target_min, target_max, day.get(target_max))
+            self.update_min_max_numeric(
+                record, target_min, target_max, day.get(target_min)
+            )
+            self.update_min_max_numeric(
+                record, target_min, target_max, day.get(target_max)
+            )
             self.update_pws_weighted_average(record, source_key, day)
         self.update_pws_first_latest_from_day(
             record, "temperature", day, "temperature_change_f"
@@ -3692,22 +3985,43 @@ class SubjectHistoryBuilder:
                 + float(day.get("rain_period_total_in") or 0),
                 3,
             )
-        record["rain_episode_count"] = int(record.get("rain_episode_count") or 0) + int(day.get("rain_episode_count") or 0)
-        record["rain_active_sample_count"] = int(record.get("rain_active_sample_count") or 0) + int(day.get("rain_active_sample_count") or 0)
-        record["rain_active_span_sec"] = float(record.get("rain_active_span_sec") or 0) + float(day.get("rain_active_span_sec") or 0)
-        self.update_max_numeric(record, "wind_speed_max_mph", day.get("wind_speed_max_mph"))
-        self.update_max_numeric(record, "wind_gust_max_mph", day.get("wind_gust_max_mph"))
-        self.update_max_numeric(record, "max_daily_gust_mph", day.get("max_daily_gust_mph"))
+        record["rain_episode_count"] = int(record.get("rain_episode_count") or 0) + int(
+            day.get("rain_episode_count") or 0
+        )
+        record["rain_active_sample_count"] = int(
+            record.get("rain_active_sample_count") or 0
+        ) + int(day.get("rain_active_sample_count") or 0)
+        record["rain_active_span_sec"] = float(
+            record.get("rain_active_span_sec") or 0
+        ) + float(day.get("rain_active_span_sec") or 0)
+        self.update_max_numeric(
+            record, "wind_speed_max_mph", day.get("wind_speed_max_mph")
+        )
+        self.update_max_numeric(
+            record, "wind_gust_max_mph", day.get("wind_gust_max_mph")
+        )
+        self.update_max_numeric(
+            record, "max_daily_gust_mph", day.get("max_daily_gust_mph")
+        )
         self.update_max_numeric(record, "solar_max_w_m2", day.get("solar_max_w_m2"))
         self.update_max_numeric(record, "uv_max_index", day.get("uv_max_index"))
         self.update_pws_wind_direction(record, day.get("wind_direction_avg_deg"))
         if last_epoch is not None and last_epoch >= record.get("last_seen_epoch", 0):
             record["last_seen_epoch"] = last_epoch
             record["last_seen"] = local_now(last_epoch)
-            for key in ("event_time", "event_time_epoch", "ambient_date", "ambient_date_epoch", "battery", "weather_summary"):
+            for key in (
+                "event_time",
+                "event_time_epoch",
+                "ambient_date",
+                "ambient_date_epoch",
+                "battery",
+                "weather_summary",
+            ):
                 if day.get(key) not in (None, "", []):
                     record[key] = day.get(key)
-        if first_epoch is not None and first_epoch < record.get("first_seen_epoch", first_epoch):
+        if first_epoch is not None and first_epoch < record.get(
+            "first_seen_epoch", first_epoch
+        ):
             record["first_seen_epoch"] = first_epoch
             record["first_seen"] = local_now(first_epoch)
 
@@ -3731,7 +4045,9 @@ class SubjectHistoryBuilder:
         record[count_key] = int(record.get(count_key) or 0) + weight
         record[output_key] = round(record[sum_key] / record[count_key], 2)
 
-    def update_pws_first_latest_from_day(self, record, prefix, day, output_key, digits=1):
+    def update_pws_first_latest_from_day(
+        self, record, prefix, day, output_key, digits=1
+    ):
         """Fold daily first/latest values into a longer period change field."""
         first_key = "_{}_first".format(prefix)
         latest_key = "_{}_latest".format(prefix)
@@ -3743,13 +4059,19 @@ class SubjectHistoryBuilder:
         day_latest_epoch = day.get(latest_epoch_key)
         if day_first is None or day_latest is None:
             return
-        if record.get(first_epoch_key) is None or day_first_epoch < record.get(first_epoch_key):
+        if record.get(first_epoch_key) is None or day_first_epoch < record.get(
+            first_epoch_key
+        ):
             record[first_epoch_key] = day_first_epoch
             record[first_key] = day_first
-        if record.get(latest_epoch_key) is None or day_latest_epoch >= record.get(latest_epoch_key):
+        if record.get(latest_epoch_key) is None or day_latest_epoch >= record.get(
+            latest_epoch_key
+        ):
             record[latest_epoch_key] = day_latest_epoch
             record[latest_key] = day_latest
-        record[output_key] = round(float(record[latest_key]) - float(record[first_key]), digits)
+        record[output_key] = round(
+            float(record[latest_key]) - float(record[first_key]), digits
+        )
 
     def update_pws_weather_summary(self, record, data, epoch):
         """Fold one PWS sample into its station summary."""
@@ -3811,22 +4133,35 @@ class SubjectHistoryBuilder:
                 if data.get(key) not in (None, "", []):
                     record[key] = data.get(key)
             if data.get("battery"):
-                self.sample_direct_value(record, "sample_battery", data.get("battery"), 8)
+                self.sample_direct_value(
+                    record, "sample_battery", data.get("battery"), 8
+                )
             record["latest_rain_1h_in"] = rain
             self.update_pws_rain_transition(record, previous_rain, rain, epoch)
-        if record.get("first_temperature_f") is None and data.get("temperature_f") is not None:
+        if (
+            record.get("first_temperature_f") is None
+            and data.get("temperature_f") is not None
+        ):
             record["first_temperature_f"] = data.get("temperature_f")
-        self.update_min_max_numeric(record, "temperature_min_f", "temperature_max_f", data.get("temperature_f"))
-        if record.get("temperature_f") is not None and record.get("first_temperature_f") is not None:
+        self.update_min_max_numeric(
+            record, "temperature_min_f", "temperature_max_f", data.get("temperature_f")
+        )
+        if (
+            record.get("temperature_f") is not None
+            and record.get("first_temperature_f") is not None
+        ):
             try:
                 record["temperature_change_f"] = round(
-                    float(record.get("temperature_f")) - float(record.get("first_temperature_f")),
+                    float(record.get("temperature_f"))
+                    - float(record.get("first_temperature_f")),
                     1,
                 )
             except (TypeError, ValueError):
                 pass
         self.update_max_numeric(record, "rain_1h_max_in", data.get("rain_1h_in"))
-        self.update_max_numeric(record, "wind_speed_max_mph", data.get("wind_speed_mph"))
+        self.update_max_numeric(
+            record, "wind_speed_max_mph", data.get("wind_speed_mph")
+        )
         self.update_max_numeric(record, "wind_gust_max_mph", data.get("wind_gust_mph"))
 
     def update_pws_rain_transition(self, record, previous_rain, rain, epoch):
@@ -3910,9 +4245,9 @@ class SubjectHistoryBuilder:
             data = clean_lan_data(event.get("data") or {})
             if event_type in ("collector_offline", "collector_retrying"):
                 latest_health = {
-                    "collector_state": "OFFLINE"
-                    if event_type == "collector_offline"
-                    else "RETRYING",
+                    "collector_state": (
+                        "OFFLINE" if event_type == "collector_offline" else "RETRYING"
+                    ),
                     "reason": data.get("reason") or "",
                     "last_seen": local_now(epoch),
                     "last_seen_epoch": epoch,
@@ -3923,8 +4258,14 @@ class SubjectHistoryBuilder:
                 key = (
                     data.get("subject_key")
                     or ("mac:{}".format(data.get("mac")) if data.get("mac") else "")
-                    or ("ip:{}".format(data.get("gateway_ip")) if data.get("gateway_ip") else "")
-                    or "{}:{}".format(data.get("family") or "", data.get("interface") or "")
+                    or (
+                        "ip:{}".format(data.get("gateway_ip"))
+                        if data.get("gateway_ip")
+                        else ""
+                    )
+                    or "{}:{}".format(
+                        data.get("family") or "", data.get("interface") or ""
+                    )
                 )
                 record = gateways.setdefault(
                     key,
@@ -3939,7 +4280,12 @@ class SubjectHistoryBuilder:
                 )
                 self.update_lan_gateway_summary(record, data, event_type, epoch)
                 continue
-            key = data.get("subject_key") or data.get("mac") or data.get("ip") or "unknown"
+            key = (
+                data.get("subject_key")
+                or data.get("mac")
+                or data.get("ip")
+                or "unknown"
+            )
             record = devices.setdefault(
                 key,
                 {
@@ -4076,7 +4422,9 @@ class SubjectHistoryBuilder:
         for key in ("mac", "ip"):
             if data.get(key) and not record.get(key):
                 record[key] = data.get(key)
-        self.sample_direct_value(record, "ips", data.get("ip") or data.get("target"), 16)
+        self.sample_direct_value(
+            record, "ips", data.get("ip") or data.get("target"), 16
+        )
         self.sample_direct_value(record, "sources", "lan-identify", 16)
         for key in (
             "open_ports",
@@ -4225,19 +4573,28 @@ class SubjectHistoryBuilder:
                     return sample
         return sample
 
-
     def grouped_member_summaries(self, records, source, limit=24):
         """Return bounded per-member evidence for grouped privacy subjects."""
         members = []
         for record in records or []:
             source_members = record.get("group_members")
-            candidates = source_members if isinstance(source_members, list) and source_members else [self.group_member_summary(record, source)]
+            candidates = (
+                source_members
+                if isinstance(source_members, list) and source_members
+                else [self.group_member_summary(record, source)]
+            )
             for candidate in candidates:
                 if not isinstance(candidate, dict):
                     continue
-                member = {key: value for key, value in candidate.items() if value not in (None, "", [], {})}
+                member = {
+                    key: value
+                    for key, value in candidate.items()
+                    if value not in (None, "", [], {})
+                }
                 mac = str(member.get("mac") or "").strip().lower()
-                if not mac or any(str(item.get("mac") or "").lower() == mac for item in members):
+                if not mac or any(
+                    str(item.get("mac") or "").lower() == mac for item in members
+                ):
                     continue
                 members.append(member)
                 if len(members) >= limit:
@@ -4256,37 +4613,67 @@ class SubjectHistoryBuilder:
             "signal_max": record.get("signal_max"),
         }
         if source == "wifi":
-            member.update({
-                "identity": record.get("vendor_name") or record.get("vendor_prefix") or "",
-                "ssids": (record.get("ssids") or [])[:8],
-                "probe_count": record.get("probe_count") or 0,
-                "association_count": record.get("association_count") or 0,
-                "deauth_count": record.get("deauth_count") or 0,
-                "disassoc_count": record.get("disassoc_count") or 0,
-            })
+            member.update(
+                {
+                    "identity": record.get("vendor_name")
+                    or record.get("vendor_prefix")
+                    or "",
+                    "ssids": (record.get("ssids") or [])[:8],
+                    "probe_count": record.get("probe_count") or 0,
+                    "association_count": record.get("association_count") or 0,
+                    "deauth_count": record.get("deauth_count") or 0,
+                    "disassoc_count": record.get("disassoc_count") or 0,
+                }
+            )
         elif source == "bluetooth":
-            names = list(record.get("names") or ([record.get("name")] if record.get("name") else []))
-            member.update({
-                "identity": names[0] if names else (record.get("manufacturer") or record.get("manufacturer_name") or ""),
-                "names": names[:6],
-                "service_uuids": (record.get("service_uuids") or [])[:8],
-                "seen_count": record.get("seen_count") or 0,
-                "update_count": record.get("update_count") or 0,
-                "lost_count": record.get("lost_count") or 0,
-                "classic_seen_count": record.get("classic_seen_count") or 0,
-                "session_count": record.get("session_count") or 0,
-                "active_session": bool(record.get("active_session")),
-            })
+            names = list(
+                record.get("names")
+                or ([record.get("name")] if record.get("name") else [])
+            )
+            member.update(
+                {
+                    "identity": (
+                        names[0]
+                        if names
+                        else (
+                            record.get("manufacturer")
+                            or record.get("manufacturer_name")
+                            or ""
+                        )
+                    ),
+                    "names": names[:6],
+                    "service_uuids": (record.get("service_uuids") or [])[:8],
+                    "seen_count": record.get("seen_count") or 0,
+                    "update_count": record.get("update_count") or 0,
+                    "lost_count": record.get("lost_count") or 0,
+                    "classic_seen_count": record.get("classic_seen_count") or 0,
+                    "session_count": record.get("session_count") or 0,
+                    "active_session": bool(record.get("active_session")),
+                }
+            )
         elif source == "lan":
-            member.update({
-                "identity": record.get("hostname") or record.get("vendor_name") or record.get("vendor_prefix") or "",
-                "ips": (record.get("ips") or ([record.get("ip")] if record.get("ip") else []))[:8],
-                "sources": (record.get("sources") or [])[:8],
-                "interfaces": (record.get("interfaces") or ([record.get("interface")] if record.get("interface") else []))[:8],
-                "observation_count": record.get("observation_count") or 0,
-                "identify_count": record.get("identify_count") or 0,
-                "change_count": record.get("change_count") or 0,
-            })
+            member.update(
+                {
+                    "identity": record.get("hostname")
+                    or record.get("vendor_name")
+                    or record.get("vendor_prefix")
+                    or "",
+                    "ips": (
+                        record.get("ips")
+                        or ([record.get("ip")] if record.get("ip") else [])
+                    )[:8],
+                    "sources": (record.get("sources") or [])[:8],
+                    "interfaces": (
+                        record.get("interfaces")
+                        or (
+                            [record.get("interface")] if record.get("interface") else []
+                        )
+                    )[:8],
+                    "observation_count": record.get("observation_count") or 0,
+                    "identify_count": record.get("identify_count") or 0,
+                    "change_count": record.get("change_count") or 0,
+                }
+            )
         return member
 
     def grouped_record_count(self, records):
@@ -4294,7 +4681,14 @@ class SubjectHistoryBuilder:
         total = 0
         for record in records or []:
             try:
-                total += max(1, int(record.get("randomized_group_count") or record.get("device_count") or 1))
+                total += max(
+                    1,
+                    int(
+                        record.get("randomized_group_count")
+                        or record.get("device_count")
+                        or 1
+                    ),
+                )
             except (TypeError, ValueError):
                 total += 1
         return total
@@ -4334,7 +4728,11 @@ class SubjectHistoryBuilder:
 
     def add_wifi_subjects(self, subjects, wifi):
         """Add SSID, BSSID, and client MAC subjects."""
-        aps = [item for item in (wifi or {}).get("access_points") or [] if isinstance(item, dict)]
+        aps = [
+            item
+            for item in (wifi or {}).get("access_points") or []
+            if isinstance(item, dict)
+        ]
         clients = [
             item for item in (wifi or {}).get("clients") or [] if isinstance(item, dict)
         ]
@@ -4388,11 +4786,15 @@ class SubjectHistoryBuilder:
                         "ssid": ssid,
                         "bssid_count": len(bssids),
                         "bssids": bssids[:24],
-                        "observations": sum(int(ap.get("observations") or 0) for ap in ssid_aps),
+                        "observations": sum(
+                            int(ap.get("observations") or 0) for ap in ssid_aps
+                        ),
                     },
                 )
             )
-        randomized_clients = [client for client in clients if low_identity_wifi_client(client)]
+        randomized_clients = [
+            client for client in clients if low_identity_wifi_client(client)
+        ]
         if randomized_clients:
             subjects.append(
                 self.subject_record(
@@ -4403,17 +4805,37 @@ class SubjectHistoryBuilder:
                     self.grouped_subject_time_source(randomized_clients),
                     {
                         "grouped_randomized": True,
-                        "randomized_group_count": self.grouped_record_count(randomized_clients),
+                        "randomized_group_count": self.grouped_record_count(
+                            randomized_clients
+                        ),
                         "sample_macs": self.grouped_sample_macs(randomized_clients),
-                        "group_members": self.grouped_member_summaries(randomized_clients, "wifi"),
-                        "ssids": self.grouped_list_values(randomized_clients, "ssids", 50),
-                        "probe_count": self.grouped_sum(randomized_clients, "probe_count"),
-                        "association_count": self.grouped_sum(randomized_clients, "association_count"),
-                        "deauth_count": self.grouped_sum(randomized_clients, "deauth_count"),
-                        "disassoc_count": self.grouped_sum(randomized_clients, "disassoc_count"),
-                        "signal_min": self.grouped_signal_value(randomized_clients, "signal_min", min),
-                        "signal_max": self.grouped_signal_value(randomized_clients, "signal_max", max),
-                        "blank_ssid_count": sum(1 for c in randomized_clients if not c.get("ssids")),
+                        "group_members": self.grouped_member_summaries(
+                            randomized_clients, "wifi"
+                        ),
+                        "ssids": self.grouped_list_values(
+                            randomized_clients, "ssids", 50
+                        ),
+                        "probe_count": self.grouped_sum(
+                            randomized_clients, "probe_count"
+                        ),
+                        "association_count": self.grouped_sum(
+                            randomized_clients, "association_count"
+                        ),
+                        "deauth_count": self.grouped_sum(
+                            randomized_clients, "deauth_count"
+                        ),
+                        "disassoc_count": self.grouped_sum(
+                            randomized_clients, "disassoc_count"
+                        ),
+                        "signal_min": self.grouped_signal_value(
+                            randomized_clients, "signal_min", min
+                        ),
+                        "signal_max": self.grouped_signal_value(
+                            randomized_clients, "signal_max", max
+                        ),
+                        "blank_ssid_count": sum(
+                            1 for c in randomized_clients if not c.get("ssids")
+                        ),
                     },
                 )
             )
@@ -4453,7 +4875,8 @@ class SubjectHistoryBuilder:
                 bucket = bluetooth_identity_bucket(device)
                 label = bluetooth_group_label(device)
                 subject_id = device.get("mac") or "randomized:{}:{}".format(
-                    bucket[0], bucket[1].lower())
+                    bucket[0], bucket[1].lower()
+                )
                 subjects.append(
                     self.subject_record(
                         "bluetooth",
@@ -4463,18 +4886,30 @@ class SubjectHistoryBuilder:
                         self.grouped_subject_time_source([device]),
                         {
                             "grouped_randomized": True,
-                            "randomized_group_count": self.grouped_record_count([device]),
+                            "randomized_group_count": self.grouped_record_count(
+                                [device]
+                            ),
                             "identity_bucket": bucket[0],
                             "identity_label": bucket[1],
                             "sample_macs": self.grouped_sample_macs([device]),
-                            "group_members": self.grouped_member_summaries([device], "bluetooth"),
-                            "service_uuids": self.grouped_list_values([device], "service_uuids", 32),
+                            "group_members": self.grouped_member_summaries(
+                                [device], "bluetooth"
+                            ),
+                            "service_uuids": self.grouped_list_values(
+                                [device], "service_uuids", 32
+                            ),
                             "seen_count": self.grouped_sum([device], "seen_count"),
                             "update_count": self.grouped_sum([device], "update_count"),
                             "lost_count": self.grouped_sum([device], "lost_count"),
-                            "session_count": self.grouped_sum([device], "session_count"),
-                            "signal_min": self.grouped_signal_value([device], "signal_min", min),
-                            "signal_max": self.grouped_signal_value([device], "signal_max", max),
+                            "session_count": self.grouped_sum(
+                                [device], "session_count"
+                            ),
+                            "signal_min": self.grouped_signal_value(
+                                [device], "signal_min", min
+                            ),
+                            "signal_max": self.grouped_signal_value(
+                                [device], "signal_max", max
+                            ),
                         },
                     )
                 )
@@ -4581,16 +5016,12 @@ class SubjectHistoryBuilder:
                         "rain_last_transition_epoch": data.get(
                             "rain_last_transition_epoch"
                         ),
-                        "rain_episode_started_at": data.get(
-                            "rain_episode_started_at"
-                        )
+                        "rain_episode_started_at": data.get("rain_episode_started_at")
                         or "",
                         "rain_episode_started_epoch": data.get(
                             "rain_episode_started_epoch"
                         ),
-                        "rain_episode_stopped_at": data.get(
-                            "rain_episode_stopped_at"
-                        )
+                        "rain_episode_stopped_at": data.get("rain_episode_stopped_at")
                         or "",
                         "rain_episode_stopped_epoch": data.get(
                             "rain_episode_stopped_epoch"
@@ -4650,9 +5081,7 @@ class SubjectHistoryBuilder:
                         "endpoint": endpoint,
                         "warning_count": data.get("warning_count") or 0,
                         "events_in_window": data.get("events_in_window") or 0,
-                        "warning_events_in_window": data.get(
-                            "warning_events_in_window"
-                        )
+                        "warning_events_in_window": data.get("warning_events_in_window")
                         or 0,
                         "latest_event": data.get("latest_event") or "",
                         "rayhunter_version": data.get("rayhunter_version") or "",
@@ -4662,9 +5091,7 @@ class SubjectHistoryBuilder:
                         "recording_id": data.get("recording_id") or "",
                         "recording_size": data.get("recording_size") or "",
                         "recording_start": data.get("recording_start") or "",
-                        "recording_last_message": data.get(
-                            "recording_last_message"
-                        )
+                        "recording_last_message": data.get("recording_last_message")
                         or "",
                         "device_os": data.get("device_os") or "",
                         "gps_mode": data.get("gps_mode") or "",
@@ -4848,27 +5275,48 @@ class SubjectHistoryBuilder:
                         "precip_likely_soon": data.get("precip_likely_soon"),
                         "next_precip_start": data.get("next_precip_start") or "",
                         "next_precip_end": data.get("next_precip_end") or "",
-                        "next_precip_probability": data.get(
-                            "next_precip_probability"
-                        ),
-                        "next_precip_forecast": data.get("next_precip_forecast")
-                        or "",
+                        "next_precip_probability": data.get("next_precip_probability"),
+                        "next_precip_forecast": data.get("next_precip_forecast") or "",
                         "max_wind_mph": data.get("max_wind_mph"),
-                        "forecast_delta_findings": data.get("forecast_delta_findings") or [],
-                        "forecast_delta_summary": data.get("forecast_delta_summary") or "",
-                        "forecast_change_direction": data.get("forecast_change_direction") or "",
-                        "previous_forecast_generated": data.get("previous_forecast_generated") or "",
-                        "previous_current_temperature_f": data.get("previous_current_temperature_f"),
-                        "previous_temperature_min_f": data.get("previous_temperature_min_f"),
-                        "previous_temperature_max_f": data.get("previous_temperature_max_f"),
-                        "previous_max_precip_probability": data.get("previous_max_precip_probability"),
-                        "previous_next_precip_probability": data.get("previous_next_precip_probability"),
+                        "forecast_delta_findings": data.get("forecast_delta_findings")
+                        or [],
+                        "forecast_delta_summary": data.get("forecast_delta_summary")
+                        or "",
+                        "forecast_change_direction": data.get(
+                            "forecast_change_direction"
+                        )
+                        or "",
+                        "previous_forecast_generated": data.get(
+                            "previous_forecast_generated"
+                        )
+                        or "",
+                        "previous_current_temperature_f": data.get(
+                            "previous_current_temperature_f"
+                        ),
+                        "previous_temperature_min_f": data.get(
+                            "previous_temperature_min_f"
+                        ),
+                        "previous_temperature_max_f": data.get(
+                            "previous_temperature_max_f"
+                        ),
+                        "previous_max_precip_probability": data.get(
+                            "previous_max_precip_probability"
+                        ),
+                        "previous_next_precip_probability": data.get(
+                            "previous_next_precip_probability"
+                        ),
                         "previous_max_wind_mph": data.get("previous_max_wind_mph"),
-                        "current_temperature_delta_f": data.get("current_temperature_delta_f"),
+                        "current_temperature_delta_f": data.get(
+                            "current_temperature_delta_f"
+                        ),
                         "temperature_min_delta_f": data.get("temperature_min_delta_f"),
                         "temperature_max_delta_f": data.get("temperature_max_delta_f"),
-                        "max_precip_probability_delta": data.get("max_precip_probability_delta"),
-                        "next_precip_probability_delta": data.get("next_precip_probability_delta"),
+                        "max_precip_probability_delta": data.get(
+                            "max_precip_probability_delta"
+                        ),
+                        "next_precip_probability_delta": data.get(
+                            "next_precip_probability_delta"
+                        ),
                         "max_wind_delta_mph": data.get("max_wind_delta_mph"),
                         "first_period_start": data.get("first_period_start") or "",
                         "last_period_end": data.get("last_period_end") or "",
@@ -5011,8 +5459,12 @@ class SubjectHistoryBuilder:
             elif event_type == "pws_weather_period_summary":
                 continue
             else:
-                subject_id = data.get("station_id") or data.get("mac_address") or "unknown"
-                subject = data.get("station_id") or data.get("station_name") or subject_id
+                subject_id = (
+                    data.get("station_id") or data.get("mac_address") or "unknown"
+                )
+                subject = (
+                    data.get("station_id") or data.get("station_name") or subject_id
+                )
                 subject_type = "pws_weather_station"
             subjects.append(
                 self.subject_record(
@@ -5047,9 +5499,7 @@ class SubjectHistoryBuilder:
                         "dewpoint_f": data.get("dewpoint_f"),
                         "feels_like_f": data.get("feels_like_f"),
                         "indoor_temperature_f": data.get("indoor_temperature_f"),
-                        "indoor_humidity_percent": data.get(
-                            "indoor_humidity_percent"
-                        ),
+                        "indoor_humidity_percent": data.get("indoor_humidity_percent"),
                         "indoor_dewpoint_f": data.get("indoor_dewpoint_f"),
                         "indoor_feels_like_f": data.get("indoor_feels_like_f"),
                         "temperature_min_f": data.get("temperature_min_f"),
@@ -5060,9 +5510,7 @@ class SubjectHistoryBuilder:
                             "wind_direction_avg_10m_deg"
                         ),
                         "wind_speed_mph": data.get("wind_speed_mph"),
-                        "wind_speed_avg_10m_mph": data.get(
-                            "wind_speed_avg_10m_mph"
-                        ),
+                        "wind_speed_avg_10m_mph": data.get("wind_speed_avg_10m_mph"),
                         "wind_gust_mph": data.get("wind_gust_mph"),
                         "max_daily_gust_mph": data.get("max_daily_gust_mph"),
                         "wind_speed_max_mph": data.get("wind_speed_max_mph"),
@@ -5091,16 +5539,12 @@ class SubjectHistoryBuilder:
                         "rain_last_transition_epoch": data.get(
                             "rain_last_transition_epoch"
                         ),
-                        "rain_episode_started_at": data.get(
-                            "rain_episode_started_at"
-                        )
+                        "rain_episode_started_at": data.get("rain_episode_started_at")
                         or "",
                         "rain_episode_started_epoch": data.get(
                             "rain_episode_started_epoch"
                         ),
-                        "rain_episode_stopped_at": data.get(
-                            "rain_episode_stopped_at"
-                        )
+                        "rain_episode_stopped_at": data.get("rain_episode_stopped_at")
                         or "",
                         "rain_episode_stopped_epoch": data.get(
                             "rain_episode_stopped_epoch"
@@ -5129,12 +5573,26 @@ class SubjectHistoryBuilder:
             data = clean_lan_data(raw_data)
             self.preserve_subject_annotation_overlay(data, raw_data, event)
             event_type = (event or {}).get("type") or ""
-            if event_type in ("lan_device_summary", "lan_device_seen", "lan_device_changed") and low_identity_lan_record(data):
+            if event_type in (
+                "lan_device_summary",
+                "lan_device_seen",
+                "lan_device_changed",
+            ) and low_identity_lan_record(data):
                 grouped = dict(data)
-                grouped.setdefault("first_seen", data.get("first_seen") or event.get("timestamp"))
-                grouped.setdefault("first_seen_epoch", data.get("first_seen_epoch") or event.get("timestamp_epoch"))
-                grouped.setdefault("last_seen", data.get("last_seen") or event.get("timestamp"))
-                grouped.setdefault("last_seen_epoch", data.get("last_seen_epoch") or event.get("timestamp_epoch"))
+                grouped.setdefault(
+                    "first_seen", data.get("first_seen") or event.get("timestamp")
+                )
+                grouped.setdefault(
+                    "first_seen_epoch",
+                    data.get("first_seen_epoch") or event.get("timestamp_epoch"),
+                )
+                grouped.setdefault(
+                    "last_seen", data.get("last_seen") or event.get("timestamp")
+                )
+                grouped.setdefault(
+                    "last_seen_epoch",
+                    data.get("last_seen_epoch") or event.get("timestamp_epoch"),
+                )
                 grouped_lan.append(grouped)
                 continue
             if event_type == "lan_collector_summary":
@@ -5142,7 +5600,9 @@ class SubjectHistoryBuilder:
                 subject = "LAN collector"
                 subject_type = "lan_collector"
             elif event_type == "lan_gateway_summary":
-                subject_id = data.get("subject_key") or data.get("gateway_ip") or "gateway"
+                subject_id = (
+                    data.get("subject_key") or data.get("gateway_ip") or "gateway"
+                )
                 subject = "Gateway {}".format(
                     data.get("mac")
                     or data.get("gateway_ip")
@@ -5151,8 +5611,18 @@ class SubjectHistoryBuilder:
                 )
                 subject_type = "lan_gateway"
             else:
-                subject_id = data.get("subject_key") or data.get("mac") or data.get("ip") or "unknown"
-                label = data.get("hostname") or data.get("mac") or data.get("ip") or subject_id
+                subject_id = (
+                    data.get("subject_key")
+                    or data.get("mac")
+                    or data.get("ip")
+                    or "unknown"
+                )
+                label = (
+                    data.get("hostname")
+                    or data.get("mac")
+                    or data.get("ip")
+                    or subject_id
+                )
                 subject = "LAN {}".format(label)
                 subject_type = "lan_device"
             subjects.append(
@@ -5226,12 +5696,20 @@ class SubjectHistoryBuilder:
                         "grouped_randomized": True,
                         "randomized_group_count": len(grouped_lan),
                         "sample_macs": self.grouped_sample_macs(grouped_lan),
-                        "group_members": self.grouped_member_summaries(grouped_lan, "lan"),
+                        "group_members": self.grouped_member_summaries(
+                            grouped_lan, "lan"
+                        ),
                         "ips": self.grouped_list_values(grouped_lan, "ips", 32),
                         "sources": self.grouped_list_values(grouped_lan, "sources", 16),
-                        "interfaces": self.grouped_list_values(grouped_lan, "interfaces", 16),
-                        "observation_count": self.grouped_sum(grouped_lan, "observation_count"),
-                        "identify_count": self.grouped_sum(grouped_lan, "identify_count"),
+                        "interfaces": self.grouped_list_values(
+                            grouped_lan, "interfaces", 16
+                        ),
+                        "observation_count": self.grouped_sum(
+                            grouped_lan, "observation_count"
+                        ),
+                        "identify_count": self.grouped_sum(
+                            grouped_lan, "identify_count"
+                        ),
                         "change_count": self.grouped_sum(grouped_lan, "change_count"),
                     },
                 )
@@ -5255,7 +5733,9 @@ class SubjectHistoryBuilder:
                 data["annotation"] = {"custom_name": str(custom_name)}
                 return
 
-    def subject_record(self, collector, subject_type, subject_id, subject, time_source, data):
+    def subject_record(
+        self, collector, subject_type, subject_id, subject, time_source, data
+    ):
         """Return one normalized subject-history row."""
         clean_data = {
             key: value
@@ -5275,8 +5755,12 @@ class SubjectHistoryBuilder:
             or timestamp_epoch((time_source or {}).get("last_seen_epoch")),
             "data": clean_data,
         }
-        annotation = clean_data.get("annotation") or (time_source or {}).get("annotation")
-        custom_name = clean_data.get("custom_name") or (time_source or {}).get("custom_name")
+        annotation = clean_data.get("annotation") or (time_source or {}).get(
+            "annotation"
+        )
+        custom_name = clean_data.get("custom_name") or (time_source or {}).get(
+            "custom_name"
+        )
         if isinstance(annotation, dict) and annotation.get("custom_name"):
             record["annotation"] = annotation
             record["custom_name"] = annotation.get("custom_name")

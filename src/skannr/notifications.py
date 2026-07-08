@@ -6,7 +6,6 @@ import urllib.request
 
 from .connectivity import internet_available
 
-
 PUSHOVER_MESSAGES_URL = "https://api.pushover.net/1/messages.json"
 PUSHOVER_MESSAGE_MAX = 1024
 

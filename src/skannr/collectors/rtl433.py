@@ -11,7 +11,6 @@ import shutil
 
 from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE
 
-
 RTL433_FIELD_MAX = 240
 RTL433_MAX_RAW_KEYS = 80
 RTL433_DEFAULT_DWELL_SEC = 30
@@ -178,26 +177,34 @@ class RTL433Collector(BaseCollector):
         fixed_frequency = fixed_plan_frequency_mhz(self._plan)
         current_frequency = self._current_frequency_mhz
         if current_frequency is not None:
-            status.update({
-                "current_frequency_mhz": round(current_frequency, 6),
-                "frequency_mhz": round(current_frequency, 6),
-            })
+            status.update(
+                {
+                    "current_frequency_mhz": round(current_frequency, 6),
+                    "frequency_mhz": round(current_frequency, 6),
+                }
+            )
         if fixed_frequency is not None:
-            status.update({
-                "planned_frequency_mhz": round(fixed_frequency, 6),
-                "fixed_plan_running": process_started,
-                "source": "configured plan",
-            })
+            status.update(
+                {
+                    "planned_frequency_mhz": round(fixed_frequency, 6),
+                    "fixed_plan_running": process_started,
+                    "source": "configured plan",
+                }
+            )
         elif current_frequency is not None:
-            status.update({
-                "source": "rtl_433 status",
-            })
-        status.update({
-            "frequency_plan": self.config.get("frequency_plan") or "",
-            "frequency_summary": self._plan_summary,
-            "process_started": process_started,
-            "device_index": self.config.get("device_index", 0),
-        })
+            status.update(
+                {
+                    "source": "rtl_433 status",
+                }
+            )
+        status.update(
+            {
+                "frequency_plan": self.config.get("frequency_plan") or "",
+                "frequency_summary": self._plan_summary,
+                "process_started": process_started,
+                "device_index": self.config.get("device_index", 0),
+            }
+        )
         return status
 
     def detect(self):
@@ -270,7 +277,11 @@ class RTL433Collector(BaseCollector):
                             item.get("frequency_mhz") for item in self._plan
                         ],
                         "planned_frequency_mhz": self._current_frequency_mhz,
-                        "source": "configured plan" if self._current_frequency_mhz is not None else None,
+                        "source": (
+                            "configured plan"
+                            if self._current_frequency_mhz is not None
+                            else None
+                        ),
                         "process_started": True,
                         "gain": self.config.get("gain", "auto"),
                         "sample_rate": self.config.get("sample_rate", "250k"),
@@ -295,7 +306,9 @@ class RTL433Collector(BaseCollector):
                     logging.debug("rtl_433 non-json stdout: %s", text[:500])
                     continue
                 if rtl433_scanner_state_payload(payload):
-                    frequency = rtl433_payload_frequency_mhz(payload, "center_frequency")
+                    frequency = rtl433_payload_frequency_mhz(
+                        payload, "center_frequency"
+                    )
                     if frequency is not None:
                         self._current_frequency_mhz = frequency
                         await self.emit(
@@ -365,6 +378,7 @@ class RTL433Collector(BaseCollector):
                 )
             logging.debug("rtl_433 stderr: %s", text)
 
+
 def rtl433_command(config):
     """Return the configured or default rtl_433 command path."""
     command = compact_rtl433_text(config.get("command"), 300)
@@ -429,7 +443,9 @@ def parse_frequency_plan(text):
             continue
         fields = [field.strip() for field in part.split(":")]
         if len(fields) not in (2, 3):
-            raise ValueError("{} must be freq:dwell or start-end:step_khz:dwell".format(part))
+            raise ValueError(
+                "{} must be freq:dwell or start-end:step_khz:dwell".format(part)
+            )
         target = fields[0]
         if "-" in target:
             if len(fields) != 3:
@@ -529,7 +545,9 @@ def summarize_frequency_plan(plan):
         else:
             dwell = item.get("dwell_sec")
             suffix = "fixed" if dwell <= 0 else "dwell {}s".format(dwell)
-            singles.append("{} MHz {}".format(trim_float(item.get("frequency_mhz")), suffix))
+            singles.append(
+                "{} MHz {}".format(trim_float(item.get("frequency_mhz")), suffix)
+            )
     return ", ".join(singles + ranges)
 
 
@@ -541,12 +559,16 @@ def rtl433_event_data(payload, plan_summary, current_frequency_mhz=None):
     identifier = first_text(payload, "id", "device", "sensor_id", "code", "uid")
     protocol = rtl433_int(payload.get("protocol"))
     decoded_frequency = first_number(payload, "freq", "frequency", "frequency_MHz")
-    frequency = decoded_frequency if decoded_frequency is not None else current_frequency_mhz
+    frequency = (
+        decoded_frequency if decoded_frequency is not None else current_frequency_mhz
+    )
     if frequency is not None and frequency > 10000:
         frequency = frequency / 1000000.0
     elif frequency is not None and frequency > 1000:
         frequency = frequency / 1000.0
-    tuned_frequency = current_frequency_mhz if current_frequency_mhz is not None else frequency
+    tuned_frequency = (
+        current_frequency_mhz if current_frequency_mhz is not None else frequency
+    )
     subject_key = rtl433_subject_key(model, identifier, channel, protocol, raw)
     category = rtl433_category(model, raw)
     data = {
@@ -555,7 +577,9 @@ def rtl433_event_data(payload, plan_summary, current_frequency_mhz=None):
         "channel": channel,
         "protocol": protocol,
         "frequency_mhz": round(frequency, 6) if frequency is not None else None,
-        "tuned_frequency_mhz": round(tuned_frequency, 6) if tuned_frequency is not None else None,
+        "tuned_frequency_mhz": (
+            round(tuned_frequency, 6) if tuned_frequency is not None else None
+        ),
         "rssi_db": first_number(payload, "rssi", "rssi_db", "RSSI"),
         "snr_db": first_number(payload, "snr", "snr_db", "SNR"),
         "noise_db": first_number(payload, "noise", "noise_db", "Noise"),
@@ -706,9 +730,22 @@ def rtl433_category(model, raw):
     ).lower()
     if "tpms" in text or "tire" in text or "tyre" in text:
         return "tpms"
-    if any(word in text for word in ("door", "contact", "garage", "keyfob", "remote", "security", "alarm")):
+    if any(
+        word in text
+        for word in (
+            "door",
+            "contact",
+            "garage",
+            "keyfob",
+            "remote",
+            "security",
+            "alarm",
+        )
+    ):
         return "security"
-    if any(word in text for word in ("weather", "temperature", "humidity", "rain", "wind")):
+    if any(
+        word in text for word in ("weather", "temperature", "humidity", "rain", "wind")
+    ):
         return "weather"
     if any(word in text for word in ("meter", "utility", "water", "power", "energy")):
         return "utility"

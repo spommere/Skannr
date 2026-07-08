@@ -85,6 +85,7 @@ let lastWakeRefreshAtMs = 0;
 let emptyDerivedRefreshRequestedAtMs = 0;
 let emptyDerivedRefreshAttempts = 0;
 let missingSubjectRefreshRequestedAtMs = 0;
+let lastRenderedDataVersionEpoch = 0;
 const connectionState = {
   httpOkAtMs: 0,
   eventStreamOpen: false
@@ -1382,10 +1383,9 @@ function loadDerivedViews() {
         });
         return null;
       }
-      if (status && status.in_progress) {
-        uiDebug("derived_load_fetching_during_refresh", status);
-        continuePollingActiveDerivedRefresh("Backend refresh", status);
-      }
+      // Always fetch cached data — the server scheduler keeps it
+      // current, and on-disk files are available even while a
+      // background rebuild is in progress.
       uiDebug("derived_fetch_start", {window: requestWindow});
       return fetchDerivedBundle(
         `/derived_views${windowQuery(requestWindow)}`,
@@ -1671,25 +1671,13 @@ function recoverCompletedDerivedRefresh(label) {
 
 function derivedRefreshStatusText(label, status) {
   if (!status.in_progress) return "";
-  const parts = [`${label} running`];
-  if (status.phase_step && status.phase_total) {
-    parts.push(
-      `phase ${status.phase_step}/${status.phase_total}: ` +
-      `${status.stage_label || status.stage || "working"}`
-    );
-  } else if (status.stage) {
-    const stageElapsed = Number(status.stage_elapsed_sec || 0);
-    parts.push(
-      `backend stage: ${status.stage}${stageElapsed ? ` ${Math.round(stageElapsed)}s` : ""}`
-    );
-  }
-  if (status.phase_step && status.phase_total) {
-    const stageElapsed = Number(status.stage_elapsed_sec || 0);
-    if (stageElapsed) parts.push(`phase ${Math.round(stageElapsed)}s`);
-  }
-  const elapsed = Number(status.elapsed_sec || 0);
-  if (elapsed) parts.push(`total ${Math.round(elapsed)}s`);
-  return parts.join(" | ");
+  var name = status.stage_label || status.stage || "working";
+  var parts = [name];
+  var stageElapsed = Number(status.stage_elapsed_sec || 0);
+  if (stageElapsed >= 1) parts.push(stageElapsed.toFixed(1) + "s");
+  var elapsed = Number(status.elapsed_sec || 0);
+  if (elapsed >= 1) parts.push("total " + elapsed.toFixed(1) + "s");
+  return parts.join("  ");
 }
 
 function withTimeout(options, timeoutMs) {
@@ -1750,6 +1738,15 @@ function renderDerivedViews(bundle) {
     status: derivedStatusSnapshot()
   });
   acknowledgeDerivedRender(bundle);
+  // Track data version so polling can skip no-op re-renders.
+  var versionEpoch = Number(
+    (bundle || {}).data_version_epoch
+    || (bundle || {}).generated_at_epoch
+    || 0
+  );
+  if (versionEpoch > lastRenderedDataVersionEpoch) {
+    lastRenderedDataVersionEpoch = versionEpoch;
+  }
   maybeRefreshEmptyDerivedViews("derived views loaded");
 }
 
@@ -1988,31 +1985,24 @@ function maybeRefreshEmptyDerivedViews(reason) {
   ) {
     return;
   }
-  if (!catchUpRefreshAllowed()) return;
   if (emptyDerivedRefreshAttempts >= 3) return;
-  const now = Date.now();
+  var now = Date.now();
   if (now - emptyDerivedRefreshRequestedAtMs < 60000) return;
   emptyDerivedRefreshRequestedAtMs = now;
   emptyDerivedRefreshAttempts += 1;
-  setDerivedStatus(`Refreshing derived views after new scan data (${reason})`, "warning");
-  setTimeout(() => refreshDerivedViews("catch-up"), 1000);
+  // Server scheduling keeps data current; just request a load (GET)
+  // instead of triggering a full rebuild (POST).
+  requestDerivedLoad("catch-up: " + (reason || "new data"));
 }
 
 function maybeRefreshMissingSubject(reason, lookup) {
   if (typeof lookup !== "function" || lookup()) return;
   if (derivedRefreshActive() || derivedLoadActive()) return;
-  if (!catchUpRefreshAllowed()) return;
-  const now = Date.now();
+  var now = Date.now();
   if (now - missingSubjectRefreshRequestedAtMs < 60000) return;
   missingSubjectRefreshRequestedAtMs = now;
-  setDerivedStatus(`Refreshing derived views after new subject (${reason})`, "warning");
-  setTimeout(() => refreshDerivedViews("catch-up"), 1000);
-}
-
-function catchUpRefreshAllowed() {
-  const intervalMin = uiNonNegativeNumber("derived_auto_refresh_min");
-  if (intervalMin <= 0 || !lastDerivedRefreshCompletedAtMs) return true;
-  return Date.now() - lastDerivedRefreshCompletedAtMs >= intervalMin * 60000;
+  // Server scheduling keeps data current; just request a load.
+  requestDerivedLoad("catch-up subject: " + (reason || "new data"));
 }
 
 function derivedHistoryHasRows() {
@@ -2266,10 +2256,6 @@ function updateDerivedStatusLines() {
     );
     return;
   }
-  if (shouldRunStaleDerivedRefresh()) {
-    refreshDerivedViewsAutomatically();
-    return;
-  }
   if (latestFindingsHistory || latestHistoryAnalysis) updateInsightsStatus();
   if (latestReports) {
     updateReportsStatus(latestReports);
@@ -2278,13 +2264,17 @@ function updateDerivedStatusLines() {
 }
 
 function derivedStatusPrefix(window, generatedAt, generatedAtEpoch) {
-  const parts = [((window || {}).label || "Selected range")];
-  if (generatedAt) parts.push(`refreshed ${generatedAt}`);
-  const stale = derivedStaleText(generatedAt, generatedAtEpoch);
+  var parts = [];
+  var stale = derivedStaleText(generatedAt, generatedAtEpoch);
   if (stale) parts.push(stale);
-  const auto = autoRefreshText();
-  if (auto) parts.push(auto);
-  return parts.join(" | ");
+  if (generatedAt) parts.push("refreshed at " + formatRefreshedTime(generatedAt));
+  return parts.join(" · ");
+}
+
+function formatRefreshedTime(generatedAt) {
+  // "2026-07-08 03:33:23" -> "03:33"
+  var match = String(generatedAt || "").match(/(\d{2}:\d{2})/);
+  return match ? match[1] : String(generatedAt || "").slice(0, 16);
 }
 
 function derivedStatusState(generatedAt, generatedAtEpoch, normalState) {
@@ -2292,15 +2282,15 @@ function derivedStatusState(generatedAt, generatedAtEpoch, normalState) {
 }
 
 function derivedStaleText(generatedAt, generatedAtEpoch) {
-  const threshold = uiNonNegativeNumber("derived_stale_after_min");
+  var threshold = uiNonNegativeNumber("derived_stale_after_min");
   if ((!generatedAt && !generatedAtEpoch) || threshold <= 0) return "";
-  const timestampMs = Number.isFinite(Number(generatedAtEpoch))
+  var timestampMs = Number.isFinite(Number(generatedAtEpoch))
     ? Number(generatedAtEpoch) * 1000
     : null;
   if (!timestampMs) return "";
-  const ageMin = Math.floor((Date.now() - timestampMs) / 60000);
+  var ageMin = Math.floor((Date.now() - timestampMs) / 60000);
   if (ageMin < threshold) return "";
-  return `stale: refreshed ${ageMin} min ago`;
+  return "stale " + ageMin + "m";
 }
 
 function latestSeenStatusText(records, keys) {
@@ -2348,13 +2338,13 @@ function derivedRefreshLabel(mode) {
 
 function autoRefreshText() {
   if (derivedRefreshActive()) {
-    return `${derivedRefreshLabel(derivedCoordinator.refreshMode).toLowerCase()} running`;
+    return derivedRefreshLabel(derivedCoordinator.refreshMode).toLowerCase() + " running";
   }
   if (!nextAutoDerivedRefreshAtMs) return "";
-  const remainingMs = nextAutoDerivedRefreshAtMs - Date.now();
-  if (remainingMs <= 0) return "next automatic refresh now";
-  const remainingMin = Math.max(1, Math.ceil(remainingMs / 60000));
-  return `next automatic refresh in ${remainingMin} min`;
+  var remainingMs = nextAutoDerivedRefreshAtMs - Date.now();
+  if (remainingMs <= 0) return "next now";
+  var remainingMin = Math.max(1, Math.ceil(remainingMs / 60000));
+  return "next " + remainingMin + "m";
 }
 
 function configureAutoDerivedRefresh() {
@@ -2372,6 +2362,29 @@ function startDerivedStatusTicker() {
   derivedStatusTicker = setInterval(updateDerivedStatusLines, 30000);
 }
 
+function pollDerivedViewsForChanges() {
+  // Poll GET /derived_views (fetch-only, no server-side rebuild).
+  // Compare data_version_epoch against last rendered to skip no-op
+  // DOM re-renders.  The server scheduler keeps data current.
+  const requestWindow = activeWindow || "default";
+  fetchJson("/derived_views?days=" + encodeURIComponent(requestWindow))
+    .then(function (bundle) {
+      if (!bundle || bundle.refresh_in_progress) return;
+      var versionEpoch = Number(
+        bundle.data_version_epoch || bundle.generated_at_epoch || 0
+      );
+      if (versionEpoch > lastRenderedDataVersionEpoch) {
+        renderDerivedViews(bundle);
+      }
+    })
+    .catch(function () {
+      setDerivedStatus("Poll failed; retrying next cycle", "warning");
+    })
+    .finally(function () {
+      scheduleAutoDerivedRefresh();
+    });
+}
+
 function scheduleAutoDerivedRefresh() {
   if (autoDerivedRefreshTimer) {
     clearTimeout(autoDerivedRefreshTimer);
@@ -2384,11 +2397,7 @@ function scheduleAutoDerivedRefresh() {
   }
   const intervalMs = intervalMin * 60000;
   nextAutoDerivedRefreshAtMs = Date.now() + intervalMs;
-  autoDerivedRefreshTimer = setTimeout(refreshDerivedViewsAutomatically, intervalMs);
-}
-
-function refreshDerivedViewsAutomatically() {
-  return runDerivedRefresh("automatic", "Automatic refresh failed");
+  autoDerivedRefreshTimer = setTimeout(pollDerivedViewsForChanges, intervalMs);
 }
 
 function refreshAfterBrowserWake() {
@@ -2400,45 +2409,6 @@ function refreshAfterBrowserWake() {
   updateDerivedStatusLines();
 }
 
-function shouldRunStaleDerivedRefresh() {
-  const intervalMin = uiNonNegativeNumber("derived_auto_refresh_min");
-  const staleMin = uiNonNegativeNumber("derived_stale_after_min");
-  if (intervalMin <= 0 || staleMin <= 0 || derivedRefreshActive()) return false;
-  const refreshCooldownMs = intervalMin * 60000;
-  if (
-    lastDerivedRefreshCompletedAtMs &&
-    Date.now() - lastDerivedRefreshCompletedAtMs < refreshCooldownMs
-  ) {
-    return false;
-  }
-  const lastRefreshMs = latestDerivedRefreshMs();
-  if (!lastRefreshMs) return false;
-  const ageMs = Date.now() - lastRefreshMs;
-  if (ageMs < staleMin * 60000) return false;
-  if (autoDerivedRefreshTimer) {
-    clearTimeout(autoDerivedRefreshTimer);
-    autoDerivedRefreshTimer = null;
-  }
-  nextAutoDerivedRefreshAtMs = Date.now();
-  return true;
-}
-
-function latestDerivedRefreshMs() {
-  const timestamps = [
-    summaryRefreshMs(latestFindingsHistory),
-    summaryRefreshMs(latestHistoryAnalysis),
-    summaryRefreshMs(latestDeviceHistory),
-    summaryRefreshMs(latestReports)
-  ].filter((value) => Number.isFinite(value) && value > 0);
-  return timestamps.length ? Math.max(...timestamps) : null;
-}
-
-function summaryRefreshMs(summary) {
-  if (!summary) return null;
-  const epoch = Number(summary.generated_at_epoch || summary.refreshed_at_epoch);
-  if (Number.isFinite(epoch) && epoch > 0) return epoch * 1000;
-  return null;
-}
 
 function recordTimestampMs(item, key) {
   if (!item) return null;
@@ -2551,29 +2521,19 @@ function showInsightSourceColumn() {
 }
 
 function updateReportsStatus(bundle, visibleReports) {
-  const source = bundle || {};
-  const window = source.window || {};
-  const refreshedAt = source.generated_at || source.refreshed_at;
-  const refreshedEpoch = source.generated_at_epoch || source.refreshed_at_epoch;
-  const total = rows.reports.length;
-  const visible = visibleReports || rows.reports
+  var source = bundle || {};
+  var window = source.window || {};
+  var refreshedAt = source.generated_at || source.refreshed_at;
+  var refreshedEpoch = source.generated_at_epoch || source.refreshed_at_epoch;
+  var visible = visibleReports || rows.reports
     .filter(reportMatchesSubtab)
     .filter(reportMatchesSearch);
-  const warnings = rows.reports.filter((item) => item.severity === "warning").length;
-  const newestSeen = latestSeenStatusText(visible, ["last_seen", "timestamp"]);
-  const normalState = derivedStatusState(
-    refreshedAt,
-    refreshedEpoch,
-    visible.some((item) => item.severity === "warning" || item.severity === "error" || item.severity === "alert") ? "warning" : "ok"
+  var normalState = derivedStatusState(
+    refreshedAt, refreshedEpoch,
+    visible.some(function (item) { return item.severity === "warning" || item.severity === "error" || item.severity === "alert"; }) ? "warning" : "ok"
   );
   setReportsStatus(
-    [
-      derivedStatusPrefix(window, refreshedAt, refreshedEpoch),
-      newestSeen,
-      `${visible.length} shown`,
-      `${total} reports`,
-      `${warnings} warnings`
-    ].filter(Boolean).join(" | "),
+    derivedStatusPrefix(window, refreshedAt, refreshedEpoch) || "Reports",
     derivedDataStatusState(visible, ["last_seen", "timestamp"], normalState)
   );
 }
@@ -3017,6 +2977,9 @@ function applyDashboardMetadata(metadata) {
   };
   configureAutoDerivedRefresh();
   applyRtl433Defaults((metadata.collectors || {}).rtl433 || {});
+  if (metadata.skir_enabled) {
+    initSkirTab();
+  }
 }
 
 function applyAppVersion(version) {
@@ -5146,10 +5109,19 @@ function annotationText(item) {
   ).trim();
 }
 
+function isOperatorOwned(item) {
+  if (!item) return false;
+  return !!(item.operator_owned
+    || ((item.annotation || {}).operator_owned)
+    || ((item.data || {}).operator_owned)
+    || ((item.data || {}).annotation || {}).operator_owned);
+}
+
 function annotatedLabel(item, subject) {
   const original = String(subject || "");
   const custom = annotationText(item);
-  return custom ? `${custom} (${original})` : original;
+  const owned = isOperatorOwned(item) ? "\u{1F3E0} " : "";  // 🏠 prefix
+  return custom ? `${owned}${custom} (${original})` : `${owned}${original}`;
 }
 
 function annotatedDetailLink(item, subject, type, key) {
@@ -5173,14 +5145,35 @@ function subjectAnnotationButton(subject) {
 }
 
 function editSubjectAnnotation(subject) {
-  const original = String(subject.subject || subject.subject_id || "subject");
-  const current = annotationText(subject);
-  const value = window.prompt(`Annotation for ${original}`, current);
+  var original = String(subject.subject || subject.subject_id || "subject");
+  var current = annotationText(subject);
+  var owned = subject.operator_owned || false;
+  var hint = owned
+    ? "\u{1F3E0} yours — prefix with - to remove"
+    : "prefix + to mark as \u{1F3E0} yours\nexample: +Garage Door";
+  var value = window.prompt("Name for " + original + "\n(" + hint + ")", current);
   if (value === null) return;
-  saveSubjectAnnotation(subject, value.trim());
+  var customName = value.trim();
+  // "+" = mark as owned (keep existing name)
+  // "+name" = mark as owned + rename
+  // "-" = unmark (keep existing name)
+  if (customName === "+") {
+    owned = true;
+    customName = current;  // preserve existing name
+  } else if (customName === "-") {
+    owned = false;
+    customName = current;
+  } else if (customName.startsWith("+")) {
+    owned = true;
+    customName = customName.replace(/^\+ ?/, "").trim();
+  } else if (customName.startsWith("-")) {
+    owned = false;
+    customName = customName.replace(/^- ?/, "").trim();
+  }
+  saveSubjectAnnotation(subject, customName, owned);
 }
 
-function saveSubjectAnnotation(subject, customName) {
+function saveSubjectAnnotation(subject, customName, operatorOwned) {
   setHistoryStatus("Saving subject annotation", "warning");
   return fetchJson("/subject_annotations", {
     method: "POST",
@@ -5189,7 +5182,8 @@ function saveSubjectAnnotation(subject, customName) {
       collector: subject.collector,
       subject_type: subject.subject_type,
       subject_id: subject.subject_id,
-      custom_name: customName || ""
+      custom_name: customName || "",
+      operator_owned: !!operatorOwned
     })
   })
     .then((payload) => {
@@ -5206,15 +5200,18 @@ function applySavedSubjectAnnotation(subject, annotation) {
   let changed = false;
   latestDeviceHistory.subjects.forEach((item) => {
     if (!subjectAnnotationTargetMatches(item, subject)) return;
-    if (annotation && annotation.custom_name) {
+    if (annotation && (annotation.custom_name || annotation.operator_owned)) {
       item.annotation = annotation;
-      item.custom_name = annotation.custom_name;
+      item.custom_name = annotation.custom_name || "";
+      item.operator_owned = !!annotation.operator_owned;
     } else {
       delete item.annotation;
       delete item.custom_name;
+      delete item.operator_owned;
       if (item.data && typeof item.data === "object") {
         delete item.data.annotation;
         delete item.data.custom_name;
+        delete item.data.operator_owned;
       }
     }
     changed = true;
@@ -5416,7 +5413,14 @@ function renderDeviceHistory(history) {
     item.last_seen || "",
     rtl433SubjectActivity(item),
     rtl433SignalText(subjectData(item)),
-    rtl433DetailsText(subjectData(item))
+    rtl433DetailsText(subjectData(item)),
+    subjectAnnotationButton({
+      collector: "rtl433",
+      subject_type: "rtl433_device",
+      subject_id: subjectData(item).subject_key || item.subject_id || "",
+      subject: item.subject || "RTL-433 device",
+      annotation: item.annotation
+    })
   ], historySearch);
   renderHistoryTable("history-adsb-subjects", adsbSubjects, (item) => [
     detailLink(item.subject || "", "adsb-subject", subjectData(item).icao || item.subject_id || ""),
@@ -5507,11 +5511,11 @@ function wifiApSubjectHistoryCells(item) {
     valueList(data.encryption).join(", "),
     signalRange(data),
     data.observations || 0,
-    isSsid ? "" : subjectAnnotationButton({
+    subjectAnnotationButton({
       collector: "wifi",
-      subject_type: item.subject_type || "wifi_bssid",
+      subject_type: item.subject_type || (isSsid ? "wifi_ssid" : "wifi_bssid"),
       subject_id: item.subject_id || bssid,
-      subject: item.subject || ssid || bssid || "Wi-Fi AP",
+      subject: item.subject || ssid || bssid || (isSsid ? "Wi-Fi SSID" : "Wi-Fi AP"),
       annotation: item.annotation
     })
   ];
@@ -5543,42 +5547,12 @@ function wifiClientSubjectHistoryCells(item) {
 }
 
 function updateDeviceHistoryStatus(history) {
-  const wifi = history.wifi || {};
-  const ble = history.bluetooth || history.ble || {};
-  const aps = wifi.access_points || [];
-  const clients = wifi.clients || [];
-  const devices = ble.devices || [];
-  const subjectCounts = history.subject_counts || {};
-  const subjects = Array.isArray(history.subjects) ? history.subjects : [];
-  const directSubjects = subjects.filter((item) =>
-    ["aprsis", "rayhunter", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"].includes(String(item.collector || ""))
-  );
-  const window = history.window || {};
-  const refreshedAt = history.generated_at || history.refreshed_at;
-  const visible = [...aps, ...clients, ...devices, ...directSubjects];
-  const totalAps = Number(wifi.total_access_points || aps.length);
-  const totalClients = Number(wifi.total_clients || clients.length);
-  const totalBluetooth = Number(ble.total_devices || devices.length);
-  const totalSubjects = Number(history.total_subjects || subjectCounts.total || subjects.length || 0);
-  const totalShown = totalSubjects || (totalAps + totalClients + totalBluetooth);
-  const displayedShown = visible.length;
-  const rawEvents = history.records_read || 0;
-  const newestSeen = latestSeenStatusText(visible, ["last_seen", "timestamp"]);
-  const refreshedEpoch = history.generated_at_epoch || history.refreshed_at_epoch;
-  const normalState = derivedStatusState(refreshedAt, refreshedEpoch, "ok");
+  var window = history.window || {};
+  var refreshedAt = history.generated_at || history.refreshed_at;
+  var refreshedEpoch = history.generated_at_epoch || history.refreshed_at_epoch;
   setHistoryStatus(
-    [
-      derivedStatusPrefix(window, refreshedAt, refreshedEpoch),
-      newestSeen,
-      `${totalShown} subjects in view`,
-      displayedShown < totalShown ? `${displayedShown} loaded for display` : "",
-      `${rawEvents} raw events processed`,
-      `${totalAps} APs`,
-      `${totalClients} Wi-Fi clients`,
-      `${totalBluetooth} Bluetooth devices`,
-      `${directSubjects.length} direct collector subjects`
-    ].filter(Boolean).join(" | "),
-    derivedDataStatusState(visible, ["last_seen", "timestamp"], normalState)
+    derivedStatusPrefix(window, refreshedAt, refreshedEpoch) || "History",
+    derivedStatusState(refreshedAt, refreshedEpoch, "ok")
   );
 }
 
@@ -7314,31 +7288,17 @@ function normalizeObservationInsight(observation) {
 }
 
 function updateInsightsStatus() {
-  const source = latestHistoryAnalysis || latestFindingsHistory || {};
-  const window = source.window || {};
-  const insightsWindow = source.insights_window || {};
-  const refreshedAt = source.generated_at || source.refreshed_at;
-  const refreshedEpoch = source.generated_at_epoch || source.refreshed_at_epoch;
-  const total = rows.insights.length;
-  const visible = rows.insights.filter(insightMatchesFilters).filter(insightMatchesSearch);
-  const warnings = rows.insights.filter((item) => item.severity === "warning").length;
-  const errors = rows.insights.filter((item) => item.severity === "error" || item.severity === "alert").length;
-  const newestSeen = latestSeenStatusText(visible, ["last_seen", "timestamp"]);
-  const normalState = derivedStatusState(
-    refreshedAt,
-    refreshedEpoch,
-    visible.some((item) => item.severity === "warning" || item.severity === "error" || item.severity === "alert") ? "warning" : "ok"
+  var source = latestHistoryAnalysis || latestFindingsHistory || {};
+  var window = source.window || {};
+  var refreshedAt = source.generated_at || source.refreshed_at;
+  var refreshedEpoch = source.generated_at_epoch || source.refreshed_at_epoch;
+  var visible = rows.insights.filter(insightMatchesFilters).filter(insightMatchesSearch);
+  var normalState = derivedStatusState(
+    refreshedAt, refreshedEpoch,
+    visible.some(function (item) { return item.severity === "warning" || item.severity === "error" || item.severity === "alert"; }) ? "warning" : "ok"
   );
   setInsightsStatus(
-    [
-      insightsWindow.label || "",
-      derivedStatusPrefix(window, refreshedAt, refreshedEpoch),
-      newestSeen,
-      `${visible.length} shown`,
-      `${total} insights`,
-      `${warnings} warnings`,
-      `${errors} errors`
-    ].filter(Boolean).join(" | "),
+    derivedStatusPrefix(window, refreshedAt, refreshedEpoch) || "Insights",
     derivedDataStatusState(visible, ["last_seen", "timestamp"], normalState)
   );
 }
@@ -9508,4 +9468,254 @@ function prependList(id, text) {
   item.textContent = text;
   list.prepend(item);
   while (list.children.length > uiNumber("max_event_log_items")) list.removeChild(list.lastChild);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SKIR — Skannr Intelligence Report
+// ═══════════════════════════════════════════════════════════════
+
+function initSkirTab() {
+  var btn = document.getElementById("tab-btn-skir");
+  if (btn) {
+    btn.style.display = "";
+    btn.addEventListener("click", function() {
+      if (!window._skirLoaded) { loadLatestSkir(); window._skirLoaded = true; }
+    });
+  }
+  var genBtn = document.getElementById("skir-generate");
+  if (genBtn) genBtn.addEventListener("click", generateSkir);
+
+  var sel = document.getElementById("skir-select");
+  if (sel) {
+    sel.addEventListener("change", function() {
+      var id = sel.value;
+      if (id === "__latest__") { loadLatestSkir(); return; }
+      loadSkirById(id);
+    });
+  }
+
+  loadLatestSkir();
+  loadSkirList();
+  window._skirLoaded = true;
+}
+
+function loadLatestSkir() {
+  fetchPlainJson("/llm/skir/latest")
+    .then(function(data) {
+      if (data && data.ok && data.skir) {
+        window._currentSkir = data.skir;
+        renderSkir(data.skir);
+        showSkirStatus("Generated " + (data.skir.generated_at || "unknown"), data.skir.usage);
+        // Select "Latest report" in dropdown
+        var sel = document.getElementById("skir-select");
+        if (sel) { sel.value = "__latest__"; }
+      } else {
+        showSkirStatus("No report generated yet");
+      }
+    })
+    .catch(function() {
+      showSkirStatus("SKIR not available");
+    });
+}
+
+function loadSkirList() {
+  fetchPlainJson("/llm/skir/list")
+    .then(function(data) {
+      if (!data || !data.ok || !data.skirs || !data.skirs.length) return;
+      var sel = document.getElementById("skir-select");
+      if (!sel) return;
+      sel.style.display = "";
+      // Keep the __latest__ option, rebuild the rest
+      while (sel.options.length > 1) sel.remove(1);
+      data.skirs.forEach(function(item) {
+        var opt = document.createElement("option");
+        opt.value = item.report_id;
+        opt.textContent = (item.generated_at || item.report_id);
+        sel.appendChild(opt);
+      });
+    })
+    .catch(function() {});
+}
+
+function loadSkirById(reportId) {
+  showSkirStatus("Loading " + reportId + "...");
+  fetchPlainJson("/llm/skir/" + encodeURIComponent(reportId))
+    .then(function(data) {
+      if (data && data.ok && data.skir) {
+        window._currentSkir = data.skir;
+        renderSkir(data.skir);
+        showSkirStatus("Loaded " + (data.skir.generated_at || reportId), data.skir.usage);
+      } else {
+        showSkirStatus("SKIR not found: " + reportId);
+      }
+    })
+    .catch(function() {
+      showSkirStatus("Failed to load SKIR: " + reportId);
+    });
+}
+
+function generateSkir() {
+  var btn = document.getElementById("skir-generate");
+  if (btn) { btn.disabled = true; btn.textContent = "Generating..."; }
+  showSkirStatus("Generating intelligence report...");
+  var start = Date.now();
+  var timer = setInterval(function() {
+    var elapsed = Math.round((Date.now() - start) / 1000);
+    showSkirStatus("Generating intelligence report... (" + elapsed + "s)");
+  }, 1000);
+  fetch("/llm/generate-skir", {method: "POST"})
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      clearInterval(timer);
+      if (btn) { btn.disabled = false; btn.textContent = "Generate Now"; }
+      if (data && data.ok && data.skir) {
+        window._currentSkir = data.skir;
+        renderSkir(data.skir);
+        showSkirStatus("Generated " + (data.skir.generated_at || "now"), data.skir.usage);
+        loadSkirList();
+        var sel = document.getElementById("skir-select");
+        if (sel) { sel.value = "__latest__"; }
+      } else {
+        showSkirStatus("Generation failed: " + ((data || {}).error || "unknown"));
+      }
+    })
+    .catch(function(err) {
+      clearInterval(timer);
+      if (btn) { btn.disabled = false; btn.textContent = "Generate Now"; }
+      showSkirStatus("Generation failed: " + (err.message || err));
+    });
+}
+
+function showSkirStatus(msg, usage) {
+  var el = document.getElementById("skir-status");
+  if (!el) return;
+  var text = msg;
+  if (usage) {
+    var tokens = (usage.input_tokens || 0) + (usage.output_tokens || 0);
+    text += " · " + tokens.toLocaleString() + " tokens";
+    if (usage.cost != null) {
+      text += " · $" + Number(usage.cost).toFixed(4);
+    }
+    if (usage.elapsed_sec) {
+      text += " · " + usage.elapsed_sec + "s";
+    }
+  }
+  el.textContent = text;
+  el.classList.remove("muted");
+}
+
+function renderSkir(skir) {
+  var content = document.getElementById("skir-content");
+  if (content) content.style.display = "";
+  showSkirStatus("Last generated: " + (skir.generated_at || "unknown"));
+
+  // BLUF
+  var bluf = document.getElementById("skir-bluf");
+  if (bluf && skir.bluf && skir.bluf.length) {
+    var items = skir.bluf.map(function(b) { return "<li>" + escapeHtml(b) + "</li>"; }).join("");
+    bluf.innerHTML = "<h3>Key Findings (BLUF)</h3><ul class=\"skir-bluf-list\">" + items + "</ul>";
+  } else if (bluf) {
+    bluf.innerHTML = "";
+  }
+
+  // Collector Analysis (new — per-collector deep analysis)
+  var caEl = document.getElementById("skir-detections");
+  if (caEl && skir.collector_analysis) {
+    var caHtml = "<h3>Per-Collector Analysis</h3>";
+    Object.keys(skir.collector_analysis).sort().forEach(function(coll) {
+      var a = skir.collector_analysis[coll];
+      caHtml += "<h4>" + escapeHtml(coll) + "</h4>";
+      if (a.summary) caHtml += "<p><strong>" + escapeHtml(a.summary) + "</strong></p>";
+      if (a.findings && a.findings.length) {
+        caHtml += "<table class=\"skir-table\"><thead><tr><th>Finding</th><th>Evidence</th><th>Confidence</th><th>Reasoning</th></tr></thead><tbody>";
+        a.findings.forEach(function(f) {
+          caHtml += "<tr><td>" + escapeHtml(f.finding || "") + "</td>"
+            + "<td>" + escapeHtml(f.evidence || "") + "</td>"
+            + "<td>" + escapeHtml(f.confidence || "") + "</td>"
+            + "<td>" + escapeHtml(f.reasoning || "") + "</td></tr>";
+        });
+        caHtml += "</tbody></table>";
+      }
+    });
+    caEl.innerHTML = caHtml;
+  } else if (caEl) {
+    // Fallback to old schema
+    if (skir.significant_detections) {
+      var detHtml = "<h3>Significant Detections</h3>";
+      skir.significant_detections.forEach(function(group) {
+        detHtml += "<h4>" + escapeHtml(group.collector || "Unknown") + "</h4>";
+        detHtml += "<table class=\"skir-table\"><thead><tr><th>Identifier</th><th>Identity</th><th>First Seen</th><th>Last Seen</th><th>Behavior</th><th>Significance</th></tr></thead><tbody>";
+        (group.items || []).forEach(function(item) {
+          detHtml += "<tr><td>" + escapeHtml(item.identifier || "") + "</td>"
+            + "<td>" + escapeHtml(item.identity || "") + "</td>"
+            + "<td>" + escapeHtml(item.first_seen || "") + "</td>"
+            + "<td>" + escapeHtml(item.last_seen || "") + "</td>"
+            + "<td>" + escapeHtml(item.behavior || "") + "</td>"
+            + "<td>" + escapeHtml(item.significance || "") + "</td></tr>";
+        });
+        detHtml += "</tbody></table>";
+      });
+      caEl.innerHTML = detHtml;
+    }
+  }
+
+  // Cross-Collector Analysis (new)
+  if (skir.cross_collector && skir.cross_collector.length) {
+    renderSkirTable("skir-source-summary", "Cross-Collector Analysis",
+      ["Finding", "Collectors", "Evidence", "Confidence", "Reasoning"],
+      skir.cross_collector.map(function(c) {
+        return [c.finding || "", (c.collectors || []).join(", "),
+                c.evidence || "", c.confidence || "", c.reasoning || ""];
+      }));
+  }
+
+  // Anomalies & Alerts
+  renderSkirTable("skir-anomalies", "Anomalies & Alerts",
+    ["Level", "Summary", "Source", "Action"],
+    (skir.anomalies_alerts || []).map(function(a) {
+      return [a.level || "", a.summary || "", a.source || "", a.action || a.implication || ""];
+    }));
+
+  // Confidence Assessment
+  renderSkirTable("skir-confidence", "Confidence Assessment",
+    ["Finding", "Confidence", "Reasoning"],
+    (skir.confidence_assessment || []).map(function(c) {
+      return [c.finding || "", c.confidence || "", c.reasoning || ""];
+    }));
+
+  // Implications
+  var implEl = document.getElementById("skir-implications");
+  if (implEl && skir.implications) {
+    implEl.innerHTML = "<h3>Implications / Outlook</h3><p>" + escapeHtml(skir.implications) + "</p>";
+  } else if (implEl) {
+    implEl.innerHTML = "";
+  }
+
+  // Overview
+  var ovEl = document.getElementById("skir-overview");
+  if (ovEl && skir.overview) {
+    ovEl.innerHTML = "<h3>Overview</h3><p>" + escapeHtml(skir.overview) + "</p>";
+  } else if (ovEl) {
+    ovEl.innerHTML = "";
+  }
+}
+
+function renderSkirTable(elId, title, headers, rows) {
+  var el = document.getElementById(elId);
+  if (!el) return;
+  if (!rows.length) { el.innerHTML = ""; return; }
+  var html = "<h3>" + escapeHtml(title) + "</h3><table class=\"skir-table\"><thead><tr>";
+  headers.forEach(function(h) { html += "<th>" + escapeHtml(h) + "</th>"; });
+  html += "</tr></thead><tbody>";
+  rows.forEach(function(row) {
+    html += "<tr>";
+    row.forEach(function(cell) { html += "<td>" + escapeHtml(cell) + "</td>"; });
+    html += "</tr>";
+  });
+  html += "</tbody></table>";
+  el.innerHTML = html;
+}
+
+function escapeHtml(text) {
+  return String(text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }

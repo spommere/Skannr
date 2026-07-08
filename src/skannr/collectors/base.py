@@ -14,7 +14,6 @@ import urllib.request
 from ..bus import local_now
 from ..log_utils import now_epoch, timestamp_epoch
 
-
 # Collector states are intentionally stable strings because the browser uses
 # them for badges and button visibility.
 STATE_DETECTING = "DETECTING"

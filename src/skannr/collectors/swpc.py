@@ -20,7 +20,6 @@ from ..bus import local_now
 from ..log_utils import now_epoch, timestamp_epoch
 from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE, STATE_RETRYING
 
-
 SWPC_FIELD_MAX = 240
 SWPC_TEXT_MAX = 1000
 SWPC_ALERTS_URL = "https://services.swpc.noaa.gov/products/alerts.json"
@@ -119,7 +118,11 @@ class SWPCCollector(BaseCollector):
     name = "SWPC"
     tab_label = "SWPC"
     required_hardware = "Internet access"
-    subject_history_event_types = ("swpc_event", "collector_offline", "collector_retrying")
+    subject_history_event_types = (
+        "swpc_event",
+        "collector_offline",
+        "collector_retrying",
+    )
 
     @classmethod
     def hardware_status(cls, config):
@@ -419,7 +422,9 @@ class SWPCCollector(BaseCollector):
         events = []
         for group in groups:
             data = self.xray_group_event(group, threshold_class, threshold)
-            if data and self.changed("xray:{}".format(data["event_id"]), data["fingerprint"]):
+            if data and self.changed(
+                "xray:{}".format(data["event_id"]), data["fingerprint"]
+            ):
                 events.append(data)
         return events
 
@@ -461,7 +466,8 @@ class SWPCCollector(BaseCollector):
         }
         data["alert_recommended"] = swpc_event_is_alert(data, self.config)
         data["fingerprint"] = self.fingerprint(
-            data, ("event_kind", "start_time", "peak_time", "xray_class", "xray_flux_peak")
+            data,
+            ("event_kind", "start_time", "peak_time", "xray_class", "xray_flux_peak"),
         )
         return clean_swpc_data(data)
 
@@ -481,7 +487,10 @@ class SWPCCollector(BaseCollector):
         if kp is None or kp < float(self.config.get("feed_min_kp", 5)):
             return []
         time_text = compact_swpc_text(
-            latest.get("time_tag") or latest.get("time") or latest.get("timestamp") or "",
+            latest.get("time_tag")
+            or latest.get("time")
+            or latest.get("timestamp")
+            or "",
             120,
         )
         epoch = swpc_time_epoch(time_text) or now_epoch()
@@ -630,7 +639,9 @@ def classify_swpc_text(message):
 
 def extract_scale_value(text, family):
     """Return the first R/S/G scale value found in text."""
-    match = re.search(r"\b{}\s*([1-5])\b".format(re.escape(family)), text, re.IGNORECASE)
+    match = re.search(
+        r"\b{}\s*([1-5])\b".format(re.escape(family)), text, re.IGNORECASE
+    )
     return int(match.group(1)) if match else None
 
 
@@ -661,7 +672,10 @@ def xray_threshold_groups(records, threshold):
         if flux is None or flux < threshold:
             continue
         time_text = compact_swpc_text(
-            record.get("time_tag") or record.get("time") or record.get("timestamp") or "",
+            record.get("time_tag")
+            or record.get("time")
+            or record.get("timestamp")
+            or "",
             120,
         )
         epoch = swpc_time_epoch(time_text)
@@ -689,7 +703,9 @@ def latest_kp_record(records):
     latest = None
     latest_epoch = None
     for record in records or []:
-        time_text = record.get("time_tag") or record.get("time") or record.get("timestamp")
+        time_text = (
+            record.get("time_tag") or record.get("time") or record.get("timestamp")
+        )
         epoch = swpc_time_epoch(time_text)
         if epoch is None:
             continue
@@ -806,7 +822,9 @@ def swpc_event_is_alert(data, config=None):
     }
     if family in thresholds:
         value = scale_number(data.get("scale_value"))
-        return value is not None and value >= scale_number(thresholds[family], default=3)
+        return value is not None and value >= scale_number(
+            thresholds[family], default=3
+        )
     return False
 
 
@@ -830,7 +848,9 @@ def swpc_event_is_critical(data, config=None):
     }
     if family in thresholds:
         value = scale_number(data.get("scale_value"))
-        return value is not None and value >= scale_number(thresholds[family], default=4)
+        return value is not None and value >= scale_number(
+            thresholds[family], default=4
+        )
     return False
 
 

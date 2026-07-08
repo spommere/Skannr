@@ -18,3 +18,21 @@ analyze_max_tokens: 2048
 
 # Maximum bytes to tail-read from raw log files when building context.
 context_tail_bytes: 131072
+
+# ── SKIR (Skannr Intelligence Report) ────────────────────────
+# When enabled, the LLM generates a structured intelligence report from
+# the current reports.json bundle.  The report is saved to
+# runtime/logs/skir/ and a new "Intel Report" tab appears in the UI.
+generate_skir: false
+
+# Token budget for SKIR generation (needs more than per-subject analyze).
+skir_max_tokens: 65536
+
+# Model override for SKIR generation.  When empty, uses the main 'model'.
+# The SKIR task benefits from a larger model (e.g. deepseek-v4-pro)
+# while per-subject Analyze can stay with a cheaper one (e.g. flash).
+# skir_model: deepseek-v4-pro
+
+# Cron schedule for automatic SKIR generation (local time).
+# Default: daily at 08:00.  Leave empty to disable scheduled generation.
+skir_schedule_cron: "0 8 * * *"

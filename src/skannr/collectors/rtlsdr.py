@@ -74,9 +74,7 @@ class RTLSDRCollector(BaseCollector):
         self._noise_floor = {}
         self._active = {}
         if not self.detect():
-            await self.emit(
-                "collector_offline", {"reason": self.warning}, "warning"
-            )
+            await self.emit("collector_offline", {"reason": self.warning}, "warning")
             return
 
         start_mhz = float(self.config.get("scan_start_mhz", 400))
@@ -122,9 +120,7 @@ class RTLSDRCollector(BaseCollector):
             )
         except Exception as exc:
             self.state = STATE_OFFLINE
-            await self.emit(
-                "collector_offline", {"reason": str(exc)}, "warning"
-            )
+            await self.emit("collector_offline", {"reason": str(exc)}, "warning")
             return
 
         loop = asyncio.get_event_loop()
@@ -147,9 +143,7 @@ class RTLSDRCollector(BaseCollector):
                 continue
             if not baseline_ready:
                 baseline_ready = True
-                await self.emit(
-                    "baseline_ready", {"bins": len(self._noise_floor)}
-                )
+                await self.emit("baseline_ready", {"bins": len(self._noise_floor)})
             await self.detect_signals(bins, threshold)
 
         await self.emit("scanner_stopped", {"reason": "process exited"})

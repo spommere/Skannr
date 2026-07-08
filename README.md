@@ -663,8 +663,10 @@ installs. `config/` is machine-specific local state.
   History coalescing. This lets Wi-Fi/BLE/LAN identity state advance without
   blocking page load or collector startup. `0` disables the worker.
 - `derived_stale_after_min`: age before derived data is considered stale.
-- `derived_auto_refresh_min`: automatic derived-refresh cadence. `0` disables
-  automatic refresh.
+- `derived_scheduler_interval_sec`: server-side autonomous rebuild interval in
+  seconds (default 900, 15 min). `0` disables.
+- `derived_auto_refresh_min`: browser poll interval for new derived data
+  (default 15 min). `0` disables polling.
 - `derived_refresh_timeout_sec`: browser/backend refresh timeout.
 - `insights_recent_after_min`: browser-side recent Insight marker threshold.
 
@@ -906,14 +908,20 @@ persistence:
 - `999999`: effectively disable cleanup
 
 Insights, Reports, and Subject History use the selected dashboard View window.
-Skannr refreshes those derived views automatically while the browser page is
-open. The default interval is 15 minutes:
+The server rebuilds derived views autonomously on a background schedule, so data
+stays current even with no browser connected. The browser polls for new data at
+a configurable interval:
 
 ```yaml
 ui:
-  derived_auto_refresh_min: 15
-  derived_refresh_timeout_sec: 600
+  derived_scheduler_interval_sec: 900   # server rebuild interval (15 min)
+  derived_auto_refresh_min: 15          # browser poll interval (15 min)
+  derived_refresh_timeout_sec: 600      # manual refresh timeout
 ```
+
+Set `derived_scheduler_interval_sec: 0` to disable autonomous rebuilds (the
+browser will still poll, and Manual Refresh still works). Set
+`derived_auto_refresh_min: 0` to disable browser polling.
 
 The derived views have different jobs:
 
@@ -941,20 +949,9 @@ history_analysis:
 Set `insights_recent_minutes: 0` to show every Insight in the selected View
 window. Reports and Subject History are not shortened by this setting.
 
-Set `derived_auto_refresh_min: 0` to disable automatic derived refresh. The
-status line shows the last refresh time and the next automatic refresh countdown.
-If the browser wakes up with stale derived data, it starts an immediate catch-up
-refresh instead of waiting for the next interval. Refresh failures stay visible
-in the status line until a later refresh succeeds. A refresh request times out
-after `derived_refresh_timeout_sec` so a stuck backend request cannot leave the
-browser showing "refresh running" forever. The Manual Refresh button is still
-available when you want an immediate rebuild. Browser wake/focus events also
-reload the derived view from the backend, which helps after a laptop sleeps
-while the Pis keep collecting.
-If a refresh itself takes longer than the stale threshold, Skannr waits for the
-normal automatic interval after completion instead of immediately starting
-another catch-up refresh. This avoids a continuous refresh loop on slower
-systems or large materialized histories.
+The status line shows when data was last refreshed (e.g. ``refreshed at 03:52``).
+The Manual Refresh button is available when you want an immediate rebuild. A
+refresh request times out after `derived_refresh_timeout_sec`.
 
 After a fresh log cleanup, the browser may initially load empty cached derived
 summaries before the first scan events have been folded into Subject History. If

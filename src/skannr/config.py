@@ -14,7 +14,6 @@ from .collectors import detect_collector_hardware
 from .log_utils import normalize_retention_days
 from .paths import CONFIG_COLLECTORS_DIR, PROJECT_ROOT
 
-
 # These defaults make a fresh Skannr checkout runnable without a config
 # file. load_config() writes them only when config/skannr.yaml does not exist,
 # then overlays any user edits in memory on later runs.
@@ -444,9 +443,13 @@ def load_config(path):
     return config
 
 
+from .paths import ensure_owner
+
+
 def save_config(path, config):
     """Persist global config without generated probes or collector YAML data."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    ensure_owner(os.path.dirname(os.path.abspath(path)))
     saved = copy.deepcopy(config)
     saved.pop("hardware", None)
     saved.pop("collectors", None)
@@ -454,3 +457,4 @@ def save_config(path, config):
     saved.pop("_project_dir", None)
     with open(path, "w", encoding="utf-8") as fh:
         yaml.safe_dump(saved, fh, sort_keys=False, width=1000)
+    ensure_owner(path)

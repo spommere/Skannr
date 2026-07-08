@@ -51,6 +51,7 @@ from .identity_policy import (
     meaningful_bluetooth_names as identity_meaningful_bluetooth_names,
 )
 from .log_utils import (
+    cleanup_orphaned_temp_files,
     current_jsonl_checkpoint,
     has_jsonl_checkpoint,
     now_epoch,
@@ -70,10 +71,12 @@ from .paths import (
     OLD_CONFIG_DIR,
     STATIC_DIR,
     VERSION_PATH,
+    ensure_owner,
 )
 from .persistence import load_persistence
 from .reports import ReportsBuilder, save_reports
 from .subject_history import SubjectHistoryBuilder
+from .snapshots import build_snapshot_from_sh, load_snapshots, save_snapshots
 
 
 def read_app_version():
@@ -127,16 +130,16 @@ def alert_engine_config(config):
 DERIVED_REFRESH_PHASES = {
     "refresh": {
         "refresh_base": (1, 2, "Subject History"),
-        "refresh_derived": (2, 2, "Insights analysis and Reports"),
+        "refresh_derived": (2, 2, "Insights + Reports"),
     },
     "repair": {
-        "repair_dependents": (1, 1, "Repair dependent summaries"),
+        "repair_dependents": (1, 1, "Repair"),
     },
     "cached": {
-        "cached_subject_history": (1, 4, "Load cached Subject History"),
-        "cached_device_history": (2, 4, "Load cached Device History"),
-        "cached_history_analysis": (3, 4, "Load cached Insights analysis"),
-        "cached_reports": (4, 4, "Load cached Reports"),
+        "cached_subject_history": (1, 4, "Subject History"),
+        "cached_device_history": (2, 4, "Device History"),
+        "cached_history_analysis": (3, 4, "Insights"),
+        "cached_reports": (4, 4, "Reports"),
     },
 }
 
@@ -488,7 +491,8 @@ def llm_analyze():
     if not subject_key:
         return {"ok": False, "error": "Missing subject_key"}, 400
     future = asyncio.run_coroutine_threadsafe(
-        action.analyze(subject_key, subject_type), loop)
+        action.analyze(subject_key, subject_type), loop
+    )
     try:
         result = future.result(timeout=120)
     except Exception as exc:
@@ -496,6 +500,76 @@ def llm_analyze():
     if not result or "error" in (result or {}):
         return {"ok": False, "error": (result or {}).get("error", "Unknown")}, 500
     return {"ok": True, "answer": result["answer"], "usage": result["usage"]}
+
+
+@app.route("/llm/generate-skir", methods=["POST"])
+def llm_generate_skir():
+    """Generate a Skannr Intelligence Report from the current report bundle."""
+    loop = runtime.get("loop")
+    action = action_by_key("llm")
+    if not loop or not action:
+        return {"ok": False, "error": "LLM is not available"}, 503
+    config = runtime.get("config") or {}
+    llm_config = (config.get("collectors") or {}).get("llm") or {}
+    if not llm_config.get("generate_skir"):
+        return {"ok": False, "error": "SKIR generation is not enabled"}, 400
+    future = asyncio.run_coroutine_threadsafe(action.generate_skir(), loop)
+    try:
+        result = future.result(timeout=300)
+    except TimeoutError:
+        return {"ok": False, "error": "SKIR generation timed out after 300s"}, 500
+    except Exception as exc:
+        logging.exception("SKIR generation failed")
+        return {"ok": False, "error": "SKIR generation failed: {}".format(exc)}, 500
+    if not result or "error" in (result or {}):
+        return {"ok": False, "error": (result or {}).get("error", "Unknown")}, 500
+    return {"ok": True, "skir": result}
+
+
+@app.route("/llm/skir/latest", methods=["GET"])
+def llm_skir_latest():
+    """Return the most recently generated SKIR from disk."""
+    from .collectors.llm import LLMCollector
+
+    config = runtime.get("config") or {}
+    llm_config = (config.get("collectors") or {}).get("llm") or {}
+    if not llm_config.get("generate_skir"):
+        return {"ok": False, "error": "SKIR is not enabled"}, 404
+    log_dir = configured_log_dir()
+    skir = LLMCollector.load_latest_skir(log_dir)
+    if skir is None:
+        return {"ok": False, "error": "No SKIR available"}, 404
+    return {"ok": True, "skir": skir}
+
+
+@app.route("/llm/skir/list", methods=["GET"])
+def llm_skir_list():
+    """Return a list of available SKIR reports with metadata."""
+    from .collectors.llm import LLMCollector
+
+    config = runtime.get("config") or {}
+    llm_config = (config.get("collectors") or {}).get("llm") or {}
+    if not llm_config.get("generate_skir"):
+        return {"ok": False, "error": "SKIR is not enabled"}, 404
+    log_dir = configured_log_dir()
+    items = LLMCollector.list_skirs(log_dir)
+    return {"ok": True, "skirs": items}
+
+
+@app.route("/llm/skir/<report_id>", methods=["GET"])
+def llm_skir_by_id(report_id):
+    """Return a specific SKIR by its report_id."""
+    from .collectors.llm import LLMCollector
+
+    config = runtime.get("config") or {}
+    llm_config = (config.get("collectors") or {}).get("llm") or {}
+    if not llm_config.get("generate_skir"):
+        return {"ok": False, "error": "SKIR is not enabled"}, 404
+    log_dir = configured_log_dir()
+    skir = LLMCollector.load_skir_by_id(log_dir, report_id)
+    if skir is None:
+        return {"ok": False, "error": "SKIR not found"}, 404
+    return {"ok": True, "skir": skir}
 
 
 @app.route("/collector_metadata", methods=["GET"])
@@ -515,6 +589,7 @@ def collector_metadata():
 def view_metadata():
     """Return dashboard defaults after applying config/skannr.yaml and retention."""
     config = runtime.get("config") or {}
+    llm_cfg = (config.get("collectors") or {}).get("llm") or {}
     return {
         "version": APP_VERSION,
         "active": "default",
@@ -528,6 +603,7 @@ def view_metadata():
             },
         },
         "bluetooth_uuid_names": bluetooth_uuid_names(),
+        "skir_enabled": bool(llm_cfg.get("enabled") and llm_cfg.get("generate_skir")),
     }
 
 
@@ -580,7 +656,10 @@ def bluetooth_uuid_names():
                         logging.warning(
                             "Bluetooth UUID collision: key=%s existing=%r "
                             "incoming=%r file=%s",
-                            key, names[key], value, path,
+                            key,
+                            names[key],
+                            value,
+                            path,
                         )
                     names[key] = value
     _BLUETOOTH_UUID_NAMES_CACHE = names
@@ -758,6 +837,7 @@ def subject_annotations_update():
     subject_type = str(payload.get("subject_type") or "").strip().lower()
     subject_id = str(payload.get("subject_id") or "").strip()
     custom_name = str(payload.get("custom_name") or "").strip()[:160]
+    operator_owned = bool(payload.get("operator_owned"))
     if not subject_id or not subject_annotation_allowed(collector, subject_type):
         return json_response(
             {"ok": False, "error": "Subject type does not support annotations"},
@@ -765,13 +845,14 @@ def subject_annotations_update():
         )
     annotations = load_subject_annotations()
     key = subject_annotation_key(collector, subject_type, subject_id)
-    if custom_name:
+    if custom_name or operator_owned:
         updated_epoch = now_epoch()
         annotations[key] = {
             "collector": collector,
             "subject_type": subject_type,
             "subject_id": subject_id,
             "custom_name": custom_name,
+            "operator_owned": operator_owned,
             "updated_at": local_now(updated_epoch),
             "updated_at_epoch": updated_epoch,
         }
@@ -783,7 +864,11 @@ def subject_annotations_update():
     except OSError as exc:
         logging.exception("failed to persist subject annotation: %s", exc)
         return json_response({"ok": False, "error": str(exc)}, status=500)
-    logging.info("subject annotation updated key=%s state_path=%s", key, subject_annotations_path())
+    logging.info(
+        "subject annotation updated key=%s state_path=%s",
+        key,
+        subject_annotations_path(),
+    )
     with runtime["derived_cache_lock"]:
         if runtime["subject_history"] is not None:
             runtime["subject_history"] = apply_subject_annotations(
@@ -871,6 +956,7 @@ def findings_history():
 @app.route("/findings_history/refresh", methods=["POST"])
 def findings_history_refresh():
     """Compatibility route: refresh the bundle but keep Findings History empty."""
+
     def refresh_and_return_empty():
         build_derived_views(requested_window_days(), force=True)
         return empty_findings_history(requested_window_days())
@@ -1042,16 +1128,19 @@ def process_bus_event(event):
     # Periodic status/channel-hop events are derived state. Persisting every
     # copy would bury the useful radio/BLE/Wi-Fi observations.
     high_rate_state_event = (
-        event.get("collector") == "system" and event.get("type") == "system_status"
-    ) or (
-        event.get("collector") == "aprsis"
-        and event.get("type") == "collector_status"
-    ) or (
-        event.get("collector") == "wifi_monitor"
-        and event.get("type") == "monitor_channel_changed"
-    ) or (
-        event.get("collector") == "rtl433"
-        and event.get("type") == "scanner_frequency"
+        (event.get("collector") == "system" and event.get("type") == "system_status")
+        or (
+            event.get("collector") == "aprsis"
+            and event.get("type") == "collector_status"
+        )
+        or (
+            event.get("collector") == "wifi_monitor"
+            and event.get("type") == "monitor_channel_changed"
+        )
+        or (
+            event.get("collector") == "rtl433"
+            and event.get("type") == "scanner_frequency"
+        )
     )
     if persistence and not high_rate_state_event:
         try:
@@ -1105,7 +1194,9 @@ def submit_alert_notification(alert_event):
     alert = (alert_event or {}).get("data") or {}
     if alert.get("emit_reason") not in ("new", "escalated"):
         return
-    pushover_config = (((runtime.get("config") or {}).get("alerts") or {}).get("pushover") or {})
+    pushover_config = ((runtime.get("config") or {}).get("alerts") or {}).get(
+        "pushover"
+    ) or {}
     if not pushover_enabled(pushover_config):
         return
     executor = runtime.get("push_executor")
@@ -1134,7 +1225,7 @@ async def consume_events(bus):
                 "event fan-out failed event=%s: %s",
                 event_log_context(event),
                 exc,
-        )
+            )
 
 
 def recent_poll_feed_events():
@@ -1337,9 +1428,7 @@ async def handoff_rtl_sdr_collectors(target):
         if not task.done():
             task.cancel()
         collector.state = "OFFLINE"
-        collector.warning = "RTL-SDR handed to {}".format(
-            collector_label(target_key)
-        )
+        collector.warning = "RTL-SDR handed to {}".format(collector_label(target_key))
         await runtime["bus"].publish(
             {
                 "collector": key,
@@ -1403,7 +1492,9 @@ def rtl433_decoder_available(config):
 
 def collector_label(key):
     """Return operator-facing collector label from metadata/config."""
-    for item in collector_definitions(runtime.get("config") or {}, include_system=False):
+    for item in collector_definitions(
+        runtime.get("config") or {}, include_system=False
+    ):
         if item.get("key") == key:
             return item.get("label") or key
     return key
@@ -1598,7 +1689,10 @@ def record_live_observation(event):
 def live_lan_snapshot():
     """Return current LAN live subjects for newly connected browsers."""
     with runtime["live_observations_lock"]:
-        items = [dict(item) for item in (runtime["live_observations"].get("lan") or {}).values()]
+        items = [
+            dict(item)
+            for item in (runtime["live_observations"].get("lan") or {}).values()
+        ]
     return sorted(
         items,
         key=lambda item: timestamp_epoch(item.get("last_seen_epoch")) or 0,
@@ -1710,6 +1804,22 @@ def cached_derived_view(key, loader, window_days):
         ):
             runtime[key] = loader(window_days)
         return runtime[key]
+
+
+def _cached_load(key, loader, window_days):
+    """Load one cached summary and log its elapsed time.
+
+    Unlike ``timed_derived_stage`` this does not touch the
+    ``DerivedRefreshCoordinator`` — cached loads are invisible to the
+    browser and should not publish phase progress.
+    """
+    started = time.monotonic()
+    cached_derived_view(key, loader, window_days)
+    logging.info(
+        "derived cached load %s finished elapsed=%.2fs",
+        key,
+        time.monotonic() - started,
+    )
 
 
 def view_window_metadata(window_days):
@@ -2039,9 +2149,17 @@ def insights_recent_window_metadata():
     hours = minutes / 60.0
     if minutes < 120:
         label_value = int(minutes) if float(minutes).is_integer() else minutes
-        return {"minutes": minutes, "hours": hours, "label": "Recent {} minutes".format(label_value)}
+        return {
+            "minutes": minutes,
+            "hours": hours,
+            "label": "Recent {} minutes".format(label_value),
+        }
     label_value = int(hours) if float(hours).is_integer() else round(hours, 2)
-    return {"minutes": minutes, "hours": hours, "label": "Recent {} hours".format(label_value)}
+    return {
+        "minutes": minutes,
+        "hours": hours,
+        "label": "Recent {} hours".format(label_value),
+    }
 
 
 def build_derived_views(window_days="default", force=False):
@@ -2136,32 +2254,10 @@ def build_derived_views_unlocked(window_days="default", force=False):
             ],
         )
     else:
-        timed_derived_stage(
-            "cached_subject_history",
-            lambda: cached_derived_view(
-                "subject_history", load_cached_subject_history, window_days
-            ),
-            mode,
-        )
-        timed_derived_stage(
-            "cached_device_history",
-            lambda: cached_derived_view(
-                "device_history", load_cached_device_history, window_days
-            ),
-            mode,
-        )
-        timed_derived_stage(
-            "cached_history_analysis",
-            lambda: cached_derived_view(
-                "history_analysis", load_cached_history_analysis, window_days
-            ),
-            mode,
-        )
-        timed_derived_stage(
-            "cached_reports",
-            lambda: cached_derived_view("reports", load_cached_reports, window_days),
-            mode,
-        )
+        _cached_load("subject_history", load_cached_subject_history, window_days)
+        _cached_load("device_history", load_cached_device_history, window_days)
+        _cached_load("history_analysis", load_cached_history_analysis, window_days)
+        _cached_load("reports", load_cached_reports, window_days)
         refresh_pending_raw_logs(window_days)
         if not derived_refresh.is_active():
             repair_response = refresh_stale_cached_dependents(window_days)
@@ -2268,10 +2364,22 @@ def build_cached_derived_bundle(window_days, mode="cached"):
             "history_analysis": add_refresh_metadata(
                 runtime["history_analysis"], generated_at, generated_at_epoch
             ),
-            "reports": add_refresh_metadata(
-                reports, generated_at, generated_at_epoch
-            ),
+            "reports": add_refresh_metadata(reports, generated_at, generated_at_epoch),
         }
+        # Compute a stable data-version from the underlying section
+        # summaries.  This only changes when the scheduler (or manual
+        # refresh) rebuilds data.  The browser uses it to skip redundant
+        # DOM re-renders during polling.
+        section_epochs = [
+            summary_generated_epoch(runtime.get("subject_history")),
+            summary_generated_epoch(runtime.get("device_history")),
+            summary_generated_epoch(runtime.get("history_analysis")),
+            summary_generated_epoch(runtime.get("reports")),
+        ]
+        section_epochs = [e for e in section_epochs if e is not None]
+        bundle["data_version_epoch"] = (
+            max(section_epochs) if section_epochs else generated_at_epoch
+        )
     logging.info(
         "derived views %s reused cached summaries; window=%s generated_at=%s",
         mode,
@@ -2321,9 +2429,7 @@ def refresh_stale_cached_dependents(window_days):
     try:
         timed_derived_stage(
             "repair_dependents",
-            lambda: repair_stale_cached_dependents_unlocked(
-                window_days, history_epoch
-            ),
+            lambda: repair_stale_cached_dependents_unlocked(window_days, history_epoch),
             "repair",
         )
         success = True
@@ -2428,6 +2534,57 @@ def device_history_update_interval_sec():
     return max(int(value), 5)
 
 
+def derived_scheduler_interval_sec():
+    """Return server-side derived-data rebuild interval in seconds.
+
+    Reads ``ui.derived_scheduler_interval_sec`` from config/skannr.yaml.
+    Default 900 (15 min).  Values 1–59 are clamped to 60.  0 disables.
+    """
+    ui = (runtime.get("config") or {}).get("ui") or {}
+    try:
+        value = float(ui.get("derived_scheduler_interval_sec", 900))
+    except (TypeError, ValueError):
+        value = 900
+    if value <= 0:
+        return 0
+    return max(int(value), 60)
+
+
+def _startup_prune_device_history():
+    """Run a one-time full prune of the compact device history at startup.
+
+    The incremental worker only prunes newly-added records.  This pass
+    re-evaluates every existing device against the current prune rules,
+    catching records that became eligible while the app was stopped or
+    before a rule was tightened.
+    """
+    path = device_history_path()
+    summary = read_json_file(path)
+    if not isinstance(summary, dict) or summary.get("empty"):
+        return
+    started = time.monotonic()
+    builder = WiFiBLEPostprocessor(
+        configured_log_dir(),
+        state_path=path,
+        window_days=None,
+    )
+    _summary, pruned_bt = builder.prune_low_value_bluetooth_devices(summary)
+    _summary, pruned_ap = builder.prune_stale_ap_sessions(summary)
+    if pruned_bt or pruned_ap:
+        try:
+            save_json_atomic(path, summary)
+        except OSError as exc:
+            logging.warning("startup device history prune save failed: %s", exc)
+    logging.info(
+        "startup device history prune finished elapsed=%.2fs "
+        "pruned_bluetooth=%s pruned_ap_sessions=%s total_devices=%s",
+        time.monotonic() - started,
+        pruned_bt,
+        pruned_ap,
+        len((summary.get("bluetooth") or summary.get("ble") or {}).get("devices", [])),
+    )
+
+
 def start_device_history_worker():
     """Start the background compact Device History updater when configured."""
     interval = device_history_update_interval_sec()
@@ -2448,14 +2605,64 @@ def start_device_history_worker():
 
 def device_history_worker_loop(interval):
     """Periodically fold raw Wi-Fi/BLE/LAN events into compact Device History."""
-    logging.info(
-        "device_history background updater started interval_sec=%s", interval
-    )
+    logging.info("device_history background updater started interval_sec=%s", interval)
     while not runtime.get("shutting_down"):
         if sleep_until_shutdown(interval):
             break
         update_compact_device_history(reason="periodic")
     logging.info("device_history background updater stopped")
+
+
+def derived_refresh_scheduler_loop(interval_sec):
+    """Background thread: periodically rebuild all derived views.
+
+    Runs independently of any browser connection.  Uses the same
+    ``DerivedRefreshCoordinator`` lock as manual browser refreshes so
+    they never collide.
+    """
+    logging.info("derived refresh scheduler started interval_sec=%s", interval_sec)
+    # Short grace period so collectors produce initial JSONL before the
+    # first rebuild.
+    first_wait = min(30, interval_sec // 2)
+    if sleep_until_shutdown(first_wait):
+        return
+    while not runtime.get("shutting_down"):
+        cycle_started = time.monotonic()
+        try:
+            if derived_refresh.is_active():
+                logging.info("derived scheduler skipped; refresh already in progress")
+            else:
+                logging.info("derived scheduler triggering periodic rebuild")
+                build_derived_views(force=True)
+                logging.info(
+                    "derived scheduler rebuild finished elapsed=%.2fs",
+                    time.monotonic() - cycle_started,
+                )
+        except Exception as exc:
+            logging.exception(
+                "derived scheduler rebuild failed elapsed=%.2fs: %s",
+                time.monotonic() - cycle_started,
+                exc,
+            )
+        if sleep_until_shutdown(interval_sec):
+            break
+    logging.info("derived refresh scheduler stopped")
+
+
+def start_derived_refresh_scheduler():
+    """Launch the background derived-data rebuild scheduler thread."""
+    interval = derived_scheduler_interval_sec()
+    if interval <= 0:
+        logging.info("derived refresh scheduler disabled (interval <= 0)")
+        return
+    thread = threading.Thread(
+        target=derived_refresh_scheduler_loop,
+        args=(interval,),
+        daemon=True,
+        name="skannr-derived-scheduler",
+    )
+    thread.start()
+    return thread
 
 
 def sleep_until_shutdown(seconds):
@@ -2502,18 +2709,18 @@ def update_compact_device_history(reason="periodic"):
             summary.get("records_read", 0),
             summary.get("incremental_records_read", 0),
             summary.get("incremental_records_read_by_collector") or {},
-            compact_incremental_read_stats(
-                summary.get("incremental_jsonl_read_stats")
-            ),
+            compact_incremental_read_stats(summary.get("incremental_jsonl_read_stats")),
         )
         prune_started = time.monotonic()
         summary, pruned_bluetooth = builder.prune_low_value_bluetooth_devices(summary)
+        summary, pruned_ap_sessions = builder.prune_stale_ap_sessions(summary)
         logging.info(
             "device_history background prune finished reason=%s elapsed=%.2fs "
-            "pruned_bluetooth=%s",
+            "pruned_bluetooth=%s pruned_ap_sessions=%s",
             reason,
             time.monotonic() - prune_started,
             pruned_bluetooth,
+            pruned_ap_sessions,
         )
         summary = apply_subject_annotations(summary)
         builder.save_summary(summary)
@@ -2592,9 +2799,9 @@ def subject_history_pending_jsonl_stats(history):
     effective["subject_checkpoint_pending_files"] = subject_pending.get(
         "pending_files", 0
     )
-    effective["subject_checkpoint_pending_by_collector"] = subject_pending.get(
-        "pending_by_collector"
-    ) or {}
+    effective["subject_checkpoint_pending_by_collector"] = (
+        subject_pending.get("pending_by_collector") or {}
+    )
     return effective
 
 
@@ -2668,9 +2875,7 @@ def combine_pending_jsonl_stats(*stats_items):
             continue
         pending_files += int(stats.get("pending_files") or 0)
         pending_bytes += int(stats.get("pending_bytes") or 0)
-        for collector, values in (
-            (stats.get("pending_by_collector") or {}).items()
-        ):
+        for collector, values in (stats.get("pending_by_collector") or {}).items():
             target = pending_by_collector.setdefault(
                 collector, {"bytes": 0, "files": 0}
             )
@@ -2687,7 +2892,9 @@ def combine_pending_jsonl_stats(*stats_items):
 def compact_pending_jsonl_stats(stats):
     """Return concise pending JSONL stats for refresh timing logs."""
     parts = []
-    for collector, values in sorted(((stats or {}).get("pending_by_collector") or {}).items()):
+    for collector, values in sorted(
+        ((stats or {}).get("pending_by_collector") or {}).items()
+    ):
         parts.append(
             "{}={}B/{}f".format(
                 collector,
@@ -3105,14 +3312,11 @@ def compact_subject_history_for_browser(summary):
         return output
     row_limit = max_history_payload_rows()
     subjects = [
-        item
-        for item in (summary or {}).get("subjects") or []
-        if isinstance(item, dict)
+        item for item in (summary or {}).get("subjects") or [] if isinstance(item, dict)
     ]
     selected = select_subject_records_for_browser(subjects, row_limit)
     output["subjects"] = [
-        compact_record_for_browser(item, SUBJECT_BROWSER_KEYS)
-        for item in selected
+        compact_record_for_browser(item, SUBJECT_BROWSER_KEYS) for item in selected
     ]
     output["subject_counts"] = (summary or {}).get("subject_counts") or {
         "total": 0,
@@ -3166,7 +3370,14 @@ def represented_device_count(records):
         if not isinstance(record, dict):
             continue
         try:
-            total += max(1, int(record.get("randomized_group_count") or record.get("device_count") or 1))
+            total += max(
+                1,
+                int(
+                    record.get("randomized_group_count")
+                    or record.get("device_count")
+                    or 1
+                ),
+            )
         except (TypeError, ValueError):
             total += 1
     return total
@@ -3250,7 +3461,9 @@ def compact_records_with_randomized_group(
 
     randomized_groups = []
     for bucket, candidate_records in candidates.items():
-        represented = sum(browser_group_record_count(record) for record in candidate_records)
+        represented = sum(
+            browser_group_record_count(record) for record in candidate_records
+        )
         if represented <= 1:
             individual.extend(candidate_records)
             continue
@@ -3285,7 +3498,12 @@ def compact_records_with_randomized_group(
 def browser_group_record_count(record):
     """Return represented identity count for browser grouping decisions."""
     try:
-        return max(1, int(record.get("randomized_group_count") or record.get("device_count") or 1))
+        return max(
+            1,
+            int(
+                record.get("randomized_group_count") or record.get("device_count") or 1
+            ),
+        )
     except (TypeError, ValueError):
         return 1
 
@@ -3316,8 +3534,9 @@ def compact_wifi_clients_for_browser(records, limit, required_macs):
         update_randomized_wifi_client_group,
     )
     for group in server_groups:
-        result.append(compact_device_record_for_browser(
-            group, WIFI_CLIENT_BROWSER_KEYS))
+        result.append(
+            compact_device_record_for_browser(group, WIFI_CLIENT_BROWSER_KEYS)
+        )
     result.sort(key=browser_record_sort_key, reverse=True)
     return result
 
@@ -3346,28 +3565,49 @@ def update_randomized_wifi_client_group(group, record):
             "disassoc_count": 0,
             "finding_count": 0,
         }
-    group["randomized_group_count"] = int(group.get("randomized_group_count") or 0) + int(record.get("randomized_group_count") or record.get("device_count") or 1)
+    group["randomized_group_count"] = int(
+        group.get("randomized_group_count") or 0
+    ) + int(record.get("randomized_group_count") or record.get("device_count") or 1)
     append_group_sample_mac(group, record, limit=8)
     append_browser_group_member(group, record, "wifi")
     group["ssids"] = merge_group_list(group, record, "ssids", 50)
-    increment_group_counts(group, record, ("probe_count", "association_count", "deauth_count", "disassoc_count", "finding_count"))
+    increment_group_counts(
+        group,
+        record,
+        (
+            "probe_count",
+            "association_count",
+            "deauth_count",
+            "disassoc_count",
+            "finding_count",
+        ),
+    )
     update_group_time_bounds(group, record)
     update_group_signal_bounds(group, record)
     return group
-
 
 
 def append_browser_group_member(group, record, source, limit=24):
     """Keep compact per-member details in browser synthetic groups."""
     members = group.setdefault("group_members", [])
     source_members = record.get("group_members")
-    candidates = source_members if isinstance(source_members, list) and source_members else [browser_group_member_summary(record, source)]
+    candidates = (
+        source_members
+        if isinstance(source_members, list) and source_members
+        else [browser_group_member_summary(record, source)]
+    )
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
-        member = {key: value for key, value in candidate.items() if value not in (None, "", [], {})}
+        member = {
+            key: value
+            for key, value in candidate.items()
+            if value not in (None, "", [], {})
+        }
         mac = str(member.get("mac") or "").strip().lower()
-        if not mac or any(str(item.get("mac") or "").lower() == mac for item in members):
+        if not mac or any(
+            str(item.get("mac") or "").lower() == mac for item in members
+        ):
             continue
         if len(members) < limit:
             members.append(member)
@@ -3383,28 +3623,45 @@ def browser_group_member_summary(record, source):
         "signal_max": record.get("signal_max"),
     }
     if source == "wifi":
-        member.update({
-            "identity": record.get("vendor_name") or record.get("vendor_prefix") or "",
-            "ssids": (record.get("ssids") or [])[:8],
-            "probe_count": record.get("probe_count") or 0,
-            "association_count": record.get("association_count") or 0,
-            "deauth_count": record.get("deauth_count") or 0,
-            "disassoc_count": record.get("disassoc_count") or 0,
-        })
+        member.update(
+            {
+                "identity": record.get("vendor_name")
+                or record.get("vendor_prefix")
+                or "",
+                "ssids": (record.get("ssids") or [])[:8],
+                "probe_count": record.get("probe_count") or 0,
+                "association_count": record.get("association_count") or 0,
+                "deauth_count": record.get("deauth_count") or 0,
+                "disassoc_count": record.get("disassoc_count") or 0,
+            }
+        )
     elif source == "bluetooth":
-        names = record.get("names") or ([record.get("name")] if record.get("name") else [])
-        member.update({
-            "identity": names[0] if names else (record.get("manufacturer") or record.get("manufacturer_name") or ""),
-            "names": names[:6],
-            "service_uuids": (record.get("service_uuids") or [])[:8],
-            "seen_count": record.get("seen_count") or 0,
-            "update_count": record.get("update_count") or 0,
-            "lost_count": record.get("lost_count") or 0,
-            "classic_seen_count": record.get("classic_seen_count") or 0,
-            "session_count": record.get("session_count") or 0,
-            "active_session": bool(record.get("active_session")),
-        })
+        names = record.get("names") or (
+            [record.get("name")] if record.get("name") else []
+        )
+        member.update(
+            {
+                "identity": (
+                    names[0]
+                    if names
+                    else (
+                        record.get("manufacturer")
+                        or record.get("manufacturer_name")
+                        or ""
+                    )
+                ),
+                "names": names[:6],
+                "service_uuids": (record.get("service_uuids") or [])[:8],
+                "seen_count": record.get("seen_count") or 0,
+                "update_count": record.get("update_count") or 0,
+                "lost_count": record.get("lost_count") or 0,
+                "classic_seen_count": record.get("classic_seen_count") or 0,
+                "session_count": record.get("session_count") or 0,
+                "active_session": bool(record.get("active_session")),
+            }
+        )
     return member
+
 
 def increment_group_counts(group, record, fields):
     """Add numeric counters from one low-identity record into an aggregate row."""
@@ -3479,8 +3736,9 @@ def compact_bluetooth_devices_for_browser(records, limit, required_macs):
         update_randomized_bluetooth_group,
     )
     for group in server_groups:
-        result.append(compact_device_record_for_browser(
-            group, BLUETOOTH_DEVICE_BROWSER_KEYS))
+        result.append(
+            compact_device_record_for_browser(group, BLUETOOTH_DEVICE_BROWSER_KEYS)
+        )
     result.sort(key=browser_record_sort_key, reverse=True)
     return result
 
@@ -3568,9 +3826,15 @@ def update_randomized_bluetooth_group(group, record):
             "service_uuids": [],
         }
 
-    group["randomized_group_count"] += int(record.get("randomized_group_count") or record.get("device_count") or 1)
-    increment_group_counts(group, record, ("seen_count", "update_count", "lost_count", "finding_count"))
-    group["session_count"] += int(record.get("session_count") or len(record.get("sessions") or []))
+    group["randomized_group_count"] += int(
+        record.get("randomized_group_count") or record.get("device_count") or 1
+    )
+    increment_group_counts(
+        group, record, ("seen_count", "update_count", "lost_count", "finding_count")
+    )
+    group["session_count"] += int(
+        record.get("session_count") or len(record.get("sessions") or [])
+    )
     group["classic_seen_count"] += int(record.get("classic_seen_count") or 0)
     group["active_session"] = bool(group.get("active_session")) or bool(
         record.get("active_session")
@@ -3700,10 +3964,11 @@ def subject_history_path():
     return os.path.join(configured_log_dir(), "device_history", "subject_history.json")
 
 
-
 def subject_annotations_path():
     """Return the durable user annotation overlay path for Subject History."""
-    return os.path.join(configured_log_dir(), "device_history", "subject_annotations.json")
+    return os.path.join(
+        configured_log_dir(), "device_history", "subject_annotations.json"
+    )
 
 
 ANNOTATABLE_SUBJECT_TYPES = {
@@ -3713,6 +3978,7 @@ ANNOTATABLE_SUBJECT_TYPES = {
     ("bluetooth", "bluetooth_device"),
     ("lan", "lan_device"),
     ("lan", "lan_gateway"),
+    ("rtl433", "rtl433_device"),
 }
 
 
@@ -3731,7 +3997,9 @@ def normalize_annotation_subject_id(collector, subject_type, subject_id):
     if (collector, subject_type) in ANNOTATION_MAC_SUBJECT_TYPES:
         compact = re.sub(r"[^0-9a-fA-F]", "", value)
         if len(compact) == 12:
-            return ":".join(compact[index:index + 2] for index in range(0, 12, 2)).upper()
+            return ":".join(
+                compact[index : index + 2] for index in range(0, 12, 2)
+            ).upper()
     return value
 
 
@@ -3775,13 +4043,16 @@ def load_subject_annotations():
         if not isinstance(value, dict):
             continue
         custom_name = str(value.get("custom_name") or "").strip()
-        if not custom_name:
+        operator_owned = bool(value.get("operator_owned"))
+        if not custom_name and not operator_owned:
             continue
-        clean[normalize_annotation_key(key)] = {
+        entry = {
             "custom_name": custom_name[:160],
+            "operator_owned": operator_owned,
             "updated_at": value.get("updated_at") or "",
             "updated_at_epoch": value.get("updated_at_epoch"),
         }
+        clean[normalize_annotation_key(key)] = entry
     return clean
 
 
@@ -3813,9 +4084,13 @@ def apply_subject_annotations(summary, annotations=None):
         return output
     annotate_subject_rows(output.get("subjects") or [], annotations)
     annotate_wifi_records((output.get("wifi") or {}), annotations)
-    annotate_bluetooth_records((output.get("bluetooth") or output.get("ble") or {}), annotations)
+    annotate_bluetooth_records(
+        (output.get("bluetooth") or output.get("ble") or {}), annotations
+    )
     annotate_lan_records(output.get("lan") or [], annotations)
-    if output.get("ble") is not None and output.get("bluetooth") is not output.get("ble"):
+    if output.get("ble") is not None and output.get("bluetooth") is not output.get(
+        "ble"
+    ):
         annotate_bluetooth_records((output.get("ble") or {}), annotations)
     return output
 
@@ -3825,31 +4100,35 @@ def strip_annotation_fields(record):
     if isinstance(record, dict):
         record.pop("annotation", None)
         record.pop("custom_name", None)
+        record.pop("operator_owned", None)
         for nested_key in ("data", "evidence"):
             nested = record.get(nested_key)
             if isinstance(nested, dict):
                 nested.pop("annotation", None)
                 nested.pop("custom_name", None)
+                nested.pop("operator_owned", None)
 
 
 def strip_subject_annotation_fields(summary):
     """Remove stale annotation overlays from subject/device summaries."""
-    for subject in (summary.get("subjects") or []):
+    for subject in summary.get("subjects") or []:
         strip_annotation_fields(subject)
     wifi = summary.get("wifi") or {}
-    for item in (wifi.get("access_points") or []):
+    for item in wifi.get("access_points") or []:
         strip_annotation_fields(item)
-    for item in (wifi.get("clients") or []):
+    for item in wifi.get("clients") or []:
         strip_annotation_fields(item)
     bluetooth_sections = []
     if isinstance(summary.get("bluetooth"), dict):
         bluetooth_sections.append(summary.get("bluetooth"))
-    if isinstance(summary.get("ble"), dict) and summary.get("ble") is not summary.get("bluetooth"):
+    if isinstance(summary.get("ble"), dict) and summary.get("ble") is not summary.get(
+        "bluetooth"
+    ):
         bluetooth_sections.append(summary.get("ble"))
     for bluetooth in bluetooth_sections:
-        for item in (bluetooth.get("devices") or []):
+        for item in bluetooth.get("devices") or []:
             strip_annotation_fields(item)
-    for item in (summary.get("lan") or []):
+    for item in summary.get("lan") or []:
         strip_annotation_fields(item)
 
 
@@ -3899,7 +4178,11 @@ def strip_report_annotation_fields(reports):
         if not isinstance(report, dict):
             continue
         custom_name = str(
-            ((report.get("annotation") or {}).get("custom_name") if isinstance(report.get("annotation"), dict) else "")
+            (
+                (report.get("annotation") or {}).get("custom_name")
+                if isinstance(report.get("annotation"), dict)
+                else ""
+            )
             or report.get("custom_name")
             or ""
         ).strip()
@@ -3907,12 +4190,16 @@ def strip_report_annotation_fields(reports):
         if custom_name:
             prefix = custom_name + " ("
             if subject.startswith(prefix) and subject.endswith(")"):
-                report["subject"] = subject[len(prefix):-1]
+                report["subject"] = subject[len(prefix) : -1]
                 subject = report["subject"]
         original = report_original_subject(report)
         if original and subject.endswith("({})".format(original)):
             report["subject"] = original
-        elif report_annotation_source(report) and " (" in subject and subject.endswith(")"):
+        elif (
+            report_annotation_source(report)
+            and " (" in subject
+            and subject.endswith(")")
+        ):
             report["subject"] = subject.rsplit(" (", 1)[1][:-1]
         strip_annotation_fields(report)
 
@@ -3929,7 +4216,9 @@ def report_annotation_source(report):
 
 def report_original_subject(report):
     """Reconstruct the unannotated report subject when evidence is available."""
-    evidence = report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+    evidence = (
+        report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+    )
     source = str(report.get("source") or "").strip().lower()
     if source == "bluetooth":
         return bluetooth_report_original_subject(evidence)
@@ -3945,7 +4234,9 @@ def report_original_subject(report):
 
 def annotation_for_report(report, annotations):
     """Return the annotation and original subject for a report row."""
-    evidence = report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+    evidence = (
+        report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+    )
     source = str(report.get("source") or "").strip().lower()
     report_type = str(report.get("type") or "").strip().lower()
     candidates = []
@@ -3953,7 +4244,9 @@ def annotation_for_report(report, annotations):
     if source == "bluetooth":
         mac = evidence.get("mac") or ""
         if mac:
-            candidates.append(subject_annotation_key("bluetooth", "bluetooth_device", mac))
+            candidates.append(
+                subject_annotation_key("bluetooth", "bluetooth_device", mac)
+            )
             original = bluetooth_report_original_subject(evidence)
     elif source == "wifi":
         bssid = evidence.get("bssid") or ""
@@ -3961,17 +4254,34 @@ def annotation_for_report(report, annotations):
         if bssid:
             candidates.append(subject_annotation_key("wifi", "wifi_bssid", bssid))
         if ssid:
-            candidates.append(subject_annotation_key("wifi", "wifi_ssid", "ssid:{}".format(ssid)))
+            candidates.append(
+                subject_annotation_key("wifi", "wifi_ssid", "ssid:{}".format(ssid))
+            )
         original = wifi_report_original_subject(evidence)
     elif source == "wifi_monitor":
-        mac = evidence.get("mac") or evidence.get("client_mac") or evidence.get("transmitter_mac") or ""
+        mac = (
+            evidence.get("mac")
+            or evidence.get("client_mac")
+            or evidence.get("transmitter_mac")
+            or ""
+        )
         if mac:
             candidates.append(subject_annotation_key("wifi", "wifi_client", mac))
             original = mac
     elif source == "lan":
-        subject_id = evidence.get("subject_key") or evidence.get("mac") or evidence.get("ip") or ""
+        subject_id = (
+            evidence.get("subject_key")
+            or evidence.get("mac")
+            or evidence.get("ip")
+            or ""
+        )
         if "gateway" in report_type:
-            subject_id = evidence.get("subject_key") or evidence.get("gateway_ip") or subject_id or "gateway"
+            subject_id = (
+                evidence.get("subject_key")
+                or evidence.get("gateway_ip")
+                or subject_id
+                or "gateway"
+            )
             candidates.append(subject_annotation_key("lan", "lan_gateway", subject_id))
             original = lan_gateway_report_original_subject(evidence)
         elif subject_id:
@@ -3998,7 +4308,9 @@ def annotated_report_subject(custom_name, original):
 def bluetooth_report_original_subject(evidence):
     """Reconstruct a Bluetooth report subject from evidence."""
     parts = []
-    names = [str(name).strip() for name in evidence.get("names") or [] if str(name).strip()]
+    names = [
+        str(name).strip() for name in evidence.get("names") or [] if str(name).strip()
+    ]
     if names:
         parts.append(names[0])
     if evidence.get("mac"):
@@ -4064,14 +4376,17 @@ def annotation_for_subject(subject, annotations):
 def attach_annotation(record, annotation):
     """Attach annotation fields while preserving the original subject identity."""
     custom_name = str((annotation or {}).get("custom_name") or "").strip()
-    if not custom_name:
+    operator_owned = bool((annotation or {}).get("operator_owned"))
+    if not custom_name and not operator_owned:
         return
+    record["custom_name"] = custom_name
+    record["operator_owned"] = operator_owned
     record["annotation"] = {
         "custom_name": custom_name,
+        "operator_owned": operator_owned,
         "updated_at": (annotation or {}).get("updated_at") or "",
         "updated_at_epoch": (annotation or {}).get("updated_at_epoch"),
     }
-    record["custom_name"] = custom_name
 
 
 def annotate_wifi_records(wifi, annotations):
@@ -4083,14 +4398,18 @@ def annotate_wifi_records(wifi, annotations):
             ("wifi_bssid", ap.get("bssid")),
             ("wifi_ssid", "ssid:{}".format(ap.get("ssid")) if ap.get("ssid") else ""),
         ):
-            annotation = annotations.get(subject_annotation_key("wifi", subject_type, subject_id))
+            annotation = annotations.get(
+                subject_annotation_key("wifi", subject_type, subject_id)
+            )
             if annotation:
                 attach_annotation(ap, annotation)
                 break
     for client in (wifi or {}).get("clients") or []:
         if not isinstance(client, dict) or client.get("grouped_randomized"):
             continue
-        annotation = annotations.get(subject_annotation_key("wifi", "wifi_client", client.get("mac")))
+        annotation = annotations.get(
+            subject_annotation_key("wifi", "wifi_client", client.get("mac"))
+        )
         if annotation:
             attach_annotation(client, annotation)
 
@@ -4100,7 +4419,9 @@ def annotate_bluetooth_records(bluetooth, annotations):
     for device in (bluetooth or {}).get("devices") or []:
         if not isinstance(device, dict) or device.get("grouped_randomized"):
             continue
-        annotation = annotations.get(subject_annotation_key("bluetooth", "bluetooth_device", device.get("mac")))
+        annotation = annotations.get(
+            subject_annotation_key("bluetooth", "bluetooth_device", device.get("mac"))
+        )
         if annotation:
             attach_annotation(device, annotation)
 
@@ -4117,10 +4438,17 @@ def annotate_lan_records(events, annotations):
             subject_id = data.get("subject_key") or data.get("gateway_ip") or "gateway"
         elif event_type == "lan_device_summary":
             subject_type = "lan_device"
-            subject_id = data.get("subject_key") or data.get("mac") or data.get("ip") or "unknown"
+            subject_id = (
+                data.get("subject_key")
+                or data.get("mac")
+                or data.get("ip")
+                or "unknown"
+            )
         else:
             continue
-        annotation = annotations.get(subject_annotation_key("lan", subject_type, subject_id))
+        annotation = annotations.get(
+            subject_annotation_key("lan", subject_type, subject_id)
+        )
         if annotation:
             attach_annotation(data, annotation)
             attach_annotation(event, annotation)
@@ -4184,7 +4512,6 @@ def read_json_file(path):
 def save_json_file(path, payload):
     """Write one materialized derived summary."""
     save_json_atomic(path, payload)
-
 
 
 def load_cached_findings_history(window_days):
@@ -4406,8 +4733,7 @@ def load_cached_reports(window_days):
         reports.setdefault("generated_at_epoch", now_epoch())
         reports.setdefault("generated_at", local_now(reports["generated_at_epoch"]))
         reports["reports"] = [
-            sanitize_rayhunter_report(item)
-            for item in reports.get("reports") or []
+            sanitize_rayhunter_report(item) for item in reports.get("reports") or []
         ]
         reports = apply_report_annotations(reports)
         reports["counts"] = count_reports(reports.get("reports") or [])
@@ -4509,10 +4835,8 @@ def apply_live_observations_to_history(summary, copy_summary=True):
         return summary, {"wifi": 0, "bluetooth": 0, "max_lag_sec": 0}
 
     output = copy.deepcopy(summary) if copy_summary else summary
-    wifi_records = (output.setdefault("wifi", {}).setdefault("access_points", []))
-    bluetooth_records = (
-        output.setdefault("bluetooth", {}).setdefault("devices", [])
-    )
+    wifi_records = output.setdefault("wifi", {}).setdefault("access_points", [])
+    bluetooth_records = output.setdefault("bluetooth", {}).setdefault("devices", [])
     output.setdefault("ble", {})["devices"] = bluetooth_records
     stats = {"wifi": 0, "bluetooth": 0, "max_lag_sec": 0}
     stats["live_wifi"] = len(live_wifi)
@@ -4564,9 +4888,9 @@ def overlay_wifi_live_observations(records, live_observations, stats):
             record = {
                 "bssid": bssid,
                 "ssid": observation.get("ssid") or "",
-                "ssids": [observation.get("ssid") or ""]
-                if observation.get("ssid")
-                else [],
+                "ssids": (
+                    [observation.get("ssid") or ""] if observation.get("ssid") else []
+                ),
                 "first_seen": observation.get("last_seen") or local_now(live_epoch),
                 "first_seen_epoch": live_epoch,
                 "last_seen": observation.get("last_seen") or local_now(live_epoch),
@@ -4584,7 +4908,9 @@ def overlay_wifi_live_observations(records, live_observations, stats):
             if current_epoch is not None and live_epoch <= current_epoch:
                 continue
             if current_epoch is not None:
-                stats["max_lag_sec"] = max(stats["max_lag_sec"], live_epoch - current_epoch)
+                stats["max_lag_sec"] = max(
+                    stats["max_lag_sec"], live_epoch - current_epoch
+                )
             record["last_seen"] = observation.get("last_seen") or local_now(live_epoch)
             record["last_seen_epoch"] = live_epoch
             applied += 1
@@ -4764,10 +5090,15 @@ def apply_live_overlay_and_prune_device_history(
     full_device_summary, pruned_bluetooth = (
         device_builder.prune_low_value_bluetooth_devices(full_device_summary)
     )
+    full_device_summary, pruned_ap_sessions = device_builder.prune_stale_ap_sessions(
+        full_device_summary
+    )
     logging.info(
-        "derived device_history prune finished elapsed=%.2fs pruned_bluetooth=%s",
+        "derived device_history prune finished elapsed=%.2fs "
+        "pruned_bluetooth=%s pruned_ap_sessions=%s",
         time.monotonic() - prune_started,
         pruned_bluetooth,
+        pruned_ap_sessions,
     )
     return full_device_summary
 
@@ -4833,6 +5164,7 @@ def build_or_reuse_device_history_for_refresh(log_dir, window_days):
     finally:
         lock.release()
 
+
 def _push_known_bssids_to_alerts(subject_history):
     """Extract BSSID->SSID mapping from subject history and push to AlertEngine.
 
@@ -4850,6 +5182,130 @@ def _push_known_bssids_to_alerts(subject_history):
         if bssid and ssid:
             bssid_to_ssid[normalized_identity(bssid)] = ssid
     runtime["alerts"].set_known_bssids(bssid_to_ssid)
+
+
+def backfill_missing_snapshots():
+    """Build hourly snapshots for any missing hours in the past 24h.
+
+    Reads the persisted ``subject_history.json`` and builds a compact
+    snapshot for each hour that has subject data but no existing snapshot
+    file on disk.  This ensures the SKIR presence timeline is complete
+    after a restart even before the scheduler's first cycle.
+
+    Best-effort: hours predating the cached Subject History are skipped.
+    The scheduler fills the current hour and future hours going forward.
+    """
+    snapshot_dir = os.path.join(configured_log_dir(), "sh_snapshots")
+    started = time.monotonic()
+    try:
+        existing = load_snapshots(snapshot_dir) if os.path.isdir(snapshot_dir) else {}
+    except OSError:
+        existing = {}
+
+    now = int(time.time())
+    now_hour = now - (now % 3600)
+    hours_to_check = list(range(now_hour - 24 * 3600, now_hour, 3600))
+    missing = [h for h in hours_to_check if h not in existing]
+
+    if not missing:
+        logging.info(
+            "snapshot backfill: all 24h covered (%s snapshots on disk) "
+            "elapsed=%.2fs",
+            len(existing),
+            time.monotonic() - started,
+        )
+        return
+
+    sh_path = subject_history_path()
+    sh_dict = read_json_file(sh_path)
+    if not isinstance(sh_dict, dict) or sh_dict.get("empty"):
+        logging.info(
+            "snapshot backfill skipped; no cached subject history at %s "
+            "elapsed=%.2fs",
+            sh_path,
+            time.monotonic() - started,
+        )
+        return
+
+    snapshots = {}
+    for hour_epoch in missing:
+        expected_file = time.strftime(
+            "snapshot_%Y-%m-%dT%H:%M.json", time.localtime(hour_epoch)
+        )
+        expected_path = os.path.join(snapshot_dir, expected_file)
+        if os.path.isfile(expected_path):
+            continue
+
+        snap = build_snapshot_from_sh(sh_dict, hour_epoch=hour_epoch)
+        has_data = any(
+            isinstance(v, dict) and v.get("subject_count", 0) > 0
+            for k, v in snap.items()
+            if not str(k).startswith("_")
+        )
+        if has_data:
+            snapshots[hour_epoch] = snap
+
+    if snapshots:
+        try:
+            written = save_snapshots(snapshots, snapshot_dir, retention_hours=24)
+            logging.info(
+                "snapshot backfill built %s snapshots written=%s "
+                "missing_checked=%s elapsed=%.2fs",
+                len(snapshots),
+                written,
+                len(missing),
+                time.monotonic() - started,
+            )
+        except OSError as exc:
+            logging.warning(
+                "snapshot backfill save failed: %s elapsed=%.2fs",
+                exc,
+                time.monotonic() - started,
+            )
+    else:
+        logging.info(
+            "snapshot backfill: no subject data for %s missing hours " "elapsed=%.2fs",
+            len(missing),
+            time.monotonic() - started,
+        )
+
+
+def _save_hourly_snapshot(subject_display):
+    """Save one compact hourly snapshot for the 24h SKIR ring buffer.
+
+    Only writes when the current hour doesn't already have a snapshot on
+    disk.  Snapshot retention is 24 hours — older files are purged by
+    ``save_snapshots``.
+    """
+    snapshot_dir = os.path.join(configured_log_dir(), "sh_snapshots")
+    try:
+        now = int(time.time())
+        # Save for the most recently completed hour.  The snapshot label
+        # is the END of the hour: "09:00" = data from 08:00–08:59.
+        # The first refresh after 09:00 creates the 09:00 snapshot.
+        hour_epoch = now - (now % 3600)
+        # Skip if this hour already has a snapshot (check by filename:
+        # "snapshot_2026-06-28T16:00.json" encodes the hour label).
+        expected = time.strftime(
+            "snapshot_%Y-%m-%dT%H:%M.json", time.localtime(hour_epoch)
+        )
+        expected_path = os.path.join(snapshot_dir, expected)
+        if os.path.isfile(expected_path):
+            return
+        snap = build_snapshot_from_sh(subject_display, hour_epoch=hour_epoch)
+        save_snapshots({hour_epoch: snap}, snapshot_dir, retention_hours=24)
+        logging.info(
+            "hourly snapshot saved hour=%s subjects=%s",
+            time.strftime("%Y-%m-%d %H:00", time.localtime(hour_epoch)),
+            sum(
+                s.get("subject_count", 0)
+                for s in snap.values()
+                if isinstance(s, dict) and not str(s).startswith("_")
+            ),
+        )
+    except OSError as exc:
+        logging.warning("hourly snapshot save failed: %s", exc)
+
 
 def refresh_subject_history(window_days="default"):
     """Build Subject History and its Device History compatibility view."""
@@ -4871,15 +5327,22 @@ def refresh_subject_history(window_days="default"):
         compact_pending_jsonl_stats(pending_stats),
         (cached_full_summary or {}).get("generated_at") or "",
     )
-    if isinstance(cached_full_summary, dict) and not cached_full_summary.get("empty") and not pending_raw:
+    if (
+        isinstance(cached_full_summary, dict)
+        and not cached_full_summary.get("empty")
+        and not pending_raw
+    ):
         derived_refresh.set_stage_label("Subject History — loading cached")
         reuse_started = time.monotonic()
         subject_display = load_cached_subject_history(window_days)
-        device_display = device_history_from_subject_history(subject_display, window_days)
+        device_display = device_history_from_subject_history(
+            subject_display, window_days
+        )
         with runtime["derived_cache_lock"]:
             runtime["subject_history"] = subject_display
             runtime["device_history"] = device_display
         _push_known_bssids_to_alerts(subject_display)
+        _save_hourly_snapshot(subject_display)
         logging.info(
             "derived subject_history reused cached summary; window=%s elapsed=%.2fs subjects=%s generated=%s",
             window_days,
@@ -4924,12 +5387,8 @@ def refresh_subject_history(window_days="default"):
         logging.exception("failed to persist subject history: %s", exc)
 
     display_started = time.monotonic()
-    subject_display = subject_builder.display_summary(
-        full_subject_summary, window_days
-    )
-    device_display = device_history_from_subject_history(
-        subject_display, window_days
-    )
+    subject_display = subject_builder.display_summary(full_subject_summary, window_days)
+    device_display = device_history_from_subject_history(subject_display, window_days)
     logging.info(
         "derived subject_history display_summary finished elapsed=%.2fs",
         time.monotonic() - display_started,
@@ -4941,6 +5400,7 @@ def refresh_subject_history(window_days="default"):
         runtime["subject_history"] = subject_display
         runtime["device_history"] = device_display
     _push_known_bssids_to_alerts(subject_display)
+    _save_hourly_snapshot(subject_display)
     return subject_display
 
 
@@ -4948,9 +5408,7 @@ def refresh_device_history(window_days="default", update_analysis=True):
     """Compatibility wrapper: Device History is derived from Subject History."""
     window_days = resolve_window_days(window_days)
     subject_history = refresh_subject_history(window_days)
-    display_summary = device_history_from_subject_history(
-        subject_history, window_days
-    )
+    display_summary = device_history_from_subject_history(subject_history, window_days)
     if update_analysis:
         refresh_history_analysis(window_days)
     return display_summary
@@ -4981,7 +5439,9 @@ def refresh_history_analysis(window_days="default"):
         cached_analysis = runtime.get("history_analysis")
     if cached_analysis is None:
         cached_analysis = load_cached_history_analysis(window_days)
-    if history_epoch and not dependent_summary_is_stale(cached_analysis, history_epoch, window_days):
+    if history_epoch and not dependent_summary_is_stale(
+        cached_analysis, history_epoch, window_days
+    ):
         logging.info(
             "derived history_analysis reused cached summary; window=%s generated=%s subject_history_generated=%s observations=%s",
             window_days,
@@ -5038,7 +5498,9 @@ def refresh_reports(window_days="default"):
         cached_reports = runtime.get("reports")
     if cached_reports is None:
         cached_reports = load_cached_reports(window_days)
-    if history_epoch and not dependent_summary_is_stale(cached_reports, history_epoch, window_days):
+    if history_epoch and not dependent_summary_is_stale(
+        cached_reports, history_epoch, window_days
+    ):
         logging.info(
             "derived reports reused cached summary; window=%s generated=%s subject_history_generated=%s reports=%s",
             window_days,
@@ -5053,7 +5515,18 @@ def refresh_reports(window_days="default"):
     history = reports_history_from_subject_history(subject_history, window_days)
     builder = ReportsBuilder(config.get("reports", {}), window_days=window_days)
     build_started = time.monotonic()
-    report = builder.build(history or {})
+    alerts = runtime.get("alerts")
+    active_alerts = alerts.snapshot() if alerts else []
+    insight_data = runtime.get("history_analysis") or load_cached_history_analysis(
+        window_days
+    )
+    collector_health = _build_collector_health_summary()
+    report = builder.build(
+        history or {},
+        active_alerts=active_alerts,
+        insight_data=insight_data,
+        collector_health=collector_health,
+    )
     logging.info(
         "derived reports build finished elapsed=%.2fs reports=%s",
         time.monotonic() - build_started,
@@ -5072,6 +5545,25 @@ def refresh_reports(window_days="default"):
     with runtime["derived_cache_lock"]:
         runtime["reports"] = report
     return report
+
+
+def _build_collector_health_summary():
+    """Return per-collector health data for report enrichment."""
+    collectors = runtime.get("collectors") or {}
+    if not isinstance(collectors, dict):
+        return {}
+    health = {}
+    for key, coll in collectors.items():
+        entry = {
+            "state": getattr(coll, "state", None),
+            "events_this_session": getattr(coll, "events_this_session", 0),
+            "last_event_epoch": getattr(coll, "last_event_epoch", None),
+            "warning": getattr(coll, "warning", None),
+            "active_hardware": getattr(coll, "active_hardware", None),
+        }
+        # Keep only non-None values
+        health[key] = {k: v for k, v in entry.items() if v is not None}
+    return health
 
 
 def run_loop(config):
@@ -5265,38 +5757,37 @@ def _migrate_config_if_needed(config_path):
     Returns an alert-worthy message string when the operator should be
     notified, or None when there is nothing to say.  The caller emits a
     synthetic alert so the message appears in the global alert strip.
+
+    This function is called BEFORE logging is configured, so it must not
+    call logging.* or print().  The caller is responsible for logging.
     """
     import shutil
-    import sys
 
     if config_path != CONFIG_PATH:
         return None
     old_config = os.path.join(OLD_CONFIG_DIR, "skannr.yaml")
-    old_exists = os.path.exists(old_config)
 
-    if not old_exists:
+    if not os.path.exists(old_config):
         return None
 
     if not os.path.exists(CONFIG_PATH):
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
+            ensure_owner(CONFIG_DIR)
             for item in os.listdir(OLD_CONFIG_DIR):
                 src = os.path.join(OLD_CONFIG_DIR, item)
                 dst = os.path.join(CONFIG_DIR, item)
                 if os.path.isdir(src):
-                    shutil.copytree(src, dst)
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
                 else:
                     shutil.copy2(src, dst)
+                ensure_owner(dst)
         except OSError as exc:
-            msg = "Config migration failed: {} — {}".format(OLD_CONFIG_DIR, exc)
-            print("skannr: {}".format(msg), file=sys.stderr)
-            logging.warning(msg)
-            return None
-        msg = "Config moved to {} — you may delete {}.".format(
-            CONFIG_DIR, OLD_CONFIG_DIR,
+            return "Config migration failed: {} — {}".format(OLD_CONFIG_DIR, exc)
+        return "Config moved to {} — you may delete {}.".format(
+            CONFIG_DIR,
+            OLD_CONFIG_DIR,
         )
-        print("skannr: {}".format(msg), file=sys.stderr)
-        return msg
 
     return "Old config {} still exists — you may delete it.".format(
         OLD_CONFIG_DIR,
@@ -5317,6 +5808,7 @@ def main():
     )
     log_dir = configured_log_dir()
     os.makedirs(log_dir, exist_ok=True)
+    ensure_owner(log_dir)
     log_path = os.path.join(log_dir, "skannr.log")
     log_level_name = "DEBUG" if args.debug else config["skannr"]["log_level"].upper()
     logging.basicConfig(
@@ -5327,9 +5819,14 @@ def main():
             logging.StreamHandler(),
         ],
     )
+    ensure_owner(log_path)
+    cleanup_orphaned_temp_files(log_dir)
     if args.debug:
         logging.info("debug logging enabled; log_path=%s", log_path)
         open_debug_log_window(log_path)
+    migration_msg = runtime.get("_migration_msg")
+    if migration_msg:
+        logging.warning("Config migration: %s", migration_msg)
     load_alert_state()
     log_aprsis_config_summary(config)
     runtime["persistence"] = load_persistence(config)
@@ -5344,6 +5841,9 @@ def main():
     thread = threading.Thread(target=run_loop, args=(config,), daemon=True)
     thread.start()
     start_device_history_worker()
+    _startup_prune_device_history()
+    backfill_missing_snapshots()
+    start_derived_refresh_scheduler()
 
     run_web_listeners(config)
 

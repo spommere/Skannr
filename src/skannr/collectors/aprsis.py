@@ -15,7 +15,6 @@ from ..log_utils import now_epoch
 from ..paths import VERSION_PATH
 from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE
 
-
 APRS_FIELD_MAX = 180
 APRS_PAYLOAD_MAX = 240
 APRSIS_DEFAULT_HOST = "rotate.aprs2.net"
@@ -324,8 +323,7 @@ def aprsis_int(value):
 def aprsis_radius_from_filter(value):
     """Extract r/lat/lon/km from an APRS-IS filter string when present."""
     match = re.search(
-        r"(?:^|\s)r/([-+]?\d+(?:\.\d+)?)/([-+]?\d+(?:\.\d+)?)/"
-        r"([-+]?\d+(?:\.\d+)?)",
+        r"(?:^|\s)r/([-+]?\d+(?:\.\d+)?)/([-+]?\d+(?:\.\d+)?)/" r"([-+]?\d+(?:\.\d+)?)",
         str(value or ""),
     )
     if not match:
@@ -479,19 +477,13 @@ def aprsis_feed_role(host, aprs_filter):
 def aprsis_feed_geofence(item, aprs_filter):
     """Return explicit or filter-derived client-side geofence settings."""
     radius = aprsis_float(
-        item.get("radius_km")
-        or item.get("geofence_radius_km")
-        or item.get("radius")
+        item.get("radius_km") or item.get("geofence_radius_km") or item.get("radius")
     )
     latitude = aprsis_float(
-        item.get("latitude")
-        or item.get("geofence_latitude")
-        or item.get("lat")
+        item.get("latitude") or item.get("geofence_latitude") or item.get("lat")
     )
     longitude = aprsis_float(
-        item.get("longitude")
-        or item.get("geofence_longitude")
-        or item.get("lon")
+        item.get("longitude") or item.get("geofence_longitude") or item.get("lon")
     )
     if latitude is not None and longitude is not None and radius and radius > 0:
         return {
@@ -509,7 +501,11 @@ class APRSISCollector(BaseCollector):
     name = "APRS-IS"
     tab_label = "APRS-IS"
     required_hardware = "Internet APRS-IS TCP feed"
-    subject_history_event_types = ("collector_online", "collector_offline", "collector_retrying")
+    subject_history_event_types = (
+        "collector_online",
+        "collector_offline",
+        "collector_retrying",
+    )
     subject_history_event_prefixes = ("aprs_",)
 
     @classmethod
@@ -605,8 +601,7 @@ class APRSISCollector(BaseCollector):
             await self.emit("collector_offline", self.health_payload(), "warning")
             return
         tasks = [
-            asyncio.ensure_future(self.run_feed(feed))
-            for feed in self.active_feeds
+            asyncio.ensure_future(self.run_feed(feed)) for feed in self.active_feeds
         ]
         try:
             await asyncio.gather(*tasks)
@@ -623,7 +618,9 @@ class APRSISCollector(BaseCollector):
                 timeout = float(self.config.get("connect_timeout_sec", 10))
                 self.set_feed_stat(feed, "preferred_server_fallback", False)
                 attempt = self.increment_feed_stat(feed, "connection_attempts")
-                self.set_feed_stat(feed, "last_connect_attempt_epoch", round(now_epoch(), 3))
+                self.set_feed_stat(
+                    feed, "last_connect_attempt_epoch", round(now_epoch(), 3)
+                )
                 logging.info(
                     "APRS-IS feed connecting name=%s host=%s port=%s "
                     "filter=%s preferred=%s attempt=%s",
@@ -666,8 +663,7 @@ class APRSISCollector(BaseCollector):
             except Exception as exc:
                 self.record_disconnect(feed, exc)
                 logging.info(
-                    "APRS-IS feed disconnected name=%s host=%s port=%s "
-                    "reason=%s %s",
+                    "APRS-IS feed disconnected name=%s host=%s port=%s " "reason=%s %s",
                     feed.get("name") or "",
                     feed.get("host") or "",
                     feed.get("port") or "",
@@ -690,8 +686,7 @@ class APRSISCollector(BaseCollector):
             if self._running:
                 retry_interval = self.config.get("retry_interval_sec", 5)
                 logging.info(
-                    "APRS-IS feed reconnecting name=%s host=%s port=%s "
-                    "retry_in=%ss",
+                    "APRS-IS feed reconnecting name=%s host=%s port=%s " "retry_in=%ss",
                     feed.get("name") or "",
                     feed.get("host") or "",
                     feed.get("port") or "",
@@ -732,7 +727,9 @@ class APRSISCollector(BaseCollector):
             )
             if self.handle_preferred_server_miss(feed, server_name, "timeout"):
                 return
-            raise PreferredServerMismatch(self.preferred_server_miss_text(feed, server_name))
+            raise PreferredServerMismatch(
+                self.preferred_server_miss_text(feed, server_name)
+            )
         if not line:
             raise ConnectionError("feed closed before preferred server confirmation")
         text = line.decode("utf-8", errors="replace").strip()
@@ -744,7 +741,9 @@ class APRSISCollector(BaseCollector):
             if self.preferred_server_fallback_active(feed):
                 return
             server_name = self.feed_stats(feed).get("server_name") or "unknown"
-            raise PreferredServerMismatch(self.preferred_server_miss_text(feed, server_name))
+            raise PreferredServerMismatch(
+                self.preferred_server_miss_text(feed, server_name)
+            )
         # A packet before a server identity means the pooled backend did not
         # identify itself in time. Reconnect instead of staying on an unknown
         # server for a sparse CWOP interval.
@@ -836,8 +835,7 @@ class APRSISCollector(BaseCollector):
         stats["preferred_server_attempts"] = 0
         stats["preferred_server_fallback"] = False
         logging.info(
-            "APRS-IS preferred server reached name=%s host=%s server=%s "
-            "address=%s",
+            "APRS-IS preferred server reached name=%s host=%s server=%s " "address=%s",
             feed.get("name") or "",
             feed.get("host") or "",
             stats.get("server_name") or "",
@@ -933,7 +931,9 @@ class APRSISCollector(BaseCollector):
                         int(now_epoch() - last_line_epoch),
                         self.feed_runtime_log_summary(feed),
                     )
-                    raise TimeoutError("no APRS-IS data for {}s".format(int(read_timeout)))
+                    raise TimeoutError(
+                        "no APRS-IS data for {}s".format(int(read_timeout))
+                    )
                 continue
             if not line:
                 logging.info(
@@ -1058,7 +1058,9 @@ class APRSISCollector(BaseCollector):
             return
         if self.handle_preferred_server_miss(feed, server_name, "mismatch"):
             return
-        raise PreferredServerMismatch(self.preferred_server_miss_text(feed, server_name))
+        raise PreferredServerMismatch(
+            self.preferred_server_miss_text(feed, server_name)
+        )
 
     def feed_stats(self, feed):
         """Return mutable counters for one APRS-IS feed."""
@@ -1220,11 +1222,7 @@ class APRSISCollector(BaseCollector):
             )
             return None
         data.update(
-            {
-                key: value
-                for key, value in parsed.items()
-                if value not in ("", None)
-            }
+            {key: value for key, value in parsed.items() if value not in ("", None)}
         )
         packet_type = data.get("packet_type") or packet_type
         if not self.apply_feed_geofence(feed, data):
@@ -1642,7 +1640,9 @@ class APRSISCollector(BaseCollector):
         if data.get("rain_24h_in") is not None:
             parts.append("rain 24h {:.2f} in".format(data["rain_24h_in"]))
         if data.get("rain_since_midnight_in") is not None:
-            parts.append("rain midnight {:.2f} in".format(data["rain_since_midnight_in"]))
+            parts.append(
+                "rain midnight {:.2f} in".format(data["rain_since_midnight_in"])
+            )
         if data.get("luminosity_w_m2") is not None:
             parts.append("luminosity {} W/m2".format(data["luminosity_w_m2"]))
         if data.get("snow_in") is not None:
@@ -1762,12 +1762,17 @@ class APRSISCollector(BaseCollector):
                 "server_name": stats.get("server_name") or "",
                 "server_address": stats.get("server_address") or "",
                 "preferred_server_attempts": stats.get("preferred_server_attempts"),
-                "preferred_server_max_attempts": self.preferred_server_max_attempts(feed),
-                "preferred_server_last_miss": stats.get("preferred_server_last_miss") or "",
+                "preferred_server_max_attempts": self.preferred_server_max_attempts(
+                    feed
+                ),
+                "preferred_server_last_miss": stats.get("preferred_server_last_miss")
+                or "",
                 "preferred_server_last_miss_reason": (
                     stats.get("preferred_server_last_miss_reason") or ""
                 ),
-                "preferred_server_fallback": bool(stats.get("preferred_server_fallback")),
+                "preferred_server_fallback": bool(
+                    stats.get("preferred_server_fallback")
+                ),
                 "last_packet_callsign": stats.get("last_packet_callsign") or "",
                 "last_packet": stats.get("last_packet") or "",
                 "last_emitted_callsign": stats.get("last_emitted_callsign") or "",

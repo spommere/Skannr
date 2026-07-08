@@ -27,6 +27,7 @@ from .hardware import (
     sort_bluetooth_adapters,
 )
 
+
 class BluetoothClassicCollector(BaseCollector):
     """Classic Bluetooth inquiry scanner.
 
@@ -41,9 +42,7 @@ class BluetoothClassicCollector(BaseCollector):
     name = "Bluetooth Classic Scan"
     tab_label = "BT Classic"
     required_hardware = "Bluetooth adapter with classic inquiry support"
-    MAC_RE = re.compile(
-        r"^\s*([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s+(.+?)\s*$"
-    )
+    MAC_RE = re.compile(r"^\s*([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s+(.+?)\s*$")
 
     @classmethod
     def hardware_status(cls, config):
@@ -102,9 +101,7 @@ class BluetoothClassicCollector(BaseCollector):
         """Run repeated classic Bluetooth inquiries until stopped."""
         self._running = True
         if not self.detect():
-            await self.emit(
-                "collector_offline", {"reason": self.warning}, "warning"
-            )
+            await self.emit("collector_offline", {"reason": self.warning}, "warning")
             return
 
         await self.emit(
@@ -127,9 +124,7 @@ class BluetoothClassicCollector(BaseCollector):
                 devices = await self.run_inquiry()
             except Exception as exc:
                 self.state = STATE_RETRYING
-                self.warning = (
-                    "Classic Bluetooth scan failed; retrying: {}".format(exc)
-                )
+                self.warning = "Classic Bluetooth scan failed; retrying: {}".format(exc)
                 await self.emit(
                     "collector_retrying", {"reason": self.warning}, "warning"
                 )
@@ -159,9 +154,7 @@ class BluetoothClassicCollector(BaseCollector):
                 await self.emit(event_type, device)
 
             lost = [
-                mac
-                for mac, item in seen.items()
-                if now - item["last_seen"] > timeout
+                mac for mac, item in seen.items() if now - item["last_seen"] > timeout
             ]
             for mac in lost:
                 await self.emit(
@@ -277,11 +270,7 @@ class BluetoothClassicCollector(BaseCollector):
             "failed to connect",
             "input/output error",
         )
-        return (
-            ""
-            if any(fragment in lowered for fragment in bad_fragments)
-            else text
-        )
+        return "" if any(fragment in lowered for fragment in bad_fragments) else text
 
     def prepare_adapter(self):
         """Best-effort wake-up before inquiry."""

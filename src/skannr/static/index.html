@@ -25,6 +25,7 @@
 
   <nav class="tabs">
     <button class="tab active" data-tab="insights">Insights <span class="tab-row-count" data-tab-count="insights"></span></button>
+    <button class="tab" data-tab="skir" id="tab-btn-skir" style="display:none">Intel Report</button>
     <button class="tab" data-tab="reports">Reports <span class="tab-row-count" data-tab-count="reports"></span></button>
     <button class="tab" data-tab="history">Subject History <span class="tab-row-count" data-tab-count="history"></span></button>
     <button class="tab" data-tab="wifi">Wi-Fi Scan <span class="tab-row-count" data-tab-count="wifi"></span><span class="tab-status-dots" data-status-tab="wifi"></span></button>
@@ -77,6 +78,26 @@
         <thead id="insights-head"></thead>
         <tbody id="insights-list"></tbody>
       </table>
+    </section>
+
+    <section id="tab-skir" class="panel">
+      <div class="panel-head" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <h2 style="margin:0;flex:1;min-width:200px">Skannr Intelligence Report (SKIR)</h2>
+        <select id="skir-select" style="display:none;max-width:280px" title="View a previously generated SKIR">
+          <option value="__latest__">Latest report</option>
+        </select>
+        <button id="skir-generate" class="action-button">Generate Now</button>
+      </div>
+      <div id="skir-status" class="status-strip muted">No report generated yet</div>
+      <div id="skir-content" style="display:none">
+        <section id="skir-bluf" class="skir-section skir-bluf"></section>
+        <section id="skir-source-summary" class="skir-section"></section>
+        <section id="skir-detections" class="skir-section"></section>
+        <section id="skir-anomalies" class="skir-section"></section>
+        <section id="skir-confidence" class="skir-section"></section>
+        <section id="skir-implications" class="skir-section"></section>
+        <section id="skir-overview" class="skir-section"></section>
+      </div>
     </section>
 
     <section id="tab-reports" class="panel">

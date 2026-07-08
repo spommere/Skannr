@@ -1,6 +1,7 @@
 """Optional passive and low-impact LAN observation collector."""
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -15,7 +16,6 @@ import time
 
 from ..oui_lookup import normalize_oui, vendor_info, vendor_name, vendor_prefix
 from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE, STATE_RETRYING
-
 
 LAN_FIELD_MAX = 180
 ETH_P_ARP = 0x0806
@@ -91,6 +91,8 @@ def clean_lan_data(data):
                     items.append(text)
             if items:
                 cleaned[key] = items[:32]
+        elif isinstance(value, dict):
+            cleaned[key] = copy.deepcopy(value)
         else:
             text = compact_lan_text(value)
             if text:
@@ -123,7 +125,11 @@ def command_executable_available(command):
     executable = command[0]
     if shutil.which(executable):
         return True
-    return os.path.isabs(executable) and os.path.exists(executable) and os.access(executable, os.X_OK)
+    return (
+        os.path.isabs(executable)
+        and os.path.exists(executable)
+        and os.access(executable, os.X_OK)
+    )
 
 
 def arp_scan_vendor_data_present(path):
@@ -263,8 +269,7 @@ class LANCollector(BaseCollector):
     def arp_scan_command_available(cls, config):
         """Return true when the configured arp-scan command is executable."""
         command_text = compact_lan_text(
-            (config or {}).get("active_arp_scan_command")
-            or "arp-scan --localnet",
+            (config or {}).get("active_arp_scan_command") or "arp-scan --localnet",
             500,
         )
         try:
@@ -277,8 +282,7 @@ class LANCollector(BaseCollector):
     def avahi_browse_command_available(cls, config):
         """Return true when the configured avahi-browse command is executable."""
         command_text = compact_lan_text(
-            (config or {}).get("avahi_browse_command")
-            or "avahi-browse -a -r -p -t",
+            (config or {}).get("avahi_browse_command") or "avahi-browse -a -r -p -t",
             500,
         )
         try:
@@ -331,17 +335,15 @@ class LANCollector(BaseCollector):
     def configured_source_warnings(self):
         """Return immediate warnings for configured optional sources."""
         warnings = []
-        if (
-            self.config.get("collect_active_arp_scan", False)
-            and not self.arp_scan_command_available(self.config)
-        ):
+        if self.config.get(
+            "collect_active_arp_scan", False
+        ) and not self.arp_scan_command_available(self.config):
             warnings.append(
                 "Active ARP scan enabled but active_arp_scan_command is not executable."
             )
-        if (
-            self.config.get("collect_avahi_browse", False)
-            and not self.avahi_browse_command_available(self.config)
-        ):
+        if self.config.get(
+            "collect_avahi_browse", False
+        ) and not self.avahi_browse_command_available(self.config):
             warnings.append(
                 "Avahi browse import enabled but avahi_browse_command is not executable."
             )
@@ -353,7 +355,11 @@ class LANCollector(BaseCollector):
                 warnings.append("Invalid DHCP lease command: {}".format(exc))
             else:
                 if argv and not shutil.which(argv[0]):
-                    warnings.append("DHCP lease command enabled but {} is not in PATH.".format(argv[0]))
+                    warnings.append(
+                        "DHCP lease command enabled but {} is not in PATH.".format(
+                            argv[0]
+                        )
+                    )
         return warnings
 
     def observation_method(self):
@@ -395,7 +401,11 @@ class LANCollector(BaseCollector):
                 self.state = STATE_ONLINE
                 self.warning = self.listener_warning_text()
                 for event_type, data in events:
-                    await self.emit(event_type, data, "warning" if event_type.endswith("_changed") else "info")
+                    await self.emit(
+                        event_type,
+                        data,
+                        "warning" if event_type.endswith("_changed") else "info",
+                    )
             except Exception as exc:
                 self.state = STATE_RETRYING
                 self.warning = "LAN poll failed: {}".format(exc)
@@ -471,7 +481,9 @@ class LANCollector(BaseCollector):
                 break
             except OSError as exc:
                 if self._running:
-                    self.note_listener_warning("{} listener stopped: {}".format(name, exc))
+                    self.note_listener_warning(
+                        "{} listener stopped: {}".format(name, exc)
+                    )
                 break
             except Exception as exc:
                 self.note_listener_warning("{} listener error: {}".format(name, exc))
@@ -493,7 +505,9 @@ class LANCollector(BaseCollector):
             sock.settimeout(1.0)
             return sock
         except OSError as exc:
-            self.note_listener_warning("{} listener unavailable on port {}: {}".format(label, port, exc))
+            self.note_listener_warning(
+                "{} listener unavailable on port {}: {}".format(label, port, exc)
+            )
             try:
                 sock.close()
             except Exception:
@@ -509,7 +523,9 @@ class LANCollector(BaseCollector):
             mreq = struct.pack("=4sl", socket.inet_aton(group), socket.INADDR_ANY)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         except OSError as exc:
-            self.note_listener_warning("{} multicast join failed: {}".format(group, exc))
+            self.note_listener_warning(
+                "{} multicast join failed: {}".format(group, exc)
+            )
             try:
                 sock.close()
             except OSError:
@@ -523,12 +539,16 @@ class LANCollector(BaseCollector):
             self.note_listener_warning("Passive ARP requires Linux AF_PACKET sockets.")
             return None
         try:
-            sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ARP))
+            sock = socket.socket(
+                socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ARP)
+            )
             sock.bind((interface, 0))
             sock.settimeout(1.0)
             return sock
         except OSError as exc:
-            self.note_listener_warning("Passive ARP unavailable on {}: {}".format(interface, exc))
+            self.note_listener_warning(
+                "Passive ARP unavailable on {}: {}".format(interface, exc)
+            )
             try:
                 sock.close()
             except Exception:
@@ -586,7 +606,9 @@ class LANCollector(BaseCollector):
             previous = self._gateway_fingerprints.get(key)
             if previous == fingerprint:
                 continue
-            event_type = "lan_gateway_seen" if previous is None else "lan_gateway_changed"
+            event_type = (
+                "lan_gateway_seen" if previous is None else "lan_gateway_changed"
+            )
             data = dict(gateway)
             data["change_type"] = "new" if previous is None else "changed"
             self._gateway_fingerprints[key] = fingerprint
@@ -637,7 +659,13 @@ class LANCollector(BaseCollector):
             self.lan_sample(item, "interfaces", record.get("interface"))
             self.lan_sample(item, "states", record.get("state"))
             self.lan_sample(item, "sources", record.get("source"))
-            for list_key in ("mac_aliases", "services", "locations", "servers", "messages"):
+            for list_key in (
+                "mac_aliases",
+                "services",
+                "locations",
+                "servers",
+                "messages",
+            ):
                 for value in list_values(record.get(list_key)):
                     self.lan_sample(item, list_key, value)
             if record.get("mac") and not item.get("mac"):
@@ -700,7 +728,13 @@ class LANCollector(BaseCollector):
             )
             if record.get("mac") and not item.get("mac"):
                 item["mac"] = record.get("mac")
-            for scalar_key in ("ip", "hostname", "interface", "vendor_name", "vendor_prefix"):
+            for scalar_key in (
+                "ip",
+                "hostname",
+                "interface",
+                "vendor_name",
+                "vendor_prefix",
+            ):
                 if record.get(scalar_key) and not item.get(scalar_key):
                     item[scalar_key] = record.get(scalar_key)
             self.lan_sample(item, "ips", record.get("ip"))
@@ -708,7 +742,13 @@ class LANCollector(BaseCollector):
             self.lan_sample(item, "interfaces", record.get("interface"))
             self.lan_sample(item, "states", record.get("state"))
             self.lan_sample(item, "sources", record.get("source"))
-            for list_key in ("mac_aliases", "services", "locations", "servers", "messages"):
+            for list_key in (
+                "mac_aliases",
+                "services",
+                "locations",
+                "servers",
+                "messages",
+            ):
                 for value in list_values(record.get(list_key)):
                     self.lan_sample(item, list_key, value)
 
@@ -720,7 +760,9 @@ class LANCollector(BaseCollector):
             if not mac:
                 continue
             key = self.subject_key({"mac": mac})
-            for ip in list_values((record or {}).get("ip")) + list_values((record or {}).get("ips")):
+            for ip in list_values((record or {}).get("ip")) + list_values(
+                (record or {}).get("ips")
+            ):
                 ip = compact_lan_text(ip, 120)
                 if usable_lan_join_ip(ip):
                     joins[ip] = key
@@ -823,7 +865,9 @@ class LANCollector(BaseCollector):
                 {
                     "ip": compact_lan_text(match.group("ip"), 80),
                     "mac": normalize_mac(match.group("mac")),
-                    "hostname": "" if match.group("host") == "?" else match.group("host"),
+                    "hostname": (
+                        "" if match.group("host") == "?" else match.group("host")
+                    ),
                     "interface": compact_lan_text(value_after(line.split(), "on"), 80),
                     "state": "",
                     "source": "arp",
@@ -876,7 +920,12 @@ class LANCollector(BaseCollector):
                 argv,
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
-                timeout=float(self.config.get("dhcp_lease_import_timeout_sec", self.config.get("command_timeout_sec", 10))),
+                timeout=float(
+                    self.config.get(
+                        "dhcp_lease_import_timeout_sec",
+                        self.config.get("command_timeout_sec", 10),
+                    )
+                ),
             )
         except Exception as exc:
             self.note_listener_warning("DHCP lease command failed: {}".format(exc))
@@ -941,7 +990,9 @@ class LANCollector(BaseCollector):
             self.note_listener_warning("avahi-browse failed: {}".format(exc))
             return []
         records = self.parse_avahi_browse_output(output)
-        logging.info("LAN avahi-browse parsed_rows=%s command=%s", len(records), command)
+        logging.info(
+            "LAN avahi-browse parsed_rows=%s command=%s", len(records), command
+        )
         return records
 
     def parse_avahi_browse_output(self, output):
@@ -985,7 +1036,8 @@ class LANCollector(BaseCollector):
             "interface": compact_lan_text(interface, 80),
             "source": "avahi-browse",
             "services": [
-                item for item in (
+                item
+                for item in (
                     compact_lan_text(service_type, 120),
                     compact_lan_text(service_name, 120),
                 )
@@ -1066,7 +1118,9 @@ class LANCollector(BaseCollector):
         configured = self.config.get("active_arp_scan_interfaces") or []
         configured = [iface for iface in configured if iface and iface.strip()]
         if configured:
-            interfaces = [iface for iface in configured if self._mac_allows_interface(iface)]
+            interfaces = [
+                iface for iface in configured if self._mac_allows_interface(iface)
+            ]
             if not interfaces:
                 interfaces = self._discover_interfaces()
         else:
@@ -1109,7 +1163,9 @@ class LANCollector(BaseCollector):
 
     def active_arp_scan_command(self, interface):
         """Return argv for one configured arp-scan invocation."""
-        original = str(self.config.get("active_arp_scan_command") or "arp-scan --localnet").strip()
+        original = str(
+            self.config.get("active_arp_scan_command") or "arp-scan --localnet"
+        ).strip()
         if not original:
             return []
         try:
@@ -1119,7 +1175,9 @@ class LANCollector(BaseCollector):
         try:
             command = shlex.split(text)
         except ValueError as exc:
-            self.note_listener_warning("Invalid active ARP scan command: {}".format(exc))
+            self.note_listener_warning(
+                "Invalid active ARP scan command: {}".format(exc)
+            )
             return []
         command = resolve_known_executable(command)
         if not command_executable_available(command):
@@ -1197,8 +1255,14 @@ class LANCollector(BaseCollector):
         gateways = []
         if not shutil.which("ip"):
             return gateways
-        gateways.extend(self.default_gateway_family(["ip", "route", "show", "default"], "IPv4"))
-        gateways.extend(self.default_gateway_family(["ip", "-6", "route", "show", "default"], "IPv6"))
+        gateways.extend(
+            self.default_gateway_family(["ip", "route", "show", "default"], "IPv4")
+        )
+        gateways.extend(
+            self.default_gateway_family(
+                ["ip", "-6", "route", "show", "default"], "IPv6"
+            )
+        )
         return gateways
 
     def default_gateway_family(self, command, family):
@@ -1265,7 +1329,9 @@ class LANCollector(BaseCollector):
                 item["interface"] = gateway.get("interface")
             if gateway.get("family") and not item.get("family"):
                 item["family"] = gateway.get("family")
-        return sorted(collapsed.values(), key=lambda item: item.get("subject_key") or "")
+        return sorted(
+            collapsed.values(), key=lambda item: item.get("subject_key") or ""
+        )
 
     def gateway_subject_key(self, gateway):
         """Return stable default-gateway identity, preferring MAC when known."""
@@ -1275,7 +1341,9 @@ class LANCollector(BaseCollector):
         gateway_ip = compact_lan_text((gateway or {}).get("gateway_ip"), 80)
         if gateway_ip:
             return "ip:{}".format(gateway_ip)
-        return "{}:{}".format((gateway or {}).get("family") or "", (gateway or {}).get("interface") or "")
+        return "{}:{}".format(
+            (gateway or {}).get("family") or "", (gateway or {}).get("interface") or ""
+        )
 
     def attach_gateway_flags(self, devices, gateways):
         """Mark devices matching default gateway IPs."""
@@ -1334,8 +1402,10 @@ class LANCollector(BaseCollector):
         configured = self.config.get("passive_arp_interfaces") or []
         if configured:
             ifaces = [
-                item for item in (
-                    compact_lan_text(item, 80) for item in configured
+                item
+                for item in (
+                    compact_lan_text(item, 80)
+                    for item in configured
                     if compact_lan_text(item, 80)
                 )
                 if self._mac_allows_interface(item)
@@ -1384,7 +1454,11 @@ class LANCollector(BaseCollector):
     def parse_ssdp_packet(self, payload, addr):
         """Return LAN records from one SSDP packet."""
         text = payload.decode("utf-8", errors="replace")
-        lines = [line.strip() for line in text.replace("\r\n", "\n").split("\n") if line.strip()]
+        lines = [
+            line.strip()
+            for line in text.replace("\r\n", "\n").split("\n")
+            if line.strip()
+        ]
         if not lines:
             return None
         headers = {}
@@ -1409,12 +1483,14 @@ class LANCollector(BaseCollector):
         if not names:
             return None
         hostnames = [
-            name for name in names
-            if name.lower().endswith(".local") and "._tcp" not in name and "._udp" not in name
+            name
+            for name in names
+            if name.lower().endswith(".local")
+            and "._tcp" not in name
+            and "._udp" not in name
         ][:8]
         services = [
-            name for name in names
-            if "._tcp" in name.lower() or "._udp" in name.lower()
+            name for name in names if "._tcp" in name.lower() or "._udp" in name.lower()
         ][:12]
         if not hostnames and not services:
             return None
@@ -1497,7 +1573,11 @@ class LANCollector(BaseCollector):
         target_ip = ipv4_from_bytes(arp[24:28])
         if not sender_mac and not sender_ip:
             return None
-        operation_text = "request" if operation == 1 else "reply" if operation == 2 else "op {}".format(operation)
+        operation_text = (
+            "request"
+            if operation == 1
+            else "reply" if operation == 2 else "op {}".format(operation)
+        )
         interface = addr[0] if isinstance(addr, tuple) and addr else ""
         return {
             "ip": sender_ip,
@@ -1532,7 +1612,9 @@ class LANCollector(BaseCollector):
             if offset + 10 > len(payload):
                 return names
             try:
-                rr_type, _rr_class, _ttl, rdlength = struct.unpack("!HHIH", payload[offset : offset + 10])
+                rr_type, _rr_class, _ttl, rdlength = struct.unpack(
+                    "!HHIH", payload[offset : offset + 10]
+                )
             except struct.error:
                 return names
             offset += 10
@@ -1590,7 +1672,9 @@ class LANCollector(BaseCollector):
         mac = item.get("mac") or item.get("subject_key") or ""
         vi = vendor_info(mac)
         item["vendor_oui"] = vi["vendor_oui"] or ""
-        item["vendor_prefix"] = vi["vendor_prefix"] or item.get("vendor_prefix") or vi["vendor_oui"]
+        item["vendor_prefix"] = (
+            vi["vendor_prefix"] or item.get("vendor_prefix") or vi["vendor_oui"]
+        )
         item["vendor_name"] = vi["vendor_name"] or item.get("vendor_name") or ""
 
 

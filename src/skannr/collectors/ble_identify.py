@@ -10,7 +10,6 @@ import asyncio
 from .ble import BLECollector, adapter_operation_lock
 from .base import STATE_OFFLINE, STATE_STOPPED
 
-
 DIS_CHARACTERISTICS = {
     "manufacturer_name": "00002a29-0000-1000-8000-00805f9b34fb",
     "model_number": "00002a24-0000-1000-8000-00805f9b34fb",
@@ -54,18 +53,14 @@ class BLEIdentifyCollector(BLECollector):
             )
             return
         if not self.detect():
-            await self.emit(
-                "collector_offline", {"reason": self.warning}, "warning"
-            )
+            await self.emit("collector_offline", {"reason": self.warning}, "warning")
             return
         try:
             from bleak import BleakClient
         except ImportError:
             self.state = STATE_OFFLINE
             self.warning = "Python package 'bleak' is not installed."
-            await self.emit(
-                "collector_offline", {"reason": self.warning}, "warning"
-            )
+            await self.emit("collector_offline", {"reason": self.warning}, "warning")
             return
 
         timeout = float(timeout or self.config.get("identify_timeout_sec", 10))
@@ -128,10 +123,7 @@ class BLEIdentifyCollector(BLECollector):
                         return await self.read_device_information(client)
             except Exception as exc:
                 last_error = exc
-                if (
-                    not self.is_operation_in_progress(exc)
-                    or attempt == attempts - 1
-                ):
+                if not self.is_operation_in_progress(exc) or attempt == attempts - 1:
                     raise
                 await asyncio.sleep(delay)
         raise last_error
@@ -155,9 +147,7 @@ class BLEIdentifyCollector(BLECollector):
     def bleak_client(self, client_cls, mac, timeout):
         """Create a BleakClient across older/newer bleak signatures."""
         try:
-            return client_cls(
-                mac, timeout=timeout, adapter=self.active_hardware
-            )
+            return client_cls(mac, timeout=timeout, adapter=self.active_hardware)
         except TypeError:
             return client_cls(mac, timeout=timeout)
 
@@ -171,16 +161,10 @@ class BLEIdentifyCollector(BLECollector):
     async def read_string_characteristic(self, client, uuid):
         """Best-effort UTF-8 decode for one optional GATT characteristic."""
         try:
-            value = await asyncio.wait_for(
-                client.read_gatt_char(uuid), timeout=5
-            )
+            value = await asyncio.wait_for(client.read_gatt_char(uuid), timeout=5)
         except Exception:
             return ""
         try:
-            return (
-                bytes(value)
-                .decode("utf-8", errors="replace")
-                .strip("\x00 \t\r\n")
-            )
+            return bytes(value).decode("utf-8", errors="replace").strip("\x00 \t\r\n")
         except Exception:
             return ""

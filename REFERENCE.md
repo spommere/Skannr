@@ -148,7 +148,8 @@ Reports are longer-window derived summaries. These thresholds can intentionally 
 | `poll_feed_live_ttl_sec` | Hides old live NOAA/USGS/SWPC rows without deleting raw logs/history/reports. |
 | `device_history_update_interval_sec` | Background cadence for compact Device History coalescing; 0 disables. |
 | `derived_stale_after_min` | Age after which derived views are considered stale. |
-| `derived_auto_refresh_min` | Automatic derived refresh cadence. |
+| `derived_scheduler_interval_sec` | Server-side autonomous derived rebuild interval in seconds (default 900); 0 disables. |
+| `derived_auto_refresh_min` | Browser poll interval for new derived data (default 15 min); 0 disables. |
 | `derived_refresh_timeout_sec` | Timeout for derived refresh work. |
 | `manual_refresh_small_delta_reuse_bytes` | Optional threshold allowing small raw deltas to reuse cached derived views. |
 | `insights_recent_after_min` | Recentness window for insight freshness display. |

@@ -39,6 +39,33 @@ from .log_utils import (
     window_since_epoch,
 )
 
+# alert_type → (report_source, report_type_keyword) for cross-referencing.
+# When a report's source matches and its type contains the keyword (if any),
+# active alert status is attached to the report evidence.
+ALERT_REPORT_CROSSREF = {
+    "wifi_drone": ("wifi", "drone"),
+    "wifi_sensitive_open": ("wifi", "open"),
+    "wifi_disruption": ("wifi_monitor", "disruption"),
+    "wifi_disruption_burst": ("wifi_monitor", "disruption"),
+    "ble_tracker": ("bluetooth", "tracker"),
+    "aprs_weather": ("aprsis", "weather"),
+    "pws_weather": ("pws", "weather"),
+    "rayhunter_warning": ("rayhunter", ""),
+    "noaa_hazard": ("noaa", ""),
+    "noaa_tsunami_alert": ("noaa", "tsunami"),
+    "usgs_earthquake": ("usgs", ""),
+    "swpc_space_weather": ("swpc", ""),
+    "lan_gateway_change": ("lan", "gateway"),
+    "lan_new_device": ("lan", "new"),
+    "collector_issue": ("system", ""),
+    "collector_offline": ("system", ""),
+    "config_migration": ("system", ""),
+    "adsb_aircraft": ("adsb", ""),
+    "rtl433_signal": ("rtl433", ""),
+}
+
+LEVEL_RANK = {"info": 0, "warning": 1, "critical": 2}
+
 
 DEFAULT_REPORT_CONFIG = {
     "ble_long_presence_sec": 3600,
@@ -94,13 +121,16 @@ class ReportsBuilder:
         self._counter = 0
         self._generated_at_epoch = None
 
-    def build(self, history):
+    def build(
+        self, history, active_alerts=None, insight_data=None, collector_health=None
+    ):
         """Return a report bundle for RF history and external status sources."""
         generated_at_epoch = self.history_generated_epoch(history)
         self._generated_at_epoch = generated_at_epoch
         generated_at = local_now(generated_at_epoch)
         # Reports never read raw JSONL directly. The Refresh path in main.py
         # first updates Subject History, then hands that summary to this builder.
+        self._active_alerts = active_alerts or []
         wifi = (history or {}).get("wifi") or {}
         bluetooth = (history or {}).get("bluetooth") or (history or {}).get("ble") or {}
         reports = []
@@ -126,18 +156,14 @@ class ReportsBuilder:
         reports.extend(
             self.swpc_reports((history or {}).get("swpc") or [], generated_at)
         )
-        reports.extend(
-            self.pws_reports((history or {}).get("pws") or [], generated_at)
-        )
+        reports.extend(self.pws_reports((history or {}).get("pws") or [], generated_at))
         reports.extend(
             self.adsb_reports((history or {}).get("adsb") or [], generated_at)
         )
         reports.extend(
             self.rtl433_reports((history or {}).get("rtl433") or [], generated_at)
         )
-        reports.extend(
-            self.lan_reports((history or {}).get("lan") or [], generated_at)
-        )
+        reports.extend(self.lan_reports((history or {}).get("lan") or [], generated_at))
         reports.extend(self.privacy_reports(wifi, bluetooth, generated_at))
         reports.extend(self.scanner_quality_reports(history or {}, generated_at))
         for report in reports:
@@ -151,7 +177,7 @@ class ReportsBuilder:
             ),
             reverse=True,
         )
-        return {
+        bundle = {
             "generated_at": generated_at,
             "generated_at_epoch": generated_at_epoch,
             "history_generated_at": (history or {}).get("generated_at"),
@@ -159,6 +185,27 @@ class ReportsBuilder:
             "window": window_metadata(self.window_days),
             "reports": reports,
             "counts": self.counts(reports),
+        }
+        if insight_data:
+            bundle["insight_summary"] = self._build_insight_summary(insight_data)
+        if collector_health:
+            bundle["collector_health"] = collector_health
+        return bundle
+
+    def _build_insight_summary(self, insight_data):
+        """Return compact insight counts by source from analysis output."""
+        observations = insight_data.get("observations") or []
+        by_source = {}
+        for obs in observations:
+            source = str(obs.get("source") or "unknown").lower()
+            by_source[source] = by_source.get(source, 0) + 1
+        return {
+            "total": len(observations),
+            "by_source": by_source,
+            "warning_count": sum(
+                1 for o in observations if o.get("severity") == "warning"
+            ),
+            "info_count": sum(1 for o in observations if o.get("severity") == "info"),
         }
 
     def history_generated_epoch(self, history):
@@ -199,13 +246,9 @@ class ReportsBuilder:
             warning_count = self.to_int(data.get("warning_count"))
             severity = "warning" if warning_count > 0 else "info"
             title = (
-                "Rayhunter warning present"
-                if warning_count > 0
-                else "Rayhunter status"
+                "Rayhunter warning present" if warning_count > 0 else "Rayhunter status"
             )
-            summary = self.rayhunter_warning_summary(
-                warning_count, status_events
-            )
+            summary = self.rayhunter_warning_summary(warning_count, status_events)
             findings = (
                 ["Rayhunter warning"]
                 if warning_count > 0
@@ -230,9 +273,7 @@ class ReportsBuilder:
             "last_seen_epoch": last_seen_epoch,
         }
         evidence = {
-            key: value
-            for key, value in evidence.items()
-            if value not in ("", [], None)
+            key: value for key, value in evidence.items() if value not in ("", [], None)
         }
         return [
             self.report(
@@ -372,7 +413,9 @@ class ReportsBuilder:
             "{} weather report(s)".format(report_count),
         ]
         if temp_min is not None and temp_max is not None:
-            summary_parts.append("temperature {:.0f}-{:.0f} F".format(temp_min, temp_max))
+            summary_parts.append(
+                "temperature {:.0f}-{:.0f} F".format(temp_min, temp_max)
+            )
         if rain_max is not None:
             summary_parts.append("max rain rate {:.2f} in/hr".format(rain_max))
         if gust_max is not None:
@@ -475,10 +518,9 @@ class ReportsBuilder:
         if collector_state not in ("OFFLINE", "RETRYING"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         reason = data.get("reason") or "APRS-IS feed is offline."
         evidence = self.aprsis_clean_evidence(
             {
@@ -517,10 +559,9 @@ class ReportsBuilder:
         if not callsign or kind not in ("weekly", "monthly", "yearly"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = self.aprsis_weather_period_findings(data)
         warning = self.aprsis_warning_findings(findings)
         evidence = self.clean_evidence(
@@ -560,10 +601,9 @@ class ReportsBuilder:
         if packet_count <= 0:
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = self.aprsis_station_findings(data)
         report_type, title = self.aprsis_station_report_kind(data, findings)
         score = self.score_aprsis_station(data, findings, last_seen_epoch)
@@ -652,9 +692,7 @@ class ReportsBuilder:
             return self.aprsis_weather_summary_text(packet_count, data)
         if self.to_int(data.get("position_count")):
             return self.aprsis_position_summary_text(packet_count, data)
-        parts = [
-            "{} APRS packet(s) in the configured area".format(packet_count)
-        ]
+        parts = ["{} APRS packet(s) in the configured area".format(packet_count)]
         if data.get("object_name"):
             parts.append("object {}".format(data.get("object_name")))
         if data.get("message"):
@@ -692,7 +730,9 @@ class ReportsBuilder:
                 self.to_int(data.get("weather_count")),
             )
         ]
-        weather_summary = self.aprsis_weather_summary_display(data.get("weather_summary"))
+        weather_summary = self.aprsis_weather_summary_display(
+            data.get("weather_summary")
+        )
         if weather_summary:
             parts.append("latest {}".format(weather_summary))
         temperature = self.aprsis_temperature_range_text(data)
@@ -875,7 +915,9 @@ class ReportsBuilder:
         pressure_avg = self.to_number(data.get("pressure_avg_hpa"))
         pressure_change = self.to_number(data.get("pressure_change_hpa"))
         if pressure_min is not None and pressure_max is not None:
-            parts.append("pressure {:.1f}-{:.1f} hPa".format(pressure_min, pressure_max))
+            parts.append(
+                "pressure {:.1f}-{:.1f} hPa".format(pressure_min, pressure_max)
+            )
         if pressure_avg is not None:
             parts.append("avg {:.1f} hPa".format(pressure_avg))
         if pressure_change is not None:
@@ -1184,7 +1226,11 @@ class ReportsBuilder:
         """Return the latest retained APRS rain-rate transition."""
         explicit = str(data.get("rain_last_transition") or "").strip().lower()
         if explicit in ("started", "stopped"):
-            label = "rain {}".format(explicit) if lower_label else "Rain {}".format(explicit)
+            label = (
+                "rain {}".format(explicit)
+                if lower_label
+                else "Rain {}".format(explicit)
+            )
             return label, self.aprsis_rain_transition_timestamp(data, explicit)
 
         candidates = []
@@ -1222,9 +1268,11 @@ class ReportsBuilder:
             if stopped and started:
                 return "{}; episode started {}".format(stopped, started)
             return stopped or ""
-        return data.get("rain_last_transition_at") or data.get(
-            "rain_episode_started_at"
-        ) or ""
+        return (
+            data.get("rain_last_transition_at")
+            or data.get("rain_episode_started_at")
+            or ""
+        )
 
     def aprsis_transition_text(self, label, timestamp):
         """Return a transition label with retained report timing when available."""
@@ -1297,7 +1345,8 @@ class ReportsBuilder:
         hazards = [
             (data, event)
             for data, event in subjects
-            if data.get("alert_kind") not in ("tropical", "tropical_outlook", "forecast")
+            if data.get("alert_kind")
+            not in ("tropical", "tropical_outlook", "forecast")
         ]
         if len(hazards) >= 2:
             reports.append(self.noaa_hazard_population_report(hazards, timestamp))
@@ -1309,8 +1358,7 @@ class ReportsBuilder:
         first_seen, last_seen, last_seen_epoch = self.population_time_range(entries)
         event_count = len(datasets)
         product_count = sum(
-            self.to_int(data.get("nhc_product_count")) or 1
-            for data in datasets
+            self.to_int(data.get("nhc_product_count")) or 1 for data in datasets
         )
         basins = self.population_values(datasets, "basin")
         products = self.population_values(datasets, "event", limit=8)
@@ -1319,7 +1367,11 @@ class ReportsBuilder:
         findings = ["Tropical cyclone product set"]
         summary_parts = [
             "{} tropical advisory package(s)".format(event_count),
-            "{} product(s)".format(product_count) if product_count != event_count else "",
+            (
+                "{} product(s)".format(product_count)
+                if product_count != event_count
+                else ""
+            ),
             "basins {}".format(", ".join(basins)) if basins else "",
             "sources {}".format(", ".join(sources)) if sources else "",
         ]
@@ -1410,10 +1462,9 @@ class ReportsBuilder:
         if kind not in ("monthly", "yearly"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = self.noaa_period_findings(data)
         warning = self.noaa_warning_findings(findings)
         evidence = self.clean_evidence(
@@ -1454,10 +1505,9 @@ class ReportsBuilder:
         if state not in ("OFFLINE", "RETRYING"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         evidence = self.clean_evidence(
             {
                 "findings": ["NOAA collector offline"],
@@ -1486,10 +1536,9 @@ class ReportsBuilder:
         if not event_id and not data.get("headline") and not data.get("event"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = self.noaa_findings(data)
         score = self.score_noaa_alert(data, findings, last_seen_epoch)
         severity = "warning" if self.noaa_warning_findings(findings) else "info"
@@ -1559,19 +1608,31 @@ class ReportsBuilder:
                 "max_wind_mph": data.get("max_wind_mph"),
                 "forecast_delta_findings": data.get("forecast_delta_findings") or [],
                 "forecast_delta_summary": data.get("forecast_delta_summary") or "",
-                "forecast_change_direction": data.get("forecast_change_direction") or "",
-                "previous_forecast_generated": data.get("previous_forecast_generated") or "",
-                "previous_current_temperature_f": data.get("previous_current_temperature_f"),
+                "forecast_change_direction": data.get("forecast_change_direction")
+                or "",
+                "previous_forecast_generated": data.get("previous_forecast_generated")
+                or "",
+                "previous_current_temperature_f": data.get(
+                    "previous_current_temperature_f"
+                ),
                 "previous_temperature_min_f": data.get("previous_temperature_min_f"),
                 "previous_temperature_max_f": data.get("previous_temperature_max_f"),
-                "previous_max_precip_probability": data.get("previous_max_precip_probability"),
-                "previous_next_precip_probability": data.get("previous_next_precip_probability"),
+                "previous_max_precip_probability": data.get(
+                    "previous_max_precip_probability"
+                ),
+                "previous_next_precip_probability": data.get(
+                    "previous_next_precip_probability"
+                ),
                 "previous_max_wind_mph": data.get("previous_max_wind_mph"),
                 "current_temperature_delta_f": data.get("current_temperature_delta_f"),
                 "temperature_min_delta_f": data.get("temperature_min_delta_f"),
                 "temperature_max_delta_f": data.get("temperature_max_delta_f"),
-                "max_precip_probability_delta": data.get("max_precip_probability_delta"),
-                "next_precip_probability_delta": data.get("next_precip_probability_delta"),
+                "max_precip_probability_delta": data.get(
+                    "max_precip_probability_delta"
+                ),
+                "next_precip_probability_delta": data.get(
+                    "next_precip_probability_delta"
+                ),
                 "max_wind_delta_mph": data.get("max_wind_delta_mph"),
                 "first_period_start": data.get("first_period_start") or "",
                 "last_period_end": data.get("last_period_end") or "",
@@ -1604,7 +1665,9 @@ class ReportsBuilder:
         event = data.get("event") or data.get("headline") or ""
         if kind == "tsunami":
             findings.append(
-                "Tsunami hazard" if tsunami_is_alertworthy(data) else "Tsunami information"
+                "Tsunami hazard"
+                if tsunami_is_alertworthy(data)
+                else "Tsunami information"
             )
         elif kind == "tropical":
             findings.append("Tropical cyclone advisory")
@@ -1778,7 +1841,10 @@ class ReportsBuilder:
             score += 5
         if "Forecast deterioration" in findings:
             score += 10
-        if any(str(item or "").startswith("Forecast hazard text added") for item in findings):
+        if any(
+            str(item or "").startswith("Forecast hazard text added")
+            for item in findings
+        ):
             score += 8
         if str(data.get("urgency") or "").lower() == "immediate":
             score += 15
@@ -1793,7 +1859,11 @@ class ReportsBuilder:
         if data.get("alert_kind") == "forecast":
             return "NOAA point forecast"
         if data.get("alert_kind") == "tsunami":
-            return "NOAA tsunami alert" if tsunami_is_alertworthy(data) else "NOAA tsunami information"
+            return (
+                "NOAA tsunami alert"
+                if tsunami_is_alertworthy(data)
+                else "NOAA tsunami information"
+            )
         return "NOAA weather alert"
 
     def noaa_summary_text(self, data):
@@ -1810,19 +1880,23 @@ class ReportsBuilder:
             data.get("message_number")
             and data.get("alert_kind") == "tsunami"
             and "message {}".format(data.get("message_number")),
-            data.get("headline")
-            if data.get("alert_kind") == "forecast"
-            else "",
-            data.get("forecast_delta_summary")
-            if data.get("alert_kind") == "forecast"
-            else "",
-            data.get("forecast_change_direction")
-            if data.get("alert_kind") == "forecast"
-            else "",
-            data.get("headline")
-            if data.get("alert_kind") != "forecast"
-            and data.get("headline") != data.get("event")
-            else "",
+            data.get("headline") if data.get("alert_kind") == "forecast" else "",
+            (
+                data.get("forecast_delta_summary")
+                if data.get("alert_kind") == "forecast"
+                else ""
+            ),
+            (
+                data.get("forecast_change_direction")
+                if data.get("alert_kind") == "forecast"
+                else ""
+            ),
+            (
+                data.get("headline")
+                if data.get("alert_kind") != "forecast"
+                and data.get("headline") != data.get("event")
+                else ""
+            ),
             data.get("expires")
             and data.get("alert_kind") != "forecast"
             and "expires {}".format(data.get("expires")),
@@ -1831,7 +1905,9 @@ class ReportsBuilder:
 
     def noaa_subject(self, data):
         """Return NOAA report subject."""
-        label = data.get("event") or data.get("headline") or data.get("event_id") or "NOAA"
+        label = (
+            data.get("event") or data.get("headline") or data.get("event_id") or "NOAA"
+        )
         return label
 
     def usgs_reports(self, events, timestamp):
@@ -1864,9 +1940,7 @@ class ReportsBuilder:
     def usgs_population_reports(self, entries, timestamp):
         """Return cross-earthquake USGS rows before event rows."""
         quakes = [
-            (data, event)
-            for data, event in entries or []
-            if data.get("event_id")
+            (data, event) for data, event in entries or [] if data.get("event_id")
         ]
         if len(quakes) < 2:
             return []
@@ -1942,10 +2016,9 @@ class ReportsBuilder:
         if kind not in ("weekly", "monthly", "yearly"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = self.usgs_period_findings(data)
         warning = self.usgs_warning_findings(findings)
         evidence = self.clean_evidence(
@@ -1985,10 +2058,9 @@ class ReportsBuilder:
         if state not in ("OFFLINE", "RETRYING"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         evidence = self.clean_evidence(
             {
                 "findings": ["USGS collector offline"],
@@ -2017,10 +2089,9 @@ class ReportsBuilder:
         if not event_id:
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = self.usgs_findings(data)
         score = self.score_usgs_earthquake(data, findings, last_seen_epoch)
         severity = "warning" if self.usgs_warning_findings(findings) else "info"
@@ -2092,7 +2163,12 @@ class ReportsBuilder:
         """Return True for USGS findings that should sort as warnings."""
         return any(
             str(item or "").startswith(
-                ("Nearby earthquake", "Notable magnitude", "Tsunami flag", "USGS alert color")
+                (
+                    "Nearby earthquake",
+                    "Notable magnitude",
+                    "Tsunami flag",
+                    "USGS alert color",
+                )
             )
             or str(item or "") == "Global major earthquake"
             for item in findings or []
@@ -2342,10 +2418,9 @@ class ReportsBuilder:
         if kind not in ("weekly", "monthly", "yearly"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = self.swpc_period_findings(data)
         warning = self.swpc_warning_findings(findings)
         evidence = self.clean_evidence(
@@ -2383,10 +2458,9 @@ class ReportsBuilder:
         if state not in ("OFFLINE", "RETRYING"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         evidence = self.clean_evidence(
             {
                 "findings": ["SWPC collector offline"],
@@ -2415,10 +2489,9 @@ class ReportsBuilder:
         if not event_id and not data.get("summary"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = self.swpc_findings(data)
         warning = self.swpc_warning_findings(findings)
         evidence = self.clean_evidence(
@@ -2487,9 +2560,7 @@ class ReportsBuilder:
     def swpc_report_thresholds(self):
         """Return threshold config using the names expected by SWPC helpers."""
         return {
-            "alert_min_xray_class": self.config.get(
-                "swpc_report_xray_class", "X1.0"
-            ),
+            "alert_min_xray_class": self.config.get("swpc_report_xray_class", "X1.0"),
             "alert_min_radio_blackout": self.config.get(
                 "swpc_report_radio_blackout", "R3"
             ),
@@ -2702,10 +2773,13 @@ class ReportsBuilder:
         )
         return self.report(
             timestamp,
-            "warning"
-            if self.to_number(max_rain) is not None
-            and max_rain >= float(self.config.get("pws_weather_high_rain_1h_in", 0.25))
-            else "info",
+            (
+                "warning"
+                if self.to_number(max_rain) is not None
+                and max_rain
+                >= float(self.config.get("pws_weather_high_rain_1h_in", 0.25))
+                else "info"
+            ),
             "pws",
             "pws_weather_population",
             "PWS weather station pattern",
@@ -2723,10 +2797,9 @@ class ReportsBuilder:
         if state not in ("OFFLINE", "RETRYING"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         evidence = self.clean_evidence(
             {
                 "findings": ["PWS collector offline"],
@@ -2756,10 +2829,9 @@ class ReportsBuilder:
         if not station or kind not in ("weekly", "monthly", "yearly"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = self.pws_period_findings(data)
         warning = self.pws_warning_findings(findings)
         evidence = self.clean_evidence(
@@ -2798,10 +2870,9 @@ class ReportsBuilder:
         if not station:
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = self.pws_findings(data)
         warning = self.pws_warning_findings(findings)
         evidence = self.clean_evidence(
@@ -2982,7 +3053,12 @@ class ReportsBuilder:
 
     def pws_period_label(self, data):
         """Return one compact PWS period label."""
-        return data.get("period_label") or data.get("period_key") or data.get("period_kind") or ""
+        return (
+            data.get("period_label")
+            or data.get("period_key")
+            or data.get("period_kind")
+            or ""
+        )
 
     def pws_period_temperature_text(self, data):
         """Return period temperature range/average/change text."""
@@ -3040,7 +3116,9 @@ class ReportsBuilder:
         pressure_max = self.to_number(data.get("pressure_rel_max_inhg"))
         pressure_change = self.to_number(data.get("pressure_rel_change_inhg"))
         if pressure_min is not None and pressure_max is not None:
-            parts.append("pressure {:.2f}-{:.2f} inHg".format(pressure_min, pressure_max))
+            parts.append(
+                "pressure {:.2f}-{:.2f} inHg".format(pressure_min, pressure_max)
+            )
         if pressure_change is not None:
             parts.append("change {:+.2f} inHg".format(pressure_change))
         return ", ".join(parts)
@@ -3226,9 +3304,7 @@ class ReportsBuilder:
             stopped = data.get("rain_episode_stopped_at") or when or ""
             started = data.get("rain_episode_started_at") or ""
             if stopped and started:
-                return "rain stopped {}; episode started {}".format(
-                    stopped, started
-                )
+                return "rain stopped {}; episode started {}".format(stopped, started)
         return "rain {}{}".format(transition, " {}".format(when) if when else "")
 
     def pws_last_rain_text(self, data):
@@ -3310,7 +3386,9 @@ class ReportsBuilder:
                         "positioned_count": positioned,
                         "emergency_count": len(emergency),
                         "low_nearby_count": len(low_nearby),
-                        "closest_aircraft": self.adsb_aircraft_label(closest) if closest else "",
+                        "closest_aircraft": (
+                            self.adsb_aircraft_label(closest) if closest else ""
+                        ),
                         "closest_km": closest.get("min_distance_km") if closest else "",
                         "last_seen": max(
                             number_or_none(item.get("last_seen_epoch")) or 0
@@ -3347,9 +3425,11 @@ class ReportsBuilder:
             reports.append(
                 self.report(
                     timestamp,
-                    "warning"
-                    if data.get("emergency") or self.adsb_is_low_nearby(data)
-                    else "info",
+                    (
+                        "warning"
+                        if data.get("emergency") or self.adsb_is_low_nearby(data)
+                        else "info"
+                    ),
                     "adsb",
                     "adsb_aircraft_profile",
                     "ADS-B aircraft profile",
@@ -3380,14 +3460,18 @@ class ReportsBuilder:
                         "approach_context": data.get("approach_context") or "",
                         "approach_distance_km": data.get("approach_distance_km"),
                         "approach_altitude_ft": data.get("approach_altitude_ft"),
-                        "approach_vertical_rate_fpm": data.get("approach_vertical_rate_fpm"),
+                        "approach_vertical_rate_fpm": data.get(
+                            "approach_vertical_rate_fpm"
+                        ),
                         "observed": self.adsb_observed_text(data),
                         "last_seen": data.get("last_seen_epoch"),
                         "findings": findings,
                     },
-                    90
-                    if data.get("emergency")
-                    else (70 if self.adsb_is_low_nearby(data) else 32),
+                    (
+                        90
+                        if data.get("emergency")
+                        else (70 if self.adsb_is_low_nearby(data) else 32)
+                    ),
                     data.get("last_seen") or "",
                     subject=self.adsb_aircraft_label(data),
                 )
@@ -3400,20 +3484,28 @@ class ReportsBuilder:
         if state == "ONLINE":
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = self.to_number(data.get("last_seen_epoch")) or record_time_epoch(event, "timestamp")
-        reason = data.get("reason") or data.get("decoder_health") or "ADS-B decoder is not online."
-        evidence = self.clean_evidence({
-            "findings": ["ADS-B decoder health issue"],
-            "collector_state": state,
-            "reason": reason,
-            "decoder": data.get("decoder") or "",
-            "source": data.get("source") or "",
-            "device_index": data.get("device_index"),
-            "decoder_health": data.get("decoder_health") or "",
-            "rtlsdr_scheduling": data.get("rtlsdr_scheduling") or "",
-            "last_seen": last_seen,
-            "last_seen_epoch": last_seen_epoch,
-        })
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
+        reason = (
+            data.get("reason")
+            or data.get("decoder_health")
+            or "ADS-B decoder is not online."
+        )
+        evidence = self.clean_evidence(
+            {
+                "findings": ["ADS-B decoder health issue"],
+                "collector_state": state,
+                "reason": reason,
+                "decoder": data.get("decoder") or "",
+                "source": data.get("source") or "",
+                "device_index": data.get("device_index"),
+                "decoder_health": data.get("decoder_health") or "",
+                "rtlsdr_scheduling": data.get("rtlsdr_scheduling") or "",
+                "last_seen": last_seen,
+                "last_seen_epoch": last_seen_epoch,
+            }
+        )
         return self.report(
             timestamp,
             "warning",
@@ -3429,20 +3521,26 @@ class ReportsBuilder:
 
     def adsb_is_low_nearby(self, data):
         """Return True when an aircraft is low and near the observer."""
-        altitude = number_or_none(data.get("min_altitude_ft") or data.get("altitude_ft"))
-        distance = number_or_none(data.get("min_distance_km") or data.get("distance_km"))
+        altitude = number_or_none(
+            data.get("min_altitude_ft") or data.get("altitude_ft")
+        )
+        distance = number_or_none(
+            data.get("min_distance_km") or data.get("distance_km")
+        )
         if altitude is None or distance is None:
             return False
-        return (
-            altitude <= float(self.config.get("adsb_low_altitude_ft", 1500))
-            and distance <= float(self.config.get("adsb_nearby_radius_km", 10))
-        )
+        return altitude <= float(
+            self.config.get("adsb_low_altitude_ft", 1500)
+        ) and distance <= float(self.config.get("adsb_nearby_radius_km", 10))
 
     def adsb_aircraft_label(self, data):
         """Return compact aircraft subject label."""
         if not data:
             return ""
-        return "{} {}".format(data.get("callsign") or "", data.get("icao") or "").strip() or "ADS-B aircraft"
+        return (
+            "{} {}".format(data.get("callsign") or "", data.get("icao") or "").strip()
+            or "ADS-B aircraft"
+        )
 
     def adsb_aircraft_summary_text(self, data):
         """Return compact ADS-B subject report summary."""
@@ -3454,9 +3552,13 @@ class ReportsBuilder:
         if data.get("min_altitude_ft") not in (None, ""):
             parts.append("min alt {} ft".format(data.get("min_altitude_ft")))
         if data.get("min_distance_km") not in (None, ""):
-            parts.append("closest {:.1f} km".format(number_or_none(data.get("min_distance_km"))))
+            parts.append(
+                "closest {:.1f} km".format(number_or_none(data.get("min_distance_km")))
+            )
         if data.get("path_span_km") not in (None, ""):
-            parts.append("path span {:.1f} km".format(number_or_none(data.get("path_span_km"))))
+            parts.append(
+                "path span {:.1f} km".format(number_or_none(data.get("path_span_km")))
+            )
         if data.get("seen_count"):
             parts.append("{} update(s)".format(data.get("seen_count")))
         if data.get("session_count"):
@@ -3486,7 +3588,9 @@ class ReportsBuilder:
             findings = ["RTL-433 decoded devices observed"]
             for category in ("tpms", "security", "weather", "utility"):
                 if by_category.get(category):
-                    findings.append("{} {} subject(s)".format(by_category[category], category))
+                    findings.append(
+                        "{} {} subject(s)".format(by_category[category], category)
+                    )
             summary = "{} rtl_433 subject(s): {}".format(
                 len(devices),
                 ", ".join(
@@ -3497,7 +3601,11 @@ class ReportsBuilder:
             reports.append(
                 self.report(
                     timestamp,
-                    "warning" if by_category.get("tpms") or by_category.get("security") else "info",
+                    (
+                        "warning"
+                        if by_category.get("tpms") or by_category.get("security")
+                        else "info"
+                    ),
                     "rtl433",
                     "rtl433_device_population",
                     "RTL-433 decoded device activity",
@@ -3514,7 +3622,11 @@ class ReportsBuilder:
                             for item in devices
                         ),
                     },
-                    62 if by_category.get("tpms") or by_category.get("security") else 30,
+                    (
+                        62
+                        if by_category.get("tpms") or by_category.get("security")
+                        else 30
+                    ),
                     "",
                     report_scope="population",
                 )
@@ -3591,7 +3703,8 @@ class ReportsBuilder:
                         "tpms_interpretation": data.get("tpms_interpretation") or "",
                         "tpms_samples": data.get("tpms_samples") or [],
                         "tpms_statuses": data.get("tpms_statuses") or [],
-                        "tpms_battery_statuses": data.get("tpms_battery_statuses") or [],
+                        "tpms_battery_statuses": data.get("tpms_battery_statuses")
+                        or [],
                         "latest_fields": data.get("latest_raw") or {},
                         "findings": findings,
                     },
@@ -3604,41 +3717,60 @@ class ReportsBuilder:
 
     def rtl433_tpms_cluster_report(self, devices, timestamp):
         """Return a conservative TPMS cluster report for nearby pass-through review."""
-        tpms = [item for item in devices or [] if (item.get("category") or "") == "tpms"]
+        tpms = [
+            item for item in devices or [] if (item.get("category") or "") == "tpms"
+        ]
         if len(tpms) < 2:
             return None
         recent = [
-            item for item in tpms
+            item
+            for item in tpms
             if number_or_none(item.get("last_seen_epoch")) is not None
         ]
         if len(recent) < 2:
             return None
-        recent.sort(key=lambda item: number_or_none(item.get("last_seen_epoch")) or 0, reverse=True)
+        recent.sort(
+            key=lambda item: number_or_none(item.get("last_seen_epoch")) or 0,
+            reverse=True,
+        )
         latest = number_or_none(recent[0].get("last_seen_epoch")) or 0
         clustered = [
-            item for item in recent
+            item
+            for item in recent
             if latest - (number_or_none(item.get("last_seen_epoch")) or 0) <= 600
         ]
         if len(clustered) < 2:
             return None
         sensors = [self.rtl433_label(item) for item in clustered[:8]]
-        summary = "{} TPMS sensor IDs seen within 10 minutes; possible vehicle/pass-through cluster.".format(len(clustered))
-        evidence = self.clean_evidence({
-            "findings": ["Short-window TPMS cluster", "Possible vehicle/pass-through activity"],
-            "sensor_count": len(clustered),
-            "sensors": sensors,
-            "pressure_samples": [
-                "{} {} psi".format(self.rtl433_label(item), item.get("pressure_psi"))
-                for item in clustered[:8]
-                if item.get("pressure_psi") not in (None, "")
-            ],
-            "frequency_counts": self.rtl433_merge_counter_maps(
-                item.get("frequency_counts") or {} for item in clustered
-            ),
-            "first_seen": min(number_or_none(item.get("last_seen_epoch")) or latest for item in clustered),
-            "last_seen": latest,
-            "interpretation": "possible vehicle/pass-through TPMS cluster",
-        })
+        summary = "{} TPMS sensor IDs seen within 10 minutes; possible vehicle/pass-through cluster.".format(
+            len(clustered)
+        )
+        evidence = self.clean_evidence(
+            {
+                "findings": [
+                    "Short-window TPMS cluster",
+                    "Possible vehicle/pass-through activity",
+                ],
+                "sensor_count": len(clustered),
+                "sensors": sensors,
+                "pressure_samples": [
+                    "{} {} psi".format(
+                        self.rtl433_label(item), item.get("pressure_psi")
+                    )
+                    for item in clustered[:8]
+                    if item.get("pressure_psi") not in (None, "")
+                ],
+                "frequency_counts": self.rtl433_merge_counter_maps(
+                    item.get("frequency_counts") or {} for item in clustered
+                ),
+                "first_seen": min(
+                    number_or_none(item.get("last_seen_epoch")) or latest
+                    for item in clustered
+                ),
+                "last_seen": latest,
+                "interpretation": "possible vehicle/pass-through TPMS cluster",
+            }
+        )
         return self.report(
             timestamp,
             "warning",
@@ -3713,7 +3845,6 @@ class ReportsBuilder:
         if category == "security":
             parts.append("state not inferred unless decoded payload provides it")
         return "; ".join(parts) + "."
-
 
     def rtl433_tpms_text(self, data, include_interpretation=True):
         """Return compact TPMS pressure/status text when available."""
@@ -3931,7 +4062,9 @@ class ReportsBuilder:
                 "LAN subject population",
                 "; ".join(part for part in summary_parts if part) + ".",
                 evidence,
-                self.score_with_recency(45 + min(len(entries) * 3, 25), last_seen_epoch),
+                self.score_with_recency(
+                    45 + min(len(entries) * 3, 25), last_seen_epoch
+                ),
                 last_seen,
                 subject="LAN subjects",
                 report_scope="population",
@@ -3944,10 +4077,9 @@ class ReportsBuilder:
         if state not in ("OFFLINE", "RETRYING"):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         evidence = self.clean_evidence(
             {
                 "findings": ["LAN collector offline"],
@@ -3975,10 +4107,9 @@ class ReportsBuilder:
         if not self.config.get("lan_report_gateway_changes", True):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = ["Default gateway observed"]
         if self.to_int(data.get("change_count")):
             findings.append("Default gateway changed")
@@ -4020,10 +4151,9 @@ class ReportsBuilder:
         if not self.config.get("lan_report_new_devices", True):
             return None
         last_seen = data.get("last_seen") or event.get("timestamp") or ""
-        last_seen_epoch = (
-            self.to_number(data.get("last_seen_epoch"))
-            or record_time_epoch(event, "timestamp")
-        )
+        last_seen_epoch = self.to_number(
+            data.get("last_seen_epoch")
+        ) or record_time_epoch(event, "timestamp")
         findings = ["LAN device observed"]
         if data.get("gateway"):
             findings.append("Gateway device")
@@ -4101,12 +4231,28 @@ class ReportsBuilder:
         parts = [
             ", ".join(data.get("ips") or []),
             data.get("vendor_name") or data.get("vendor_prefix") or "",
-            "services {}".format(", ".join(data.get("services")[:3])) if data.get("services") else "",
-            "http {}".format(", ".join(data.get("http_titles")[:2])) if data.get("http_titles") else "",
-            "ports {}".format(", ".join(data.get("open_ports")[:3])) if data.get("open_ports") else "",
+            (
+                "services {}".format(", ".join(data.get("services")[:3]))
+                if data.get("services")
+                else ""
+            ),
+            (
+                "http {}".format(", ".join(data.get("http_titles")[:2]))
+                if data.get("http_titles")
+                else ""
+            ),
+            (
+                "ports {}".format(", ".join(data.get("open_ports")[:3]))
+                if data.get("open_ports")
+                else ""
+            ),
             "gateway" if data.get("gateway") else "",
             "{} observation(s)".format(data.get("observation_count") or 0),
-            "{} identify".format(data.get("identify_count")) if data.get("identify_count") else "",
+            (
+                "{} identify".format(data.get("identify_count"))
+                if data.get("identify_count")
+                else ""
+            ),
             "changed" if "LAN identity changed" in findings else "",
         ]
         return "{}.".format("; ".join(str(part) for part in parts if part))
@@ -4140,7 +4286,9 @@ class ReportsBuilder:
         named_ble = [
             device
             for device in devices
-            if any(self.valid_bluetooth_name(name) for name in device.get("names") or [])
+            if any(
+                self.valid_bluetooth_name(name) for name in device.get("names") or []
+            )
         ]
         uuid_ble = [
             device
@@ -4162,11 +4310,17 @@ class ReportsBuilder:
             return []
         findings = []
         if named_ble:
-            findings.append("{} named BLE device(s) advertise identity".format(len(named_ble)))
+            findings.append(
+                "{} named BLE device(s) advertise identity".format(len(named_ble))
+            )
         if uuid_ble:
-            findings.append("{} BLE device(s) advertise service UUIDs".format(len(uuid_ble)))
+            findings.append(
+                "{} BLE device(s) advertise service UUIDs".format(len(uuid_ble))
+            )
         if weak_wifi:
-            findings.append("{} weak/open Wi-Fi profile(s) visible".format(len(weak_wifi)))
+            findings.append(
+                "{} weak/open Wi-Fi profile(s) visible".format(len(weak_wifi))
+            )
         evidence = {
             "findings": findings,
             "named_ble_devices": len(named_ble),
@@ -4228,10 +4382,7 @@ class ReportsBuilder:
             spans = context["presence_spans"]
             private_grouped = mac in grouped_private_macs
             finding_labels = []
-            if (
-                not private_grouped
-                and self.low_confidence_stale_ble_noise(context)
-            ):
+            if not private_grouped and self.low_confidence_stale_ble_noise(context):
                 continue
 
             if sessions and len(days) >= int(self.config["ble_recurring_min_days"]):
@@ -4479,14 +4630,19 @@ class ReportsBuilder:
         if bucket_kind == "findmy":
             base = bucket_label or "Apple Find My accessory"
         elif bucket_kind == "manufacturer":
-            base = bluetooth_visible_manufacturer_label(bucket_label) or "Unknown manufacturer"
+            base = (
+                bluetooth_visible_manufacturer_label(bucket_label)
+                or "Unknown manufacturer"
+            )
         else:
             base = bucket_label or "Unknown"
         parts = [base]
         if names:
             parts.append("/".join(names))
         if services and bucket_kind != "findmy":
-            parts.append("UUID {}".format(",".join(value.upper() for value in services)))
+            parts.append(
+                "UUID {}".format(",".join(value.upper() for value in services))
+            )
         return " | ".join(part for part in parts if part)
 
     def short_bluetooth_uuid(self, value):
@@ -4695,11 +4851,11 @@ class ReportsBuilder:
 
     def annotation_name(self, record):
         """Return optional user annotation attached by Subject History."""
-        annotation = (record or {}).get("annotation") or {}
+        annotation = (record or {}).get("annotation")
+        if not isinstance(annotation, dict):
+            annotation = {}
         return str(
-            (record or {}).get("custom_name")
-            or annotation.get("custom_name")
-            or ""
+            (record or {}).get("custom_name") or annotation.get("custom_name") or ""
         ).strip()
 
     def wifi_ap_subject(self, ap):
@@ -4824,10 +4980,7 @@ class ReportsBuilder:
             ssid_days = self.presence_days(ssid_sessions)
             ssid_hours = self.session_hour_counts(ssid_sessions)
             ssid_start_hours = self.hour_counts(
-                [
-                    record_time_epoch(session, "start")
-                    for session in ssid_sessions
-                ]
+                [record_time_epoch(session, "start") for session in ssid_sessions]
             )
             if len(ssid_days) >= int(self.config.get("wifi_recurring_min_days", 2)):
                 findings.append("Recurring SSID presence")
@@ -4875,9 +5028,9 @@ class ReportsBuilder:
                         "common_hours": self.common_hours(ssid_hours),
                         "common_start_hours": self.common_hours(ssid_start_hours),
                         "presence_spans": self.session_spans(ssid_sessions),
-                        "strongest_signal": int(strongest)
-                        if strongest is not None
-                        else "",
+                        "strongest_signal": (
+                            int(strongest) if strongest is not None else ""
+                        ),
                     },
                     score,
                     last_seen_ap.get("last_seen"),
@@ -5071,9 +5224,7 @@ class ReportsBuilder:
                         "wifi_monitor",
                         "wifi_client_probe_activity",
                         "Wi-Fi client probe activity in report window",
-                        "{} probe request(s)".format(
-                            client.get("probe_count")
-                        ),
+                        "{} probe request(s)".format(client.get("probe_count")),
                         evidence,
                         62,
                         client.get("last_seen"),
@@ -5164,7 +5315,9 @@ class ReportsBuilder:
             severity = "warning"
             score = 75
         elif newest is not None and generated - newest > 2 * 3600:
-            findings.append("{} stale for {}".format(noun, self.duration_text(generated - newest)))
+            findings.append(
+                "{} stale for {}".format(noun, self.duration_text(generated - newest))
+            )
             severity = "warning"
             score = 70
         if not findings:
@@ -5253,9 +5406,10 @@ class ReportsBuilder:
         return "subject"
 
     def enrich_report_metadata(self, report):
-        """Attach display-oriented confidence and reason tags to one report."""
+        """Attach display-oriented confidence, reason tags, and alert cross-refs."""
         report["reason_tags"] = self.report_reason_tags(report)
         report["confidence"] = self.report_confidence(report)
+        self._attach_alert_context(report)
 
     def report_reason_tags(self, report):
         """Return compact reason tags from normalized report evidence."""
@@ -5326,7 +5480,11 @@ class ReportsBuilder:
                 if evidence.get("service_uuids") and days >= 2:
                     return "Medium"
                 return "Low"
-            if evidence.get("names") or evidence.get("model_number") or evidence.get("serial_number"):
+            if (
+                evidence.get("names")
+                or evidence.get("model_number")
+                or evidence.get("serial_number")
+            ):
                 return "High"
             if days >= 2 or sessions >= 2:
                 return "Medium"
@@ -5360,6 +5518,41 @@ class ReportsBuilder:
                 return "Medium"
             return "Low"
         return "Medium"
+
+    def _attach_alert_context(self, report):
+        """Add active_alert / alert_acked to evidence when an active alert matches."""
+        alerts = getattr(self, "_active_alerts", None)
+        if not alerts:
+            return
+        source = str((report or {}).get("source") or "").lower()
+        report_type = str((report or {}).get("type") or "").lower()
+        title = str((report or {}).get("title") or "").lower()
+        summary = str((report or {}).get("summary") or "").lower()
+        combined = "{} {} {}".format(report_type, title, summary)
+        best = None
+        for alert in alerts:
+            alert_type = str(alert.get("alert_type") or "").lower()
+            entry = ALERT_REPORT_CROSSREF.get(alert_type)
+            if entry is None:
+                entry = ALERT_REPORT_CROSSREF.get(alert_type.replace("_", " "))
+            if entry is None:
+                continue
+            alert_source, keyword = entry
+            if source != alert_source:
+                continue
+            if keyword and keyword not in combined:
+                continue
+            level_rank = LEVEL_RANK.get(alert.get("level"), 0)
+            if best is None or level_rank > best[0]:
+                best = (level_rank, alert)
+        if best is None:
+            return
+        alert = best[1]
+        evidence = report.setdefault("evidence", {})
+        evidence["active_alert"] = True
+        evidence["alert_acked"] = bool(alert.get("acked"))
+        evidence["alert_level"] = alert.get("level", "warning")
+        evidence["alert_type"] = alert.get("alert_type", "")
 
     def unique_ordered(self, values):
         """Return values once, preserving first occurrence."""
@@ -5486,11 +5679,7 @@ class ReportsBuilder:
 
     def sorted_channel_values(self, values):
         """Return de-duplicated Wi-Fi channels with numeric ordering."""
-        cleaned = {
-            str(value).strip()
-            for value in values or []
-            if str(value).strip()
-        }
+        cleaned = {str(value).strip() for value in values or [] if str(value).strip()}
         return sorted(cleaned, key=self.channel_sort_key)
 
     def channel_sort_key(self, value):

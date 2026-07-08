@@ -13,6 +13,8 @@ import tempfile
 import time
 from datetime import datetime
 
+from .paths import ensure_owner
+
 # Control characters that are never valid in JSON (even inside strings).
 # JSON only permits \t (0x09), \n (0x0A), and \r (0x0D).
 _JSON_INVALID_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -41,10 +43,36 @@ def now_epoch():
     return int(time.time())
 
 
+def cleanup_orphaned_temp_files(log_dir):
+    """Remove stale ``.tmp`` files left by interrupted atomic writes.
+
+    ``save_json_atomic`` writes to a temp file then renames it atomically.
+    If the process is killed mid-write the temp file is orphaned — safe to
+    delete because the data was never committed.
+    """
+    removed = 0
+    for dirpath, _dirnames, filenames in os.walk(log_dir):
+        for fname in filenames:
+            if not fname.endswith(".tmp"):
+                continue
+            if not fname.startswith("."):
+                continue
+            fpath = os.path.join(dirpath, fname)
+            try:
+                os.remove(fpath)
+                removed += 1
+                logging.info("removed orphaned temp file %s", fpath)
+            except OSError:
+                pass
+    if removed:
+        logging.info("cleaned up %s orphaned temp files under %s", removed, log_dir)
+
+
 def save_json_atomic(path, payload, pretty=False, fsync=False):
     """Write JSON by replacing the old file only after the new file is complete."""
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
+    ensure_owner(directory)
     json_options = (
         {"indent": 2, "sort_keys": True}
         if pretty
@@ -67,6 +95,7 @@ def save_json_atomic(path, payload, pretty=False, fsync=False):
                 os.fsync(fh.fileno())
         os.replace(temp_path, path)
         temp_path = None
+        ensure_owner(path)
     finally:
         if temp_path:
             try:
@@ -95,9 +124,7 @@ def timestamp_epoch(timestamp):
     # timezone so browser rows and derived summaries agree with local time.
     for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S %Z"):
         try:
-            return int(
-                time.mktime(datetime.strptime(text, pattern).timetuple())
-            )
+            return int(time.mktime(datetime.strptime(text, pattern).timetuple()))
         except ValueError:
             pass
     return None
@@ -125,9 +152,7 @@ def resolve_window_days(config, raw="default"):
     None means "all retained logs". When retention is a positive finite number,
     numeric windows do not claim to cover more days than can still exist on disk.
     """
-    retention_config = ((config or {}).get("persistence") or {}).get(
-        "filesystem"
-    ) or {}
+    retention_config = ((config or {}).get("persistence") or {}).get("filesystem") or {}
     retention_days = normalize_retention_days(
         retention_config.get("retention_days", 30)
     )
@@ -156,9 +181,7 @@ def resolve_window_days(config, raw="default"):
 
 def view_window_options(config):
     """Build non-duplicated View selector options for the dashboard."""
-    retention_config = ((config or {}).get("persistence") or {}).get(
-        "filesystem"
-    ) or {}
+    retention_config = ((config or {}).get("persistence") or {}).get("filesystem") or {}
     retention_days = normalize_retention_days(
         retention_config.get("retention_days", 30)
     )
@@ -206,9 +229,7 @@ def window_metadata(window_days):
         return {"days": None, "label": "All retained logs", "since": None}
     since_epoch = window_since_epoch(window_days)
     since = format_epoch(since_epoch)
-    label_days = (
-        int(window_days) if float(window_days).is_integer() else window_days
-    )
+    label_days = int(window_days) if float(window_days).is_integer() else window_days
     return {
         "days": window_days,
         "label": "Last {} days".format(label_days),
@@ -337,9 +358,7 @@ def current_jsonl_checkpoint(log_dir, collectors):
 def read_incremental_jsonl_events(log_dir, collector, checkpoint, read_stats=None):
     """Yield JSONL events added after the stored byte offsets."""
     directory = os.path.join(log_dir, collector)
-    collector_state = checkpoint.setdefault("collectors", {}).setdefault(
-        collector, {}
-    )
+    collector_state = checkpoint.setdefault("collectors", {}).setdefault(collector, {})
     stats = None
     if read_stats is not None:
         stats = read_stats.setdefault(
@@ -395,9 +414,13 @@ def read_incremental_jsonl_events(log_dir, collector, checkpoint, read_stats=Non
                         continue
                     if stats is not None:
                         stats["decoded_records"] += 1
-                        event_type = str(event.get("type") or event.get("event_type") or "unknown")
+                        event_type = str(
+                            event.get("type") or event.get("event_type") or "unknown"
+                        )
                         event_types = stats.setdefault("event_types", {})
-                        event_types[event_type] = int(event_types.get(event_type) or 0) + 1
+                        event_types[event_type] = (
+                            int(event_types.get(event_type) or 0) + 1
+                        )
                     yield event
                 offset = fh.tell()
         except OSError:

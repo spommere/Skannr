@@ -1285,21 +1285,12 @@ raw-log scope. Insights then apply an additional recent-event lookback,
 "what changed recently?" rather than reproduce the full longitudinal report.
 Set the value to `0` to disable the additional Insights cutoff.
 
-The browser automatically refreshes the derived bundle while the page is open.
-The interval is controlled by `ui.derived_auto_refresh_min` and defaults to 15
-minutes; `0` disables the automatic refresh. Status strips show the last
-refresh time and the next automatic refresh countdown. If the browser notices
-that the derived bundle is already stale, it starts an immediate catch-up
-refresh instead of waiting for the next scheduled interval. Refresh failures
-remain visible until a later refresh succeeds. Browser refresh requests use
-`ui.derived_refresh_timeout_sec` so a stuck request releases the UI in-flight
-state and allows the next automatic/manual refresh attempt to be scheduled.
-Browser wake/focus events reload the derived views from the backend so a
-sleeping client can catch up to Pis that continued collecting.
-If a refresh takes longer than the stale threshold, the browser still waits for
-the normal automatic interval after completion instead of immediately starting
-another stale catch-up refresh. This prevents continuous refresh loops on slow
-Pis or large materialized summaries.
+The server rebuilds derived views autonomously on a background scheduler
+(`derived_scheduler_interval_sec`, default 15 min). The browser polls for
+new data at the interval set by `derived_auto_refresh_min` (default 15 min)
+and only re-renders when `data_version_epoch` has changed. Manual Refresh
+(POST) still triggers an immediate server-side rebuild.
+
 The backend accepts only one forced derived refresh at a time. A second refresh
 request joins the active refresh and waits through `/derived_views/status`
 instead of starting a competing rebuild.

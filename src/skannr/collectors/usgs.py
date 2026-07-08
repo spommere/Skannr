@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from ..log_utils import format_epoch
 from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE, STATE_RETRYING
 
-
 USGS_QUERY_ENDPOINT = "https://earthquake.usgs.gov/fdsnws/event/1/query"
 USGS_FIELD_MAX = 240
 
@@ -84,7 +83,11 @@ class USGSCollector(BaseCollector):
     name = "USGS"
     tab_label = "USGS"
     required_hardware = "Internet access"
-    subject_history_event_types = ("usgs_earthquake", "collector_offline", "collector_retrying")
+    subject_history_event_types = (
+        "usgs_earthquake",
+        "collector_offline",
+        "collector_retrying",
+    )
 
     @classmethod
     def hardware_status(cls, config):
@@ -165,9 +168,7 @@ class USGSCollector(BaseCollector):
                 event_id = data.get("event_id")
                 if not event_id:
                     continue
-                merged[event_id] = self.merge_earthquake(
-                    merged.get(event_id), data
-                )
+                merged[event_id] = self.merge_earthquake(merged.get(event_id), data)
         events = []
         for event_id, data in merged.items():
             data["fingerprint"] = self.fingerprint(
@@ -208,10 +209,9 @@ class USGSCollector(BaseCollector):
                     "global_major": False,
                 }
             )
-        elif (
-            self.config.get("latitude") not in (None, "")
-            and self.config.get("longitude") not in (None, "")
-        ):
+        elif self.config.get("latitude") not in (None, "") and self.config.get(
+            "longitude"
+        ) not in (None, ""):
             specs.append(
                 {
                     "name": "local",
@@ -295,7 +295,9 @@ class USGSCollector(BaseCollector):
         event_time_epoch = millis_epoch(props.get("time"))
         updated_epoch = millis_epoch(props.get("updated"))
         data = {
-            "event_id": compact_usgs_text(feature.get("id") or props.get("ids") or "", 120),
+            "event_id": compact_usgs_text(
+                feature.get("id") or props.get("ids") or "", 120
+            ),
             "magnitude": number_or_none(props.get("mag")),
             "place": compact_usgs_text(props.get("place"), 240),
             "latitude": number_or_none(latitude),
@@ -312,7 +314,9 @@ class USGSCollector(BaseCollector):
             "mmi": number_or_none(props.get("mmi")),
             "alert_color": compact_usgs_text(props.get("alert"), 40),
             "tsunami": int(props.get("tsunami") or 0),
-            "detail_url": compact_usgs_text(props.get("url") or props.get("detail"), 240),
+            "detail_url": compact_usgs_text(
+                props.get("url") or props.get("detail"), 240
+            ),
             "feed": spec.get("name") or "local",
             "scope": spec.get("scope") or "local",
             "feed_label": spec.get("label") or "",
@@ -334,7 +338,9 @@ class USGSCollector(BaseCollector):
                 merged[key] = value
         feeds = unique_csv_values(existing.get("feed"), incoming.get("feed"))
         scopes = unique_csv_values(existing.get("scope"), incoming.get("scope"))
-        labels = unique_csv_values(existing.get("feed_label"), incoming.get("feed_label"))
+        labels = unique_csv_values(
+            existing.get("feed_label"), incoming.get("feed_label")
+        )
         merged["feed"] = ", ".join(feeds)
         merged["scope"] = ", ".join(scopes)
         merged["feed_label"] = ", ".join(labels)
@@ -389,7 +395,11 @@ class USGSCollector(BaseCollector):
             return True
         if magnitude >= global_mag:
             return True
-        if distance is not None and distance <= nearby_radius and magnitude >= nearby_mag:
+        if (
+            distance is not None
+            and distance <= nearby_radius
+            and magnitude >= nearby_mag
+        ):
             return True
         return magnitude >= regional_mag
 

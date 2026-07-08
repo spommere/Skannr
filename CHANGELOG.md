@@ -7,72 +7,74 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.3.6 - 2026-07-08
+
+- **Server-driven derived view refresh.** Derived views are now rebuilt
+  autonomously on a background schedule instead of depending on browser
+  connections. The UI polls for new data rather than triggering rebuilds.
+  Manual Refresh still force-rebuilds on demand. New config key
+  `derived_scheduler_interval_sec` (default 15 min).
+- **Snapshot ring buffer fixed.** Missing hourly snapshots are backfilled on
+  startup. The 24-hour ring buffer now fills reliably.
+- **Simplified UI status.** Status strips now show `refreshed at HH:MM`
+  instead of verbose counts and window labels.
+- **Page loads no longer blocked by rebuilds.** Cached data is fetched
+  immediately regardless of background rebuild activity.
+- **Orphaned temp file cleanup.** Stale `.tmp` files from interrupted writes
+  are removed at startup.
+- **Wi-Fi AP session pruning.** Sessions older than 7 days are dropped,
+  reducing the compact device history size and rebuild time.
+- **BLE low-count pruning.** Anonymous devices seen a handful of times and
+  inactive over 24 hours are pruned from the compact device history.
+- **Config migration hardening.** Migration logging no longer lost before
+  the log file is ready. Partial previous migrations handled gracefully.
+
+
 ## 0.3.5 - 2026-06-27
 
-- **Config moved outside the repo tree.** `~/.config/skannr/` is now the default
-  config location instead of `<repo>/config/`. On first startup the old tree is
-  migrated item-by-item and a one-time `config_migration` alert is emitted
-  (re-fires on every restart while the old directory still exists — delete it
-  to dismiss). `paths.py` resolves the config home via `SUDO_USER` → uid 1000 →
-  `~/.config/skannr` so the operator's home directory is used regardless of how
-  Skannr starts. `install.sh`, `skannr_precheck.py`, and `skannr_postcheck.py`
-  all use the new location. README includes an "Upgrading from 0.3.x" section.
-- **LLM collector ("Analyze" button).** New action collector gated behind
-  `~/.config/skannr/collectors/llm.yaml` — file absent → feature hidden. An
-  "Analyze" button on subject detail panels assembles context from Subject
-  History, operator annotations, and raw JSONL tail-reads, calls the configured
-  model via the Anthropic SDK, and displays the response in a centered overlay
-  modal with token usage and cost breakdown. Responses are browser-cached by
-  subject key for the session. Guard-rail refusals are detected and logged.
-  Config template at `config.example/collectors/llm.yaml.example`.
-- **Sample list rotation fix.** APRS-IS, ADS-B, and RTL-433 sample lists were
-  frozen at their first N entries because the "hard stop at capacity" pattern
-  silently dropped new entries once the limit was reached. Fixed with a rotate
-  pattern matching the existing `append_recent_record` behavior. Also fixed
-  non-existent field references in APRS subject building that caused empty
-  position timestamps. Frontend sample lists now display newest-first.
-- **Project hygiene.** Validation scripts moved to `validation/` directory.
-  Dev-only test scripts moved to gitignored `testscripts/`.
+- **Config moved outside the repo tree.** `~/.config/skannr/` is now the
+  default config location. On first startup the old tree is migrated and a
+  one-time alert is emitted (re-fires until the old directory is removed).
+  README includes an "Upgrading from 0.3.x" section.
+- **LLM collector ("Analyze" button).** New per-subject analysis action. An
+  "Analyze" button on subject detail panels sends context to a configured LLM
+  and displays the response in an overlay with token usage and cost. Gated
+  behind the LLM collector config file.
+- **Sample list rotation fix.** APRS-IS, ADS-B, and RTL-433 sample lists no
+  longer freeze at their first entries. Frontend sample lists display
+  newest-first.
+- **Project hygiene.** Validation scripts moved to `validation/`, dev-only test
+  scripts moved to gitignored `testscripts/`.
 
 ## 0.3.4 - 2026-06-27
 
-- **Wi-Fi Monitor CPU reduction.** Three changes to `packet_handler`: a kernel
-  BPF filter (`type mgt`) drops Control and Data frames before Scapy sees them
-  (50-90% frame-volume reduction in busy RF), expensive timestamp and Dot11Elt
-  work is deferred past the management-type gate, and the double layer walk
-  (`haslayer` + `getlayer`) is replaced with a single `getlayer` + None check.
-- **MAC vendor lookup caching.** New `vendor_info()` in `oui_lookup.py` returns
-  all three vendor fields from one size-bounded cache hit per MAC.  Hot-path
-  callers (wifi_monitor, wifi, BLE postprocessor, LAN) switched from three
-  individual OUI extractions + dict walks to one cached call.
-- **Data file collision guards.** OUI registry and Bluetooth UUID loading now
-  warn when the same key appears in multiple files with different values,
-  guarding against silent overwrites from future IEEE/SIG data updates.
+- **Wi-Fi Monitor CPU reduction.** Kernel BPF filter drops non-management frames
+  before they reach userspace. Expensive timestamp and channel work deferred
+  past the frame-type gate. Double layer walk replaced with single lookup.
+- **MAC vendor lookup caching.** Single cached call replaces three individual
+  OUI extractions per MAC across all hot-path callers.
+- **Data file collision guards.** OUI registry and Bluetooth UUID loading warn
+  when the same key appears in multiple files with different values.
 - **Subject History field fixes.** `vendor_name`, `vendor_prefix`, and `ssids`
-  now appear in Subject History for wifi_monitor subjects (were present in
-  postprocessor records but dropped at the Subject History boundary).
-- **Documentation reorganized.** Collector-specific detail (Findings, Reports,
-  Report Scoring, Known Limitations) moved from cross-cutting sections into
-  each collector's own section in DESIGN.md.  README accuracy fixes and
-  REFERENCE.md consistency pass for `retry_interval_sec`/`retry_timeout_sec`.
-- **Production fixes.** Stale BLE group dissolution now extracts group members
-  before discarding the group.  `load_persisted_summary` catches all exceptions.
-  NOAA tsunami TEST bulletins are filtered from alerts.  Precheck failure no
-  longer aborts install.  Scan intervals relaxed to reduce radio contention.
-- **BLE grouping fixes.** Manufacturer label normalization, defensive field
-  access, manufacturer-only group threshold, and privacy-rotation name-based
-  grouping all improved.  `adv_data_hex` captured in BLE raw logs for external
-  tool cross-referencing.
-- **Wi-Fi disruption false-positive suppression.** Deauth alerts are suppressed
-  when both transmitter and receiver are known co-BSSIDs of the same SSID
-  (normal intra-AP band steering, not an attack).
+  now appear in Subject History for Wi-Fi Monitor subjects.
+- **Documentation reorganized.** Collector-specific detail moved into each
+  collector's own DESIGN.md section. README and REFERENCE.md accuracy fixes.
+- **Production fixes.** Stale BLE groups now extract members before dissolving.
+  NOAA tsunami TEST bulletins filtered from alerts. Precheck failure no longer
+  aborts install. Scan intervals relaxed to reduce radio contention.
+- **BLE grouping fixes.** Manufacturer label normalization, manufacturer-only
+  group threshold, and privacy-rotation name-based grouping all improved.
+- **Wi-Fi disruption false-positive suppression.** Deauth alerts suppressed
+  when both endpoints are known co-BSSIDs of the same SSID (normal band
+  steering, not an attack).
 
 ## 0.3.3 - 2026-06-25
 
-- **Temporal-density Bluetooth grouping.** The all-time MAC-count threshold for
-  privacy-rotation groups is replaced with a recency-window check: only MACs seen
-  within the last 4 hours count toward the group threshold (T=5). Stale MACs from
-  power-cycled devices days ago no longer push genuinely separate devices into
+- **Temporal-density Bluetooth grouping.** The all-time MAC-count threshold
+  for privacy-rotation groups is replaced with a recency-window check: only
+  MACs seen within the last 4 hours count toward the group threshold (T=5).
+  Stale MACs from power-cycled devices days ago no longer push genuinely
+  separate devices into
   spurious groups. Session-overlap detection prevents grouping MACs that were
   seen simultaneously. Grouping logic is consolidated into a single seven-gate
   pass in `compact_bluetooth_devices_for_storage`; `add_bluetooth_subjects` no
@@ -98,21 +100,18 @@ pre-1.0:
 ## 0.3.2 - 2026-06-23
 
 - **Wi-Fi Monitor MAC-based adapter selection.** Added `mac` config key to
-  `wifi_monitor` so a single adapter can be pinned by MAC address regardless of
-  kernel interface naming. `hardware.py` now exposes the interface MAC from sysfs;
-  `wifi_monitor.py` filters candidates through `_mac_allows_interface()`.
-- **JSONL null-byte sanitization.** Added `sanitize_json_line()` in `log_utils.py`
-  to strip JSON-invalid control characters before every `json.loads` call, fixing
-  corrupted-line crashes across the raw-log reading paths.
+  `wifi_monitor` so a single adapter can be pinned by MAC regardless of
+  kernel interface naming.
+- **JSONL null-byte sanitization.** JSON-invalid control characters are
+  stripped before parsing, fixing corrupted-line crashes across raw-log
+  reading paths.
 - **Recency bucket rework.** Subject History and Reports now use four recency
-  buckets: Active (< 1h), Recent (1–24h), Stale (1–7d), Dormant (> 7d), replacing
-  the old three-bucket scheme.
-- **RTL-433 report verbosity compaction.** Frontend renderers now show signal
-  ranges instead of per-event dumps, TPMS sample counts instead of individual
-  samples, and filter out raw signal/modulation/hex-blob keys from latest fields.
-- **Regression test hardening.** Reduced event limits, added per-source line caps,
-  fixed recency/TPMS/annotation checks, improved progress output, and verified
-  multi-node discovery through `node_logs_root`.
+  buckets: Active (< 1h), Recent (1–24h), Stale (1–7d), Dormant (> 7d).
+- **RTL-433 report verbosity compaction.** Frontend shows signal ranges
+  instead of per-event dumps, TPMS sample counts instead of individual
+  samples, and filters raw signal/modulation keys from latest fields.
+- **Regression test hardening.** Reduced event limits, per-source line caps,
+  fixed recency/TPMS/annotation checks, multi-node discovery coverage.
 - **Code quality fixes.** YAML-null footgun in MAC filtering, deduplicated
   `_JSON_INVALID_CTRL_RE` regex across scripts, `sanitize_json_line` fast-path,
   and `black` formatting on changed files.
@@ -125,12 +124,12 @@ pre-1.0:
 
 ## 0.3.1 - 2026-06-22
 
-- **Wi-Fi Monitor safety rework.** Skannr no longer rewrites `NetworkManager.conf`,
-  migrates default routes, or guesses across arbitrary interfaces for monitor mode.
-  `prepare_monitor_mode: true` prefers creating a separate `monX` interface;
-  in-place conversion is behind explicit `allow_in_place_monitor_mode: true`.
-  Managed Wi-Fi scan auto-selection prefers the current default-route interface to
-  reduce conflict with the monitor adapter.
+- **Wi-Fi Monitor safety rework.** Skannr no longer rewrites
+  NetworkManager config, migrates default routes, or guesses across
+  arbitrary interfaces for monitor mode. `prepare_monitor_mode: true`
+  prefers a separate virtual monitor interface; in-place conversion
+  requires explicit opt-in. Managed Wi-Fi scan prefers the current
+  default-route interface to reduce conflicts.
 - **BLE stale-cache detection.** The BLE collector now tracks RSSI across scan
   cycles and suppresses devices whose RSSI stays identical for N consecutive
   cycles (configurable via `cache_stale_rssi_threshold`, default 10), filtering
@@ -357,8 +356,8 @@ pre-1.0:
   activity, weather/motion Insights, callsign-based Reports, subject drilldowns,
   and clearer per-feed System Status text.
 - Added the live AlertEngine with a global alert strip, Alerts tab, ACK
-  workflow, search, details links, retained alert events, and default high-signal
-  rules for drone/Remote ID Wi-Fi, APRS severe weather, Rayhunter warnings,
+  workflow, search, details links, retained alert events, and default
+  high-signal rules for drone/Remote ID Wi-Fi, APRS severe weather,
   Wi-Fi disruption/open-sensitive SSIDs, BLE tracker-like devices, NOAA hazards,
   USGS earthquakes, and LAN gateway changes.
 - Added optional NOAA, USGS, and LAN collectors with live tabs, Subject History,
@@ -367,8 +366,8 @@ pre-1.0:
   state without probing the network.
 - Improved browser status and table usability for new feeds: collector status
   dots, event-time columns, hyperlink details, alert search/ACK-all, wider
-  narrow columns, NOAA headline de-duplication, and suppression of non-actionable
-  NHC "no tropical cyclones" outlook alerts.
+  narrow columns, NOAA headline de-duplication, and suppression of
+  non-actionable NHC "no tropical cyclones" outlook alerts.
 - Cleaned up System Status wording for APRS-IS and LAN so command/debug details
   stay in logs while the dashboard shows concise operator-facing source and
   availability text.

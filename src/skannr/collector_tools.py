@@ -9,7 +9,6 @@ collector should fail startup.
 import importlib.util
 import shutil
 
-
 COLLECTOR_TOOL_REQUIREMENTS = [
     {
         "collector": "Wi-Fi Scan",

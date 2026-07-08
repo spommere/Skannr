@@ -20,7 +20,6 @@ from datetime import datetime
 from ..log_utils import now_epoch, timestamp_epoch
 from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE, STATE_RETRYING
 
-
 NOAA_FIELD_MAX = 240
 NOAA_TEXT_MAX = 800
 NWS_ALERTS_ENDPOINT = "https://api.weather.gov/alerts/active"
@@ -193,9 +192,7 @@ def clean_noaa_data(data):
         elif key in list_keys and isinstance(value, list):
             items = []
             item_max_length = (
-                240
-                if key in ("nhc_product_urls", "resource_urls", "map_urls")
-                else 80
+                240 if key in ("nhc_product_urls", "resource_urls", "map_urls") else 80
             )
             for item in value:
                 text = compact_noaa_text(item, item_max_length)
@@ -303,7 +300,11 @@ class NOAACollector(BaseCollector):
                     await self.emit(
                         item["type"],
                         item["data"],
-                        "warning" if self.noaa_event_is_warning(item["data"]) else "info",
+                        (
+                            "warning"
+                            if self.noaa_event_is_warning(item["data"])
+                            else "info"
+                        ),
                     )
             except Exception as exc:
                 self.state = STATE_RETRYING
@@ -353,7 +354,9 @@ class NOAACollector(BaseCollector):
         enabled = forecast.get("enabled", default_enabled)
         latitude = config.get("latitude", nws.get("latitude"))
         longitude = config.get("longitude", nws.get("longitude"))
-        return bool(enabled and latitude not in (None, "") and longitude not in (None, ""))
+        return bool(
+            enabled and latitude not in (None, "") and longitude not in (None, "")
+        )
 
     def forecast_enabled(self):
         """Return True when this collector should poll NWS hourly forecast."""
@@ -471,7 +474,9 @@ class NOAACollector(BaseCollector):
         if nws.get("event"):
             params["event"] = nws.get("event")
         query = urllib.parse.urlencode(params)
-        return "{}?{}".format(NWS_ALERTS_ENDPOINT, query) if query else NWS_ALERTS_ENDPOINT
+        return (
+            "{}?{}".format(NWS_ALERTS_ENDPOINT, query) if query else NWS_ALERTS_ENDPOINT
+        )
 
     def nws_forecast_data(self):
         """Return one compact summary for the configured NWS hourly forecast."""
@@ -648,7 +653,9 @@ class NOAACollector(BaseCollector):
         )
         payload = self.fetch_json(points_url)
         props = payload.get("properties") or {}
-        self._forecast_hourly_url = props.get("forecastHourly") or props.get("forecast") or ""
+        self._forecast_hourly_url = (
+            props.get("forecastHourly") or props.get("forecast") or ""
+        )
         self._forecast_point_key = point_key
         self._forecast_area_desc = self.points_area_desc(payload) or point_key
         return self._forecast_hourly_url
@@ -709,7 +716,14 @@ class NOAACollector(BaseCollector):
         return None
 
     def forecast_headline(
-        self, periods, next_precip, precip_threshold, soon_hours, temp_min, temp_max, wind_max
+        self,
+        periods,
+        next_precip,
+        precip_threshold,
+        soon_hours,
+        temp_min,
+        temp_max,
+        wind_max,
     ):
         """Return a compact point forecast summary."""
         parts = []
@@ -723,12 +737,20 @@ class NOAACollector(BaseCollector):
                 )
             )
         else:
-            parts.append("no precip >= {}% in next {}h".format(precip_threshold, soon_hours))
+            parts.append(
+                "no precip >= {}% in next {}h".format(precip_threshold, soon_hours)
+            )
         if temp_min is not None and temp_max is not None:
-            parts.append("temp {}-{}F".format(int(round(temp_min)), int(round(temp_max))))
+            parts.append(
+                "temp {}-{}F".format(int(round(temp_min)), int(round(temp_max)))
+            )
         if wind_max is not None:
             parts.append("wind up to {} mph".format(int(round(wind_max))))
-        current = compact_noaa_text((periods[0] or {}).get("shortForecast"), 80) if periods else ""
+        current = (
+            compact_noaa_text((periods[0] or {}).get("shortForecast"), 80)
+            if periods
+            else ""
+        )
         if current:
             parts.append(current)
         return "; ".join(parts)
@@ -783,7 +805,11 @@ class NOAACollector(BaseCollector):
             "instruction": instruction,
             "summary": headline or description or event_name,
             "source": "NWS",
-            "source_url": "https://www.tsunami.gov/" if alert_kind == "tsunami" else compact_noaa_text(props.get("@id") or event_id, 240),
+            "source_url": (
+                "https://www.tsunami.gov/"
+                if alert_kind == "tsunami"
+                else compact_noaa_text(props.get("@id") or event_id, 240)
+            ),
             "alert_kind": alert_kind,
             "internet_fed": True,
         }
@@ -955,7 +981,9 @@ class NOAACollector(BaseCollector):
             for link in links
             if link.get("href") and tsunami_url_matches_center(link.get("href"), center)
         ]
-        latitude, longitude = parse_lat_lon_pair(first_descendant_text(element, "point"))
+        latitude, longitude = parse_lat_lon_pair(
+            first_descendant_text(element, "point")
+        )
         category = tsunami_summary_field(summary, "Category")
         magnitude, magnitude_type = parse_tsunami_magnitude(
             tsunami_summary_field(summary, "Preliminary Magnitude")
@@ -1002,7 +1030,9 @@ class NOAACollector(BaseCollector):
         sent = compact_noaa_text(first_descendant_text(root, "sent"), 120)
         status = compact_noaa_text(first_descendant_text(root, "status"), 40)
         msg_type = compact_noaa_text(first_descendant_text(root, "msgType"), 40)
-        cap_source = compact_noaa_text(first_descendant_text(root, "source") or source, 80)
+        cap_source = compact_noaa_text(
+            first_descendant_text(root, "source") or source, 80
+        )
         incidents = compact_noaa_text(first_descendant_text(root, "incidents"), 120)
         info = first_descendant(root, "info")
         params = cap_parameters(info)
@@ -1153,7 +1183,8 @@ class NOAACollector(BaseCollector):
             child_text(item, "pubDate") or child_text(item, "updated"), 120
         )
         summary = compact_noaa_text(
-            child_text(item, "description") or child_text(item, "summary"), NOAA_TEXT_MAX
+            child_text(item, "description") or child_text(item, "summary"),
+            NOAA_TEXT_MAX,
         )
         package = parse_nhc_package(title, summary)
         alert_kind = self.nhc_alert_kind(title, summary)
@@ -1161,7 +1192,11 @@ class NOAACollector(BaseCollector):
             "event_id": guid,
             "event": title,
             "headline": title,
-            "severity": "Minor" if alert_kind == "tropical_outlook" else self.nhc_severity(title, summary),
+            "severity": (
+                "Minor"
+                if alert_kind == "tropical_outlook"
+                else self.nhc_severity(title, summary)
+            ),
             "status": "",
             "message_type": "Outlook" if alert_kind == "tropical_outlook" else "Update",
             "area_desc": basin.replace("_", " ").title(),
@@ -1223,7 +1258,9 @@ class NOAACollector(BaseCollector):
             return "tsunami"
         if any(word in text for word in ("hurricane", "tropical storm", "cyclone")):
             return "tropical"
-        if any(word in text for word in ("tornado", "thunderstorm", "flash flood", "flood")):
+        if any(
+            word in text for word in ("tornado", "thunderstorm", "flash flood", "flood")
+        ):
             return "weather"
         return "weather"
 
@@ -1397,8 +1434,7 @@ def parse_lat_lon_pair(value):
     if not text:
         return None, None
     numbers = [
-        float(match.group(1))
-        for match in re.finditer(r"(-?\d+(?:\.\d+)?)", text)
+        float(match.group(1)) for match in re.finditer(r"(-?\d+(?:\.\d+)?)", text)
     ]
     if len(numbers) < 2:
         return None, None
@@ -1648,7 +1684,14 @@ def tsunami_is_alertworthy(data):
         return False
     text = " ".join(
         str((data or {}).get(field) or "")
-        for field in ("event", "headline", "tsunami_category", "summary", "description", "instruction")
+        for field in (
+            "event",
+            "headline",
+            "tsunami_category",
+            "summary",
+            "description",
+            "instruction",
+        )
     ).lower()
     headline = str((data or {}).get("headline") or "").lower()
     if headline.startswith("test"):
@@ -1764,23 +1807,19 @@ def merge_nhc_package(existing, data):
     merged["nhc_products"] = products
     merged["nhc_product_count"] = len(products)
     merged["nhc_product_types"] = [
-        item.get("product_type")
-        for item in products
-        if item.get("product_type")
+        item.get("product_type") for item in products if item.get("product_type")
     ]
     merged["nhc_product_titles"] = [
-        item.get("title")
-        for item in products
-        if item.get("title")
+        item.get("title") for item in products if item.get("title")
     ]
     merged["nhc_product_urls"] = [
-        item.get("source_url")
-        for item in products
-        if item.get("source_url")
+        item.get("source_url") for item in products if item.get("source_url")
     ]
     if primary:
         merged["event_id"] = primary.get("event_id") or merged.get("event_id") or ""
-        merged["source_url"] = primary.get("source_url") or merged.get("source_url") or ""
+        merged["source_url"] = (
+            primary.get("source_url") or merged.get("source_url") or ""
+        )
         merged["summary"] = primary.get("summary") or merged.get("summary") or ""
         merged["description"] = merged["summary"]
     if latest:
@@ -1819,7 +1858,9 @@ def nhc_product_key(product):
         return product_type
     return "{}:{}".format(
         "product",
-        noaa_key_fragment((product or {}).get("source_url") or (product or {}).get("title") or ""),
+        noaa_key_fragment(
+            (product or {}).get("source_url") or (product or {}).get("title") or ""
+        ),
     )
 
 
@@ -1851,7 +1892,13 @@ def nhc_package_fingerprint(data):
         product_bits.append(
             "|".join(
                 str(product.get(field) or "")
-                for field in ("product_type", "title", "updated", "source_url", "fingerprint")
+                for field in (
+                    "product_type",
+                    "title",
+                    "updated",
+                    "source_url",
+                    "fingerprint",
+                )
             )
         )
     payload = "|".join(
@@ -1932,7 +1979,9 @@ def stable_noaa_event_key(data, event_type=""):
         )
         return "tsunami:{}:{}".format(source, incident)
     if event_type == "noaa_tropical_advisory" or data.get("source") == "NHC":
-        basin = noaa_key_fragment(data.get("basin") or data.get("area_desc") or "global")
+        basin = noaa_key_fragment(
+            data.get("basin") or data.get("area_desc") or "global"
+        )
         package = noaa_key_fragment(data.get("nhc_package_key") or "")
         if not package:
             parsed = parse_nhc_package(

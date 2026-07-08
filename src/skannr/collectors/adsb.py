@@ -10,7 +10,6 @@ import urllib.request
 
 from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE
 
-
 ADSB_FIELD_MAX = 160
 
 
@@ -121,7 +120,11 @@ class ADSBCollector(BaseCollector):
         """Return decoder and configured aircraft JSON availability."""
         paths = configured_paths(config)
         return {
-            "dump1090": bool(shutil.which("dump1090") or shutil.which("dump1090-fa") or shutil.which("dump1090-mutability")),
+            "dump1090": bool(
+                shutil.which("dump1090")
+                or shutil.which("dump1090-fa")
+                or shutil.which("dump1090-mutability")
+            ),
             "readsb": bool(shutil.which("readsb")),
             "manage_decoder": bool(config.get("manage_decoder", True)),
             "device_index": config.get("device_index", 0),
@@ -183,7 +186,11 @@ class ADSBCollector(BaseCollector):
             )
             while self._running:
                 try:
-                    if self.should_manage_decoder() and self._process and self._process.returncode is not None:
+                    if (
+                        self.should_manage_decoder()
+                        and self._process
+                        and self._process.returncode is not None
+                    ):
                         raise RuntimeError(
                             "{} exited with status {}".format(
                                 self.decoder_name(), self._process.returncode
@@ -200,7 +207,11 @@ class ADSBCollector(BaseCollector):
                         {"source": self._source},
                         sleep=False,
                     )
-                    if self.should_manage_decoder() and self._process and self._process.returncode is not None:
+                    if (
+                        self.should_manage_decoder()
+                        and self._process
+                        and self._process.returncode is not None
+                    ):
                         await self.stop_decoder()
                         await self.retry_sleep()
                         break
@@ -268,6 +279,9 @@ class ADSBCollector(BaseCollector):
         self._decoder_command = command
         output_dir = decoder_output_dir(self.config)
         os.makedirs(output_dir, exist_ok=True)
+        from ..paths import ensure_owner
+
+        ensure_owner(output_dir)
         args = decoder_args(self.config, output_dir, command)
         self._source = os.path.join(output_dir, "aircraft.json")
         self._process = await asyncio.create_subprocess_exec(
@@ -295,7 +309,9 @@ class ADSBCollector(BaseCollector):
                 return
             await asyncio.sleep(0.25)
         raise RuntimeError(
-            "{} did not create {} within {}s".format(command, self._source, int(timeout))
+            "{} did not create {} within {}s".format(
+                command, self._source, int(timeout)
+            )
         )
 
     async def stop_decoder(self):
@@ -490,7 +506,11 @@ def decoder_uses_readsb_args(command):
 
 def decoder_default_args(command):
     """Return default managed-decoder args for the selected executable."""
-    return READSB_DECODER_ARGS if decoder_uses_readsb_args(command) else DUMP1090_DECODER_ARGS
+    return (
+        READSB_DECODER_ARGS
+        if decoder_uses_readsb_args(command)
+        else DUMP1090_DECODER_ARGS
+    )
 
 
 def decoder_args(config, output_dir, command=None):
@@ -565,7 +585,7 @@ def observer_location(config):
     if lat is None or lon is None:
         global_config = config.get("_global_config") or {}
         for key in ("usgs", "noaa"):
-            section = ((global_config.get("collectors") or {}).get(key) or {})
+            section = (global_config.get("collectors") or {}).get(key) or {}
             lat = adsb_float(section.get("latitude"))
             lon = adsb_float(section.get("longitude"))
             if lat is not None and lon is not None:
@@ -662,5 +682,8 @@ def distance_km(lat1, lon1, lat2, lon2):
     lat1, lon1, lat2, lon2 = [math.radians(value) for value in values]
     dlat = lat2 - lat1
     dlon = lon2 - lon1
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    )
     return round(6371.0 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)), 2)

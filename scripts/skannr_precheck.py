@@ -20,7 +20,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "skannr"
+DEFAULT_CONFIG_DIR = (
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "skannr"
+)
 DEFAULT_OUTPUT = DEFAULT_CONFIG_DIR / "precheck.yaml"
 DEFAULT_COLLECTOR_DIR = DEFAULT_CONFIG_DIR / "collectors"
 
@@ -167,7 +169,10 @@ def rtl_sdr_hardware_found():
         )
     except subprocess.TimeoutExpired as exc:
         output = exc.stdout or ""
-        return "Found" in output and "No supported devices found" not in output, "rtl_test timed out"
+        return (
+            "Found" in output and "No supported devices found" not in output,
+            "rtl_test timed out",
+        )
     except OSError as exc:
         return False, "rtl_test failed: {}".format(exc)
     output = completed.stdout or ""
@@ -243,11 +248,13 @@ def probe_entry(entry, by_key, check_python=False):
     if entry.get("same_as"):
         base = by_key[entry["same_as"]]
         result = dict(base)
-        result.update({
-            "key": entry["key"],
-            "label": entry["label"],
-            "hint": entry.get("hint") or base.get("hint", ""),
-        })
+        result.update(
+            {
+                "key": entry["key"],
+                "label": entry["label"],
+                "hint": entry.get("hint") or base.get("hint", ""),
+            }
+        )
         return result
 
     found = []
@@ -263,10 +270,20 @@ def probe_entry(entry, by_key, check_python=False):
                 found.extend(present)
             else:
                 missing.append("/".join(commands))
-    recommended = [command for command in entry.get("recommended", []) if not command_found(command)]
-    optional = [command for command in entry.get("optional", []) if not command_found(command)]
+    recommended = [
+        command
+        for command in entry.get("recommended", [])
+        if not command_found(command)
+    ]
+    optional = [
+        command for command in entry.get("optional", []) if not command_found(command)
+    ]
     python_expected = entry.get("python_expected", [])
-    python_missing = [name for name in python_expected if check_python and not python_module_found(name)]
+    python_missing = [
+        name
+        for name in python_expected
+        if check_python and not python_module_found(name)
+    ]
     hardware_name = entry.get("hardware", "")
     hardware_found = None
     hardware_detail = ""
@@ -337,23 +354,41 @@ def write_precheck(path, results):
         "collectors:",
     ]
     for result in results:
-        lines.extend([
-            "  {}:".format(result["key"]),
-            "    label: {}".format(yaml_scalar(result["label"])),
-            "    status: {}".format(result["status"]),
-            "    enabled: {}".format("true" if result["enabled"] else "false"),
-            "    suggested_interfaces: {}".format(yaml_list(result.get("suggested_interfaces", []))),
-            "    found: {}".format(yaml_list(result.get("found", []))),
-            "    missing: {}".format(yaml_list(result.get("missing", []))),
-            "    recommended_missing: {}".format(yaml_list(result.get("recommended_missing", []))),
-            "    optional_missing: {}".format(yaml_list(result.get("optional_missing", []))),
-            "    python_expected: {}".format(yaml_list(result.get("python_expected", []))),
-            "    python_missing: {}".format(yaml_list(result.get("python_missing", []))),
-            "    hardware: {}".format(yaml_scalar(result.get("hardware", ""))),
-            "    hardware_found: {}".format("true" if result.get("hardware_found") is True else "false" if result.get("hardware_found") is False else "null"),
-            "    hardware_detail: {}".format(yaml_scalar(result.get("hardware_detail", ""))),
-            "    hint: {}".format(yaml_scalar(result.get("hint", ""))),
-        ])
+        lines.extend(
+            [
+                "  {}:".format(result["key"]),
+                "    label: {}".format(yaml_scalar(result["label"])),
+                "    status: {}".format(result["status"]),
+                "    enabled: {}".format("true" if result["enabled"] else "false"),
+                "    suggested_interfaces: {}".format(
+                    yaml_list(result.get("suggested_interfaces", []))
+                ),
+                "    found: {}".format(yaml_list(result.get("found", []))),
+                "    missing: {}".format(yaml_list(result.get("missing", []))),
+                "    recommended_missing: {}".format(
+                    yaml_list(result.get("recommended_missing", []))
+                ),
+                "    optional_missing: {}".format(
+                    yaml_list(result.get("optional_missing", []))
+                ),
+                "    python_expected: {}".format(
+                    yaml_list(result.get("python_expected", []))
+                ),
+                "    python_missing: {}".format(
+                    yaml_list(result.get("python_missing", []))
+                ),
+                "    hardware: {}".format(yaml_scalar(result.get("hardware", ""))),
+                "    hardware_found: {}".format(
+                    "true"
+                    if result.get("hardware_found") is True
+                    else "false" if result.get("hardware_found") is False else "null"
+                ),
+                "    hardware_detail: {}".format(
+                    yaml_scalar(result.get("hardware_detail", ""))
+                ),
+                "    hint: {}".format(yaml_scalar(result.get("hint", ""))),
+            ]
+        )
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -480,49 +515,91 @@ def print_report(results, title="Skannr collector precheck:"):
         if result.get("missing"):
             bits.append("missing: {}".format(", ".join(result["missing"])))
         if result.get("recommended_missing"):
-            bits.append("recommended missing: {}".format(", ".join(result["recommended_missing"])))
+            bits.append(
+                "recommended missing: {}".format(
+                    ", ".join(result["recommended_missing"])
+                )
+            )
         if result.get("optional_missing"):
-            bits.append("optional missing: {}".format(", ".join(result["optional_missing"])))
+            bits.append(
+                "optional missing: {}".format(", ".join(result["optional_missing"]))
+            )
         if result.get("python_missing"):
-            bits.append("python missing: {}".format(", ".join(result["python_missing"])))
+            bits.append(
+                "python missing: {}".format(", ".join(result["python_missing"]))
+            )
         elif result.get("python_expected"):
-            bits.append("python deps installed by install.sh: {}".format(", ".join(result["python_expected"])))
+            bits.append(
+                "python deps installed by install.sh: {}".format(
+                    ", ".join(result["python_expected"])
+                )
+            )
         if result.get("hardware"):
-            bits.append("hardware {}: {}".format(
-                result["hardware"],
-                "found" if result.get("hardware_found") else "not found",
-            ))
+            bits.append(
+                "hardware {}: {}".format(
+                    result["hardware"],
+                    "found" if result.get("hardware_found") else "not found",
+                )
+            )
         if result.get("suggested_interfaces"):
-            bits.append("suggested interfaces: {}".format(
-                ", ".join(result.get("suggested_interfaces") or [])
-            ))
+            bits.append(
+                "suggested interfaces: {}".format(
+                    ", ".join(result.get("suggested_interfaces") or [])
+                )
+            )
         if not bits:
             bits.append("no external software probe")
-        print("  {key}: {details}. collector {status}; enabled={enabled}".format(
-            key=result["key"],
-            details="; ".join(bits),
-            status=result["status"],
-            enabled="true" if result["enabled"] else "false",
-        ))
-        if result.get("hint") and result["status"] in {"missing", "hardware_missing", "config_required"}:
+        print(
+            "  {key}: {details}. collector {status}; enabled={enabled}".format(
+                key=result["key"],
+                details="; ".join(bits),
+                status=result["status"],
+                enabled="true" if result["enabled"] else "false",
+            )
+        )
+        if result.get("hint") and result["status"] in {
+            "missing",
+            "hardware_missing",
+            "config_required",
+        }:
             print("    install/config hint: {}".format(result["hint"]))
     print("\nSummary:")
     for result in results:
-        print("  {key}: {status}; enabled={enabled}".format(
-            key=result["key"],
-            status=result["status"],
-            enabled="true" if result["enabled"] else "false",
-        ))
+        print(
+            "  {key}: {status}; enabled={enabled}".format(
+                key=result["key"],
+                status=result["status"],
+                enabled="true" if result["enabled"] else "false",
+            )
+        )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", default=str(DEFAULT_OUTPUT), help="precheck YAML output path")
-    parser.add_argument("--apply", action="store_true", help="apply precheck enabled flags to config/collectors/*.yaml")
-    parser.add_argument("--precheck", default=str(DEFAULT_OUTPUT), help="precheck YAML path to apply")
-    parser.add_argument("--collector-dir", default=str(DEFAULT_COLLECTOR_DIR), help="collector config directory to update")
-    parser.add_argument("--no-write", action="store_true", help="print only; do not write precheck YAML")
-    parser.add_argument("--check-python", action="store_true", help="check Python modules in the current interpreter too")
+    parser.add_argument(
+        "--output", default=str(DEFAULT_OUTPUT), help="precheck YAML output path"
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="apply precheck enabled flags to config/collectors/*.yaml",
+    )
+    parser.add_argument(
+        "--precheck", default=str(DEFAULT_OUTPUT), help="precheck YAML path to apply"
+    )
+    parser.add_argument(
+        "--collector-dir",
+        default=str(DEFAULT_COLLECTOR_DIR),
+        help="collector config directory to update",
+    )
+    parser.add_argument(
+        "--no-write", action="store_true", help="print only; do not write precheck YAML"
+    )
+    parser.add_argument(
+        "--check-python",
+        action="store_true",
+        help="check Python modules in the current interpreter too",
+    )
     return parser.parse_args()
 
 
@@ -535,15 +612,24 @@ def main():
             return 1
         applied, missing = apply_precheck(precheck_path, Path(args.collector_dir))
         for key, enabled, interfaces_applied in applied:
-            enabled_text = "unchanged" if enabled is None else "true" if enabled else "false"
+            enabled_text = (
+                "unchanged" if enabled is None else "true" if enabled else "false"
+            )
             suffix = "; interfaces updated" if interfaces_applied else ""
             print("applied precheck: {} enabled={}{}".format(key, enabled_text, suffix))
         for key in missing:
-            print("precheck entry has no collector config: {}".format(key), file=sys.stderr)
+            print(
+                "precheck entry has no collector config: {}".format(key),
+                file=sys.stderr,
+            )
         return 0
 
     results = run_precheck(check_python=args.check_python)
-    title = "Skannr collector postcheck:" if args.check_python else "Skannr collector precheck:"
+    title = (
+        "Skannr collector postcheck:"
+        if args.check_python
+        else "Skannr collector precheck:"
+    )
     print_report(results, title=title)
     if not args.no_write:
         output = Path(args.output)

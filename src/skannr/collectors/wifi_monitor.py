@@ -92,9 +92,7 @@ class WiFiMonitorCollector(WiFiCollector):
             "scapy": package_available("scapy"),
             "auto_start": config.get("auto_start", False),
             "interface": interface,
-            "prepare_monitor_mode": bool(
-                config.get("prepare_monitor_mode", False)
-            ),
+            "prepare_monitor_mode": bool(config.get("prepare_monitor_mode", False)),
             "wireless_interfaces": wireless,
             "monitor_interfaces": monitors,
             "interfaces": availability_records(
@@ -144,9 +142,7 @@ class WiFiMonitorCollector(WiFiCollector):
                 "into monitor mode before clicking Start."
             )
             if setup:
-                self.warning = "{} Monitor setup: {}".format(
-                    self.warning, setup
-                )
+                self.warning = "{} Monitor setup: {}".format(self.warning, setup)
             return False
         self.active_hardware = iface
         self.state = STATE_STOPPED
@@ -180,13 +176,9 @@ class WiFiMonitorCollector(WiFiCollector):
                 "into monitor mode before clicking Start."
             )
             if setup:
-                self.warning = "{} Monitor setup: {}".format(
-                    self.warning, setup
-                )
+                self.warning = "{} Monitor setup: {}".format(self.warning, setup)
             logging.warning("Wi-Fi Monitor startup failed: %s", self.warning)
-            await self.emit(
-                "collector_offline", {"reason": self.warning}, "warning"
-            )
+            await self.emit("collector_offline", {"reason": self.warning}, "warning")
             self._running = False
             return
 
@@ -195,9 +187,7 @@ class WiFiMonitorCollector(WiFiCollector):
         except ImportError:
             self.state = STATE_OFFLINE
             self.warning = "Python package 'scapy' is not installed."
-            await self.emit(
-                "collector_offline", {"reason": self.warning}, "warning"
-            )
+            await self.emit("collector_offline", {"reason": self.warning}, "warning")
             self._running = False
             return
 
@@ -219,14 +209,11 @@ class WiFiMonitorCollector(WiFiCollector):
                 )
             else:
                 self.warning = (
-                    "No supported 2.4 GHz or 5 GHz channels were discovered "
-                    "for {}."
+                    "No supported 2.4 GHz or 5 GHz channels were discovered " "for {}."
                 ).format(
                     iface,
                 )
-            await self.emit(
-                "collector_offline", {"reason": self.warning}, "warning"
-            )
+            await self.emit("collector_offline", {"reason": self.warning}, "warning")
             self._running = False
             return
 
@@ -283,9 +270,7 @@ class WiFiMonitorCollector(WiFiCollector):
             timestamp_epoch = now_epoch()
             timestamp = local_now(timestamp_epoch)
             rssi = getattr(packet, "dBm_AntSignal", None)
-            channel = (
-                self.packet_channel(packet, Dot11Elt) or self._current_channel
-            )
+            channel = self.packet_channel(packet, Dot11Elt) or self._current_channel
 
             if dot11.subtype == 4:
                 # Probe request: a client is asking for a network name. These
@@ -336,9 +321,7 @@ class WiFiMonitorCollector(WiFiCollector):
                 error,
                 self.interface_diagnostics(iface),
             )
-            await self.emit(
-                "collector_retrying", {"reason": self.warning}, "warning"
-            )
+            await self.emit("collector_retrying", {"reason": self.warning}, "warning")
 
         def sniff_loop():
             """Run Scapy in a thread while the asyncio task hops channels."""
@@ -353,9 +336,7 @@ class WiFiMonitorCollector(WiFiCollector):
                         filter="type mgt",
                     )
                 except Exception as exc:
-                    asyncio.run_coroutine_threadsafe(
-                        report_sniff_error(exc), loop
-                    )
+                    asyncio.run_coroutine_threadsafe(report_sniff_error(exc), loop)
                     time.sleep(float(self.config.get("retry_interval_sec", 5)))
 
         self._hopper_task = loop.create_task(self.channel_hopper(iface))
@@ -373,9 +354,7 @@ class WiFiMonitorCollector(WiFiCollector):
                 and self.active_hardware
                 and self.active_hardware not in self.monitor_interfaces()
             ):
-                source_iface = (
-                    self._prepared_monitor_source or self.active_hardware
-                )
+                source_iface = self._prepared_monitor_source or self.active_hardware
                 logging.warning(
                     "Wi-Fi Monitor interface %s was reset to managed mode, "
                     "re-asserting monitor mode",
@@ -383,9 +362,7 @@ class WiFiMonitorCollector(WiFiCollector):
                 )
                 ok, detail = self.set_interface_monitor_mode(source_iface)
                 if not ok:
-                    logging.warning(
-                        "Wi-Fi Monitor re-conversion failed: %s", detail
-                    )
+                    logging.warning("Wi-Fi Monitor re-conversion failed: %s", detail)
                 else:
                     self.active_hardware = detail
             await asyncio.sleep(1)
@@ -512,9 +489,7 @@ class WiFiMonitorCollector(WiFiCollector):
         self._monitor_setup_warning = ""
         self._prepared_monitor_source = None
         candidates = self.monitor_setup_candidates()
-        logging.info(
-            "Wi-Fi Monitor monitor-mode setup candidates=%s", candidates
-        )
+        logging.info("Wi-Fi Monitor monitor-mode setup candidates=%s", candidates)
         if not candidates:
             self._monitor_setup_warning = (
                 "prepare_monitor_mode is true, but no safe monitor-capable "
@@ -569,9 +544,7 @@ class WiFiMonitorCollector(WiFiCollector):
             return True
         configured_mac = str(raw).strip().lower()
         if mac is None:
-            mac = sysfs_read(
-                os.path.join("/sys/class/net", iface, "address")
-            ).lower()
+            mac = sysfs_read(os.path.join("/sys/class/net", iface, "address")).lower()
         return mac == configured_mac
 
     def configured_monitor_candidates(self):
@@ -706,9 +679,7 @@ class WiFiMonitorCollector(WiFiCollector):
                 "IPv4 route"
             ).format(iface)
         if not self.interface_supports_monitor_mode(iface):
-            return False, "{} does not advertise monitor-mode support".format(
-                iface
-            )
+            return False, "{} does not advertise monitor-mode support".format(iface)
         ok, detail = self.create_monitor_interface(iface)
         if ok:
             return True, detail
@@ -771,9 +742,7 @@ class WiFiMonitorCollector(WiFiCollector):
                 result.returncode,
                 output,
             )
-        return result.returncode == 0, output or "exit {}".format(
-            result.returncode
-        )
+        return result.returncode == 0, output or "exit {}".format(result.returncode)
 
     def monitor_interfaces(self):
         """Parse 'iw dev' and return interfaces whose type is monitor."""
@@ -825,9 +794,7 @@ class WiFiMonitorCollector(WiFiCollector):
                 channels["2.4"].add(channel)
             elif 5000 <= mhz < 5900:
                 channels["5"].add(channel)
-        return {
-            band: sorted(values) for band, values in channels.items() if values
-        }
+        return {band: sorted(values) for band, values in channels.items() if values}
 
     def iw_list_output(self):
         """Return frequency capabilities for the selected PHY when possible."""
@@ -886,9 +853,7 @@ class WiFiMonitorCollector(WiFiCollector):
             supported = set(self._supported_channels.get(band) or [])
             if not supported:
                 continue
-            seen_channels = self.supported_channel_list(
-                seen.get(band) or [], supported
-            )
+            seen_channels = self.supported_channel_list(seen.get(band) or [], supported)
             typical_channels = self.supported_channel_list(
                 typical.get(band) or [], supported
             )
@@ -988,9 +953,7 @@ class WiFiMonitorCollector(WiFiCollector):
     def configured_log_dir(self):
         """Return the configured persistence log directory."""
         global_config = self.config.get("_global_config") or {}
-        filesystem = (global_config.get("persistence") or {}).get(
-            "filesystem"
-        ) or {}
+        filesystem = (global_config.get("persistence") or {}).get("filesystem") or {}
         log_dir = filesystem.get("log_dir", "runtime/logs")
         return log_dir if os.path.isabs(log_dir) else os.path.abspath(log_dir)
 

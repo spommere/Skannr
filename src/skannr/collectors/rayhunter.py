@@ -17,7 +17,6 @@ import urllib.request
 from .base import BaseCollector, STATE_OFFLINE, STATE_ONLINE, STATE_RETRYING
 from ..log_utils import sanitize_json_line
 
-
 RAYHUNTER_CODE_MARKERS = (
     "=>",
     "function ",
@@ -103,7 +102,9 @@ def clean_rayhunter_data(data):
             if artifacts:
                 cleaned[key] = artifacts
         else:
-            max_length = 500 if key in ("summary", "reason", "warning") else RAYHUNTER_FIELD_MAX
+            max_length = (
+                500 if key in ("summary", "reason", "warning") else RAYHUNTER_FIELD_MAX
+            )
             value = clean_rayhunter_field(value, max_length=max_length)
             if value:
                 cleaned[key] = value
@@ -117,7 +118,11 @@ class RayhunterCollector(BaseCollector):
     name = "Rayhunter"
     tab_label = "Rayhunter"
     required_hardware = "Rayhunter HTTP endpoint"
-    subject_history_event_types = ("rayhunter_status", "collector_offline", "collector_retrying")
+    subject_history_event_types = (
+        "rayhunter_status",
+        "collector_offline",
+        "collector_retrying",
+    )
 
     @classmethod
     def hardware_status(cls, config):
@@ -239,7 +244,9 @@ class RayhunterCollector(BaseCollector):
             except (urllib.error.URLError, TimeoutError, ValueError, OSError):
                 pass
         status["summary"] = self.status_summary(status)
-        return {key: value for key, value in status.items() if value not in ("", [], None)}
+        return {
+            key: value for key, value in status.items() if value not in ("", [], None)
+        }
 
     def parse_api_status(self, stats, manifest, config):
         """Normalize the JSON objects used by Rayhunter's own dashboard."""
@@ -303,7 +310,9 @@ class RayhunterCollector(BaseCollector):
             ),
             "device_os": self.clean_field(rayhunter.get("system_os") or ""),
         }
-        return {key: value for key, value in parsed.items() if value not in ("", [], None)}
+        return {
+            key: value for key, value in parsed.items() if value not in ("", [], None)
+        }
 
     def parse_response(self, text, content_type=""):
         """Extract Rayhunter status fields from JSON or the HTML status page."""
@@ -322,9 +331,9 @@ class RayhunterCollector(BaseCollector):
             "warning_count": warning_count,
             "latest_event": self.field_value(joined, "Last Message")
             or self.latest_time_from_text(joined),
-            "warning": "{} Rayhunter warning(s)".format(warning_count)
-            if warning_count
-            else "",
+            "warning": (
+                "{} Rayhunter warning(s)".format(warning_count) if warning_count else ""
+            ),
             "summary": "",
             "rayhunter_version": self.rayhunter_version(joined),
             "storage": self.line_after_label(lines, "Storage"),
@@ -342,14 +351,14 @@ class RayhunterCollector(BaseCollector):
         if not status["summary"]:
             status["summary"] = "Rayhunter status page parsed with limited fields."
         return {
-            key: value
-            for key, value in status.items()
-            if value not in ("", [], None)
+            key: value for key, value in status.items() if value not in ("", [], None)
         }
 
     def parse_json(self, text, content_type):
         """Parse JSON responses when Rayhunter exposes structured content."""
-        if "json" not in str(content_type).lower() and not text.lstrip().startswith(("{", "[")):
+        if "json" not in str(content_type).lower() and not text.lstrip().startswith(
+            ("{", "[")
+        ):
             return None
         try:
             return json.loads(text)
@@ -376,9 +385,9 @@ class RayhunterCollector(BaseCollector):
         return {
             "warning_count": warning_count,
             "latest_event": self.clean_field(latest),
-            "warning": "{} Rayhunter warning(s)".format(warning_count)
-            if warning_count
-            else "",
+            "warning": (
+                "{} Rayhunter warning(s)".format(warning_count) if warning_count else ""
+            ),
             "summary": self.clean_field(
                 data.get("summary") or data.get("status") or ""
             ),
@@ -443,7 +452,7 @@ class RayhunterCollector(BaseCollector):
         prefix = str(label or "").lower()
         for line in lines or []:
             if line.lower().startswith(prefix):
-                return self.clean_field(line[len(label):].strip(" :-"))
+                return self.clean_field(line[len(label) :].strip(" :-"))
         return ""
 
     def rayhunter_version(self, text):

@@ -2,10 +2,10 @@
 
 import os
 
-
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.dirname(PACKAGE_DIR)
 PROJECT_ROOT = os.path.dirname(SRC_DIR)
+
 
 def _user_config_dir():
     """Return ~/.config/skannr for the real user, even when running as root.
@@ -28,6 +28,7 @@ def _user_config_dir():
     # Systemd or root login — resolve the Pi user's home.
     try:
         import pwd
+
         pi_home = pwd.getpwuid(1000).pw_dir
         return os.path.join(pi_home, ".config", "skannr")
     except (ImportError, KeyError):
@@ -48,3 +49,44 @@ DATA_DIR = os.path.join(PACKAGE_DIR, "data")
 DATA_COLLECTORS_DIR = os.path.join(DATA_DIR, "collectors")
 STATIC_DIR = os.path.join(PACKAGE_DIR, "static")
 VERSION_PATH = os.path.join(PROJECT_ROOT, "VERSION")
+
+
+def get_real_user_uid_gid():
+    """Return ``(uid, gid)`` for the real user, even when running as root via sudo.
+
+    Returns ``(0, 0)`` when we cannot determine the real user (e.g. running as
+    real root, or pwd unavailable).
+    """
+    user = os.environ.get("SUDO_USER")
+    if user:
+        try:
+            import pwd
+
+            pw = pwd.getpwnam(user)
+            return (pw.pw_uid, pw.pw_gid)
+        except (ImportError, KeyError):
+            pass
+    # Fall back to uid 1000 (default Pi user) when started by systemd.
+    try:
+        import pwd
+
+        pw = pwd.getpwuid(1000)
+        return (pw.pw_uid, pw.pw_gid)
+    except (ImportError, KeyError):
+        pass
+    return (0, 0)
+
+
+def ensure_owner(path):
+    """Chown *path* to the real user when running as root via sudo.
+
+    No-op when the real user cannot be determined or is already root.
+    Errors (e.g. read-only filesystem) are silently ignored.
+    """
+    uid, gid = get_real_user_uid_gid()
+    if uid == 0 and gid == 0:
+        return
+    try:
+        os.chown(path, uid, gid)
+    except OSError:
+        pass

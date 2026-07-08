@@ -345,6 +345,9 @@ ui:
   device_history_update_interval_sec: 60
   derived_stale_after_min: 15
   derived_auto_refresh_min: 15
+  # Server-side autonomous derived-data rebuild interval in seconds.
+  # 0 disables the scheduler. Default 900 (15 min).
+  derived_scheduler_interval_sec: 900
   derived_refresh_timeout_sec: 600
   # Manual Refresh runs a real refresh by default whenever raw work is pending.
   # Set this to a positive byte threshold to allow recent small device-history

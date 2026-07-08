@@ -17,7 +17,6 @@ import xml.etree.ElementTree as ET
 from .base import BaseCollector, STATE_OFFLINE, STATE_STOPPED
 from .lan import clean_lan_data, compact_lan_text
 
-
 DEFAULT_NMAP_PORTS = "22,23,53,80,443,554,1900,5000,5353,8008,8080,8443,9100"
 DEFAULT_HTTP_PORTS = (80, 443, 5000, 8008, 8080, 8443)
 DEFAULT_HINT_PATTERNS = (
@@ -105,9 +104,7 @@ class LANIdentifyCollector(BaseCollector):
             )
             return
         if not self.detect():
-            await self.emit(
-                "collector_offline", {"reason": self.warning}, "warning"
-            )
+            await self.emit("collector_offline", {"reason": self.warning}, "warning")
             return
 
         timeout = float(timeout or self.config.get("identify_timeout_sec", 30))
@@ -127,7 +124,9 @@ class LANIdentifyCollector(BaseCollector):
             self.identify_sync, target, mac, subject_key, timeout
         )
         result["duration_sec"] = round(time.time() - started, 2)
-        event_type = "identify_result" if result.get("identified") else "identify_failed"
+        event_type = (
+            "identify_result" if result.get("identified") else "identify_failed"
+        )
         severity = "info" if result.get("identified") else "warning"
         await self.emit(event_type, clean_lan_data(result), severity)
 
@@ -237,9 +236,11 @@ class LANIdentifyCollector(BaseCollector):
         errors = parsed.get("errors") or []
         if completed.returncode not in (0, 1):
             detail = compact_lan_text(completed.stderr or completed.stdout, 240)
-            errors.append("nmap exited {}{}".format(
-                completed.returncode, ": {}".format(detail) if detail else ""
-            ))
+            errors.append(
+                "nmap exited {}{}".format(
+                    completed.returncode, ": {}".format(detail) if detail else ""
+                )
+            )
         parsed["errors"] = errors
         return parsed
 
@@ -340,7 +341,9 @@ class LANIdentifyCollector(BaseCollector):
             return {"url": url, "errors": ["curl timed out for {}".format(url)]}
         except Exception as exc:
             return {"url": url, "errors": ["curl failed for {}: {}".format(url, exc)]}
-        output = (completed.stdout or "")[: int(self.config.get("curl_output_max_bytes", 30000))]
+        output = (completed.stdout or "")[
+            : int(self.config.get("curl_output_max_bytes", 30000))
+        ]
         info = self.extract_http_info(url, output)
         if completed.returncode != 0:
             detail = compact_lan_text(completed.stderr or completed.stdout, 220)
