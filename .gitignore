@@ -8,6 +8,7 @@
 /VERSION_HISTORY.md
 /testscripts/
 /validation/
+/refresh_redesign.md/
 
 # Python caches.
 __pycache__/
