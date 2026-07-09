@@ -101,6 +101,18 @@ def clean_adsb_data(data):
     return cleaned
 
 
+def _normalize_filter_list(values):
+    """Return a set of uppercase strings from a config list, ignoring empties."""
+    if not values:
+        return set()
+    result = set()
+    for v in values:
+        text = str(v).strip().upper()
+        if text:
+            result.add(text)
+    return result
+
+
 class ADSBCollector(BaseCollector):
     """Read decoded aircraft state from dump1090/readsb JSON output."""
 
@@ -158,6 +170,57 @@ class ADSBCollector(BaseCollector):
         self.state = STATE_ONLINE
         self.warning = None
         return True
+
+    def _aircraft_passes_filter(self, item):
+        """Return True when *item* matches at least one configured filter rule.
+
+        When no filter keys are set this returns True for every aircraft
+        (no filtering).  Rules are OR'd — matching any single rule lets the
+        aircraft through.
+        """
+        rules = self.config.get("filter") or {}
+        if not isinstance(rules, dict):
+            return True
+        categories = _normalize_filter_list(rules.get("categories"))
+        squawks = _normalize_filter_list(rules.get("squawks"))
+        callsign_prefixes = _normalize_filter_list(rules.get("callsign_prefixes"))
+        icao_prefixes = _normalize_filter_list(rules.get("icao_prefixes"))
+        emergency_only = bool(rules.get("emergency_only"))
+        if (
+            not categories
+            and not squawks
+            and not callsign_prefixes
+            and not icao_prefixes
+            and not emergency_only
+        ):
+            return True
+        if emergency_only:
+            emergency = str(item.get("emergency") or "").strip().lower()
+            if emergency and emergency != "none":
+                return True
+        if categories:
+            cat = str(item.get("category") or "").strip().upper()
+            if cat in categories:
+                return True
+        if squawks:
+            sq = str(item.get("squawk") or "").strip()
+            if sq in squawks:
+                return True
+        if callsign_prefixes:
+            flight = str(item.get("flight") or "").strip().upper()
+            prefix = ""
+            for ch in flight:
+                if not ch.isalpha():
+                    break
+                prefix += ch
+            if len(prefix) == 3 and prefix in callsign_prefixes:
+                return True
+        if icao_prefixes:
+            hex_addr = str(item.get("hex") or "").strip().upper()
+            for prefix in icao_prefixes:
+                if hex_addr.startswith(prefix):
+                    return True
+        return False
 
     async def start(self):
         """Poll decoded aircraft state until stopped, retrying managed decoder failures."""
@@ -233,6 +296,8 @@ class ADSBCollector(BaseCollector):
             return []
         rows = []
         for item in aircraft:
+            if not self._aircraft_passes_filter(item):
+                continue
             data = self.aircraft_data(item, now)
             icao = data.get("icao")
             if not icao:

@@ -1565,7 +1565,10 @@ Bluetooth signal/linger/presence patterns, and randomized-MAC population
 observations.  Each collector defines its own insight rules — see that
 collector's section under §6 Built-In Collectors.
 
-The analysis does not call an LLM.
+HistoryAnalyzer itself does not call an LLM — it applies deterministic
+rule-based heuristics over materialized Subject History. LLM-powered analysis
+is available separately through the LLM collector (per-subject "Analyze"
+button and scheduled SKIR intelligence reports).
 
 ### Reports
 

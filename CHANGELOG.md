@@ -7,6 +7,13 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.3.7 - 2026-07-09
+
+- **ADS-B aircraft filtering.** New `filter:` config block with optional
+  allow-lists for emitter category, squawk code, callsign prefix, ICAO hex
+  prefix, and emergency-only mode. All empty = no filtering. Matching any
+  single rule lets the aircraft through.
+
 ## 0.3.6 - 2026-07-08
 
 - **Server-driven derived view refresh.** Derived views are now rebuilt

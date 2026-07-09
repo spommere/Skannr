@@ -58,3 +58,36 @@ longitude:
 # Used for live warning Insights, Alerts, and Reports when distance is known.
 nearby_radius_km: 10
 low_altitude_ft: 1500
+
+# Aircraft filter. When any key is set, only aircraft matching at least one
+# rule pass through. All keys empty = no filtering (all aircraft). Rules are
+# OR'd — matching any single rule lets the aircraft through.
+filter:
+  # DO-260B emitter categories (case-insensitive).
+  # A0: no category info    A4: high vortex (757-class)
+  # A1: light <15500lbs     A5: heavy >300000lbs
+  # A2: small 15500-75000   A6: high performance (>5g, >400kt) — fighters
+  # A3: large 75000-300000  A7: rotorcraft
+  # B0-B7: same weight classes, different emitter sub-types.
+  # C0-C7: same weight classes, yet another sub-type space.
+  # Military filtering: A6 catches fighters/attack aircraft.
+  # Combine with callsign_prefixes or icao_prefixes for transports.
+  categories: []
+
+  # Squawk codes (4 octal digits, e.g. "7777" for military intercept).
+  # Other notable codes: 7600 (radio failure), 7700 (emergency).
+  squawks: []
+
+  # 3-letter ICAO airline/operator prefixes from callsigns.
+  # Military examples: RCH (Reach), DUKE (Duke), JEDI (Jedi), CNV (Convoy),
+  #   RRR (Ascot), RFR (Rafair), GAF (German Air Force), FAF (French AF).
+  callsign_prefixes: []
+
+  # ICAO 24-bit hex address prefixes.
+  # Military examples: AE (US military), 3F (Germany), 43 (UK), 4B (NATO).
+  # Full list: refer to an ICAO address allocation table.
+  icao_prefixes: []
+
+  # Only show aircraft with an active emergency flag
+  # (general, lifeguard, minfuel, nordo, unlawful, downed).
+  emergency_only: false
