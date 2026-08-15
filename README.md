@@ -567,6 +567,8 @@ installs. `config/` is machine-specific local state.
 - Every rule has `enabled` and `level`; some also have `critical_level`.
 - `drone_wifi.min_rssi`, `ssid_patterns`, `vendor_patterns`, `oui_prefixes`:
   DJI/Remote ID style Wi-Fi alert matching.
+- `flock_camera.min_rssi`, `ssid_patterns`, `vendor_patterns`, `oui_prefixes`:
+  Flock Safety ALPR camera detection via Wi-Fi probe requests and AP beacons.
 - `aprs_weather.rain_1h_in`, `critical_rain_1h_in`, `wind_gust_mph`,
   `critical_wind_gust_mph`: APRS weather alert thresholds.
 - `pws_weather.rain_1h_in`, `critical_rain_1h_in`, `wind_gust_mph`,
@@ -618,8 +620,18 @@ installs. `config/` is machine-specific local state.
   per-address rows.
 - `recent_activity_window_sec`: recent activity window for tactical Insights.
 - `insights_recent_hours`: upper age bound for Insights within the selected
-  dashboard View. `0` shows the whole selected View.
+  dashboard View. `0` shows the whole selected View. Used as the fallback
+  when `insights_recent_minutes` is absent — minutes wins when both are set.
 - `wifi_short_lived_sec`: short-lived Wi-Fi AP/session threshold.
+- `bundle_correlation_enabled`, `bundle_correlation_sync_margin_sec`,
+  `bundle_correlation_min_cooccurrences`, `bundle_correlation_min_bundle_size`,
+  `bundle_correlation_max_bundles`, `bundle_correlation_sources`,
+  `bundle_correlation_min_sessions_per_device`,
+  `bundle_correlation_max_subjects_per_source`,
+  `bundle_correlation_max_window_span_sec`: cross-collector (BLE + Wi-Fi)
+  device bundle correlation — discovers groups of devices from different
+  collectors that repeatedly arrive and depart together in tight time
+  windows. Randomized MACs and anonymous devices are excluded.
 - `sensitive_ssids`: SSID names/patterns treated as sensitive.
 
 `reports` controls longer-window intelligence Reports:
@@ -663,10 +675,8 @@ installs. `config/` is machine-specific local state.
   History coalescing. This lets Wi-Fi/BLE/LAN identity state advance without
   blocking page load or collector startup. `0` disables the worker.
 - `derived_stale_after_min`: age before derived data is considered stale.
-- `derived_scheduler_interval_sec`: server-side autonomous rebuild interval in
-  seconds (default 900, 15 min). `0` disables.
-- `derived_auto_refresh_min`: browser poll interval for new derived data
-  (default 15 min). `0` disables polling.
+- `derived_refresh_interval_min`: server rebuild cadence and browser poll
+  interval in minutes (default 15). `0` disables both.
 - `derived_refresh_timeout_sec`: browser/backend refresh timeout.
 - `insights_recent_after_min`: browser-side recent Insight marker threshold.
 
@@ -914,14 +924,12 @@ a configurable interval:
 
 ```yaml
 ui:
-  derived_scheduler_interval_sec: 900   # server rebuild interval (15 min)
-  derived_auto_refresh_min: 15          # browser poll interval (15 min)
-  derived_refresh_timeout_sec: 600      # manual refresh timeout
+  derived_refresh_interval_min: 15     # rebuild + poll (minutes)
+  derived_refresh_timeout_sec: 600     # manual refresh timeout
 ```
 
-Set `derived_scheduler_interval_sec: 0` to disable autonomous rebuilds (the
-browser will still poll, and Manual Refresh still works). Set
-`derived_auto_refresh_min: 0` to disable browser polling.
+Set `derived_refresh_interval_min: 0` to disable both the server rebuild
+scheduler and browser polling. Manual Refresh still works.
 
 The derived views have different jobs:
 

@@ -2022,14 +2022,22 @@ def sanitize_rayhunter_finding(item):
     return sanitized
 
 
-def recent_history_for_insights(history):
+def recent_history_for_insights(history, include_sessions=False, cutoff_epoch=None):
     """Return a shallow Device History copy limited to recent activity.
 
     Insights is a tactical recent-event feed. Analyzing thousands of retained
     old BLE privacy addresses just to filter their observations out afterward
     made refreshes slow without changing what the browser displays.
+
+    When *include_sessions* is True, per-device session arrays are preserved
+    so that cross-collector bundle correlation can use them.  Records are
+    copied (top level) so analysis never aliases the cached Subject History.
+
+    *cutoff_epoch* overrides the tactical Insights cutoff — bundle correlation
+    passes a 24h lookback because multi-hour co-movement needs more history
+    than the 60-minute tactical window.
     """
-    cutoff = insights_recent_cutoff_epoch()
+    cutoff = insights_recent_cutoff_epoch() if cutoff_epoch is None else cutoff_epoch
     if cutoff is None or not isinstance(history, dict):
         return history
 
@@ -2040,7 +2048,7 @@ def recent_history_for_insights(history):
             if last_seen is None or last_seen < cutoff:
                 continue
             if include_sessions:
-                selected.append(record)
+                selected.append(dict(record))
             else:
                 # Insights is not the recurring-presence report. Reports keeps
                 # the full session history; the tactical feed only needs the
@@ -2054,11 +2062,17 @@ def recent_history_for_insights(history):
     wifi = history.get("wifi") or {}
     bluetooth = history.get("bluetooth") or history.get("ble") or {}
     output["wifi"] = {
-        "access_points": recent_records(wifi.get("access_points") or []),
-        "clients": recent_records(wifi.get("clients") or []),
+        "access_points": recent_records(
+            wifi.get("access_points") or [],
+            include_sessions=include_sessions),
+        "clients": recent_records(
+            wifi.get("clients") or [],
+            include_sessions=include_sessions),
     }
     output["bluetooth"] = {
-        "devices": recent_records(bluetooth.get("devices") or []),
+        "devices": recent_records(
+            bluetooth.get("devices") or [],
+            include_sessions=include_sessions),
     }
     output["ble"] = {"devices": output["bluetooth"]["devices"]}
     return output
@@ -2511,7 +2525,7 @@ def pending_raw_log_refresh_cooldown_sec():
     """Return the minimum interval before cached loads auto-start another refresh."""
     ui = (runtime.get("config") or {}).get("ui") or {}
     try:
-        minutes = float(ui.get("derived_auto_refresh_min", 15))
+        minutes = float(ui.get("derived_refresh_interval_min", 15))
     except (TypeError, ValueError):
         minutes = 15
     if minutes <= 0:
@@ -2534,20 +2548,88 @@ def device_history_update_interval_sec():
     return max(int(value), 5)
 
 
-def derived_scheduler_interval_sec():
+def _migrate_ui_config_keys(config):
+    """Migrate pre-0.3.8 ``ui`` config keys to their consolidated names.
+
+    Mutates ``config["ui"]`` in place (config is the merged runtime config,
+    not the on-disk file).  Logs a warning when keys are migrated so an
+    operator whose old value was silently ignored can see what happened.
+    """
+    ui = config.get("ui") or {}
+    if not isinstance(ui, dict):
+        return
+    migrated = []
+
+    if "derived_refresh_interval_min" not in ui:
+        old_auto = ui.get("derived_auto_refresh_min")
+        old_sched = ui.get("derived_scheduler_interval_sec")
+        try:
+            if old_auto is not None:
+                ui["derived_refresh_interval_min"] = float(old_auto)
+                migrated.append(
+                    "derived_auto_refresh_min={} -> derived_refresh_interval_min".format(
+                        old_auto
+                    )
+                )
+            elif old_sched is not None:
+                minutes = max(1, int(float(old_sched) / 60))
+                ui["derived_refresh_interval_min"] = minutes
+                migrated.append(
+                    "derived_scheduler_interval_sec={} -> derived_refresh_interval_min={}".format(
+                        old_sched, minutes
+                    )
+                )
+        except (TypeError, ValueError):
+            pass
+
+    if "snapshot_retention_hours" not in ui:
+        old_backfill = ui.get("snapshot_backfill_hours")
+        if old_backfill is not None:
+            try:
+                ui["snapshot_retention_hours"] = int(old_backfill)
+                migrated.append(
+                    "snapshot_backfill_hours={} -> snapshot_retention_hours".format(
+                        old_backfill
+                    )
+                )
+            except (TypeError, ValueError):
+                pass
+
+    if migrated:
+        logging.warning("Config key migration: %s", "; ".join(migrated))
+
+
+def derived_refresh_interval_sec():
     """Return server-side derived-data rebuild interval in seconds.
 
-    Reads ``ui.derived_scheduler_interval_sec`` from config/skannr.yaml.
-    Default 900 (15 min).  Values 1–59 are clamped to 60.  0 disables.
+    Reads ``ui.derived_refresh_interval_min`` from config/skannr.yaml,
+    converts to seconds.  Default 15 min (900s).  0 disables the
+    scheduler.
     """
     ui = (runtime.get("config") or {}).get("ui") or {}
     try:
-        value = float(ui.get("derived_scheduler_interval_sec", 900))
+        minutes = float(ui.get("derived_refresh_interval_min", 15))
     except (TypeError, ValueError):
-        value = 900
-    if value <= 0:
+        minutes = 15
+    if minutes <= 0:
         return 0
-    return max(int(value), 60)
+    return max(int(minutes * 60), 60)
+
+
+def snapshot_retention_hours():
+    """Return how many hours of snapshots to keep and backfill.
+
+    Reads ``ui.snapshot_retention_hours`` from config/skannr.yaml.
+    Default 24.  Controls both retention (purge older files) and
+    backfill (scan for gaps this far back at startup).  0 = never
+    purge and skip backfill.
+    """
+    ui = (runtime.get("config") or {}).get("ui") or {}
+    try:
+        value = int(ui.get("snapshot_retention_hours", 24))
+    except (TypeError, ValueError):
+        value = 24
+    return max(value, 0)
 
 
 def _startup_prune_device_history():
@@ -2651,7 +2733,7 @@ def derived_refresh_scheduler_loop(interval_sec):
 
 def start_derived_refresh_scheduler():
     """Launch the background derived-data rebuild scheduler thread."""
-    interval = derived_scheduler_interval_sec()
+    interval = derived_refresh_interval_sec()
     if interval <= 0:
         logging.info("derived refresh scheduler disabled (interval <= 0)")
         return
@@ -5185,7 +5267,10 @@ def _push_known_bssids_to_alerts(subject_history):
 
 
 def backfill_missing_snapshots():
-    """Build hourly snapshots for any missing hours in the past 24h.
+    """Build hourly snapshots for missing hours within the lookback window.
+
+    The lookback is controlled by ``ui.snapshot_retention_hours`` (default 24).
+    Set to 168 for a 7-day window, or 0 to disable.
 
     Reads the persisted ``subject_history.json`` and builds a compact
     snapshot for each hour that has subject data but no existing snapshot
@@ -5195,6 +5280,10 @@ def backfill_missing_snapshots():
     Best-effort: hours predating the cached Subject History are skipped.
     The scheduler fills the current hour and future hours going forward.
     """
+    backfill_hours = snapshot_retention_hours()
+    if backfill_hours <= 0:
+        logging.info("snapshot backfill disabled (backfill_hours=0)")
+        return
     snapshot_dir = os.path.join(configured_log_dir(), "sh_snapshots")
     started = time.monotonic()
     try:
@@ -5204,13 +5293,16 @@ def backfill_missing_snapshots():
 
     now = int(time.time())
     now_hour = now - (now % 3600)
-    hours_to_check = list(range(now_hour - 24 * 3600, now_hour, 3600))
+    hours_to_check = list(
+        range(now_hour - backfill_hours * 3600, now_hour, 3600)
+    )
     missing = [h for h in hours_to_check if h not in existing]
 
     if not missing:
         logging.info(
-            "snapshot backfill: all 24h covered (%s snapshots on disk) "
+            "snapshot backfill: all %sh covered (%s snapshots on disk) "
             "elapsed=%.2fs",
+            backfill_hours,
             len(existing),
             time.monotonic() - started,
         )
@@ -5247,7 +5339,7 @@ def backfill_missing_snapshots():
 
     if snapshots:
         try:
-            written = save_snapshots(snapshots, snapshot_dir, retention_hours=24)
+            written = save_snapshots(snapshots, snapshot_dir, retention_hours=snapshot_retention_hours())
             logging.info(
                 "snapshot backfill built %s snapshots written=%s "
                 "missing_checked=%s elapsed=%.2fs",
@@ -5293,7 +5385,7 @@ def _save_hourly_snapshot(subject_display):
         if os.path.isfile(expected_path):
             return
         snap = build_snapshot_from_sh(subject_display, hour_epoch=hour_epoch)
-        save_snapshots({hour_epoch: snap}, snapshot_dir, retention_hours=24)
+        save_snapshots({hour_epoch: snap}, snapshot_dir, retention_hours=snapshot_retention_hours())
         logging.info(
             "hourly snapshot saved hour=%s subjects=%s",
             time.strftime("%Y-%m-%d %H:00", time.localtime(hour_epoch)),
@@ -5455,8 +5547,22 @@ def refresh_history_analysis(window_days="default"):
     config = runtime.get("config") or {}
     analyzer = HistoryAnalyzer(config.get("history_analysis", {}))
     analyze_started = time.monotonic()
+    analysis_cfg = config.get("history_analysis") or {}
+    include_sessions = bool(
+        analysis_cfg.get("bundle_correlation_enabled", True))
     analysis_input = recent_history_for_insights(history)
-    analysis = analyzer.analyze(analysis_input)
+    bundle_input = None
+    if include_sessions:
+        # Bundle correlation correlates multi-hour co-movement, so the tactical
+        # 60-min cutoff would make bundles flicker with refresh timing. Use a
+        # 24h lookback with session arrays for the bundle rule only — the other
+        # rules keep the compact session-stripped input.
+        bundle_input = recent_history_for_insights(
+            history,
+            include_sessions=True,
+            cutoff_epoch=now_epoch() - 86400,
+        )
+    analysis = analyzer.analyze(analysis_input, bundle_history=bundle_input)
     logging.info(
         "derived history_analysis build finished elapsed=%.2fs observations=%s",
         time.monotonic() - analyze_started,
@@ -5827,6 +5933,7 @@ def main():
     migration_msg = runtime.get("_migration_msg")
     if migration_msg:
         logging.warning("Config migration: %s", migration_msg)
+    _migrate_ui_config_keys(config)
     load_alert_state()
     log_aprsis_config_summary(config)
     runtime["persistence"] = load_persistence(config)

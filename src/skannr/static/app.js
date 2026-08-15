@@ -155,7 +155,7 @@ let uiConfig = {
   bluetooth_live_recent_sec: 600,
   poll_feed_live_ttl_sec: 86400,
   derived_stale_after_min: 15,
-  derived_auto_refresh_min: 15,
+  derived_refresh_interval_min: 15,
   derived_refresh_timeout_sec: 600,
   insights_recent_after_min: 30
 };
@@ -1593,7 +1593,7 @@ function refreshWhenBackendIdle(label, refreshMode) {
 function backendRefreshRecentlyFinished(status, refreshMode) {
   if (!status || !status.last_finished_epoch) return false;
   if (refreshMode !== "automatic" && refreshMode !== "catch-up") return false;
-  const intervalMin = uiNonNegativeNumber("derived_auto_refresh_min");
+  const intervalMin = uiNonNegativeNumber("derived_refresh_interval_min");
   if (intervalMin <= 0) return false;
   const finishedMs = Number(status.last_finished_epoch) * 1000;
   if (!Number.isFinite(finishedMs) || finishedMs <= 0) return false;
@@ -2390,7 +2390,7 @@ function scheduleAutoDerivedRefresh() {
     clearTimeout(autoDerivedRefreshTimer);
     autoDerivedRefreshTimer = null;
   }
-  const intervalMin = uiNonNegativeNumber("derived_auto_refresh_min");
+  const intervalMin = uiNonNegativeNumber("derived_refresh_interval_min");
   if (intervalMin <= 0) {
     nextAutoDerivedRefreshAtMs = null;
     return;
@@ -8947,6 +8947,7 @@ function genericEvidenceItems(evidence, detail) {
   const detailText = String(detail || "").toLowerCase();
   Object.keys(evidence).sort().forEach((key) => {
     if (key.endsWith("_epoch")) return;
+    if (key.startsWith("_")) return;  // internal machine-readable blocks (e.g. _devices)
     if (internalEvidenceKey(key)) return;
     const value = evidenceDisplayValue(evidence, key);
     if (value === "" || value === null || value === undefined) return;

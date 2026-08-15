@@ -65,6 +65,58 @@ DEFAULT_ALERT_CONFIG = {
             "60:60:1f",
         ],
     },
+    "flock_camera": {
+        "enabled": True,
+        "level": "warning",
+        "min_rssi": -85,
+        "ssid_patterns": [
+            "Flock-*",
+            "test_flck",
+            "Penguin*",
+            "Pigvision",
+            "FlockOS",
+            "FS_*",
+            "*flock*",
+            "*flck*",
+        ],
+        "vendor_patterns": [
+            "Flock Safety",
+        ],
+        "oui_prefixes": [
+            "70:c9:4e",
+            "3c:91:80",
+            "d8:f3:bc",
+            "80:30:49",
+            "b8:35:32",
+            "14:5a:fc",
+            "74:4c:a1",
+            "08:3a:88",
+            "9c:2f:9d",
+            "c0:35:32",
+            "94:08:53",
+            "e4:aa:ea",
+            "f4:6a:dd",
+            "f8:a2:d6",
+            "24:b2:b9",
+            "00:f4:8d",
+            "d0:39:57",
+            "e8:d0:fc",
+            "e0:4f:43",
+            "b8:1e:a4",
+            "70:08:94",
+            "58:8e:81",
+            "ec:1b:bd",
+            "3c:71:bf",
+            "58:00:e3",
+            "90:35:ea",
+            "5c:93:a2",
+            "64:6e:69",
+            "48:27:ea",
+            "a4:cf:12",
+            "82:6b:f2",
+            "b4:1e:52",
+        ],
+    },
     "aprs_weather": {
         "enabled": True,
         "level": "warning",
@@ -211,6 +263,46 @@ class AlertEngine:
     still persisted by main.py, so the raw audit trail remains under
     runtime/logs/alerts/*.jsonl.
     """
+
+    # Community-discovered OUI prefixes for Flock Safety camera hardware
+    # (Silicon Labs, Liteon, Espressif, Murata chipsets). These are NOT
+    # registered to Flock Safety in the IEEE registry — the official
+    # Flock OUI (B4:1E:52) is matched via the config oui_prefixes list.
+    FLOCK_COMMUNITY_OUIS = frozenset(
+        {
+            "70C94E",
+            "3C9180",
+            "D8F3BC",
+            "803049",
+            "B83532",
+            "145AFC",
+            "744CA1",
+            "083A88",
+            "9C2F9D",
+            "C03532",
+            "940853",
+            "E4AAEA",
+            "F46ADD",
+            "F8A2D6",
+            "24B2B9",
+            "00F48D",
+            "D03957",
+            "E8D0FC",
+            "E04F43",
+            "B81EA4",
+            "700894",
+            "588E81",
+            "EC1BBD",
+            "3C71BF",
+            "5800E3",
+            "9035EA",
+            "5C93A2",
+            "646E69",
+            "4827EA",
+            "A4CF12",
+            "826BF2",
+        }
+    )
 
     def __init__(self, config=None):
         self.config = merge_config(DEFAULT_ALERT_CONFIG, config or {})
@@ -384,6 +476,8 @@ class AlertEngine:
         """Return Wi-Fi alert events from AP and disruption observations."""
         if event_type == "ap_beacon":
             return self.wifi_ap_alerts(source, data, timestamp, now, emit)
+        if event_type == "probe_request":
+            return self.wifi_flock_alerts(source, data, timestamp, now, emit)
         if event_type in ("deauth_seen", "disassoc_seen"):
             return self.wifi_disruption_alerts(
                 source, event_type, data, timestamp, now, emit
@@ -472,7 +566,64 @@ class AlertEngine:
                     },
                 )
             )
+        flock_rule = self.rule("flock_camera")
+        if flock_rule.get("enabled", True):
+            alerts.extend(
+                self.wifi_flock_alerts(source, data, timestamp, now, emit)
+            )
         return alerts
+
+    def wifi_flock_alerts(self, source, data, timestamp, now, emit):
+        """Return Flock Safety camera alerts from probe requests or AP beacons."""
+        rule = self.rule("flock_camera")
+        if not rule.get("enabled", True):
+            return []
+        if not self.matches_flock_camera(data, rule):
+            return []
+
+        # Probe requests use client_mac; AP beacons use bssid
+        mac = data.get("client_mac") or data.get("bssid") or "unknown"
+        ssid = data.get("ssid_probed") or data.get("ssid") or "(blank)"
+        rssi = self.to_number(data.get("rssi"))
+        frame_type = "probe request" if "client_mac" in data else "AP beacon"
+        confidence = self.flock_confidence(data, rule)
+
+        title = "Flock Safety camera seen"
+        summary = "{}: {}; {}; SSID={}; confidence={}; {}".format(
+            title,
+            mac,
+            self.flock_detection_reason(data, rule),
+            ssid,
+            confidence,
+            self.wifi_signal_summary(data),
+        )
+
+        return self.emit_alert(
+            "flock_camera",
+            "flock-camera:{}".format(normalized_key(mac)),
+            rule.get("level", "warning"),
+            source,
+            title,
+            ssid,
+            summary,
+            timestamp,
+            now,
+            emit,
+            {
+                "mac": mac,
+                "ssid": ssid,
+                "vendor_oui": data.get("vendor_oui") or "",
+                "vendor_prefix": data.get("vendor_prefix")
+                or data.get("vendor_oui")
+                or "",
+                "vendor_name": data.get("vendor_name") or "",
+                "rssi": rssi,
+                "channel": data.get("channel"),
+                "frame_type": frame_type,
+                "detection_reason": self.flock_detection_reason(data, rule),
+                "confidence": confidence,
+            },
+        )
 
     def matches_drone_wifi(self, data, rule):
         """Return True when AP fields match configured drone indicators."""
@@ -492,6 +643,44 @@ class AlertEngine:
         }
         return ssid_match or vendor_match or oui_match
 
+    def _flock_oui_set(self):
+        """Normalized Flock OUI set: community frozenset + configured prefixes.
+
+        The config rule never changes after startup, so the normalized set is
+        cached on first use instead of being rebuilt per Wi-Fi event.
+        """
+        cached = getattr(self, "_flock_ouis", None)
+        if cached is None:
+            rule = self.rule("flock_camera")
+            cached = self.FLOCK_COMMUNITY_OUIS | {
+                normalized_oui(item)
+                for item in rule.get("oui_prefixes") or []
+            }
+            self._flock_ouis = cached
+        return cached
+
+    def _flock_indicators(self, data):
+        """Compute (mac, ssid, oui_known, vendor_match, ssid_match) once per event."""
+        rule = self.rule("flock_camera")
+        mac = data.get("client_mac") or data.get("bssid") or ""
+        ssid = data.get("ssid_probed") or data.get("ssid") or ""
+        oui_known = normalized_oui(mac) in self._flock_oui_set()
+        vendor_match = pattern_match(
+            data.get("vendor_name"), rule.get("vendor_patterns")
+        )
+        ssid_match = pattern_match(ssid, rule.get("ssid_patterns"))
+        return mac, ssid, oui_known, vendor_match, ssid_match
+
+    def matches_flock_camera(self, data, rule):
+        """Return True when probe/beacon data matches known Flock camera indicators."""
+        rssi = self.to_number(data.get("rssi"))
+        min_rssi = self.to_number(rule.get("min_rssi"))
+        if rssi is not None and min_rssi is not None and rssi < min_rssi:
+            return False
+
+        _, _, oui_known, vendor_match, ssid_match = self._flock_indicators(data)
+        return oui_known or vendor_match or ssid_match
+
     def drone_confidence(self, data, rule):
         """Return a compact confidence label for drone alerts."""
         ssid_match = pattern_match(data.get("ssid"), rule.get("ssid_patterns"))
@@ -503,6 +692,31 @@ class AlertEngine:
         }
         matches = sum(bool(item) for item in (ssid_match, vendor_match, oui_match))
         return "High" if matches >= 2 else "Medium"
+
+    def flock_confidence(self, data, rule):
+        """Return a compact confidence label for Flock camera alerts."""
+        _, ssid, oui_known, vendor_match, ssid_match = self._flock_indicators(data)
+
+        # Blank/null SSID probe from a known Flock OUI is the strongest signal
+        if oui_known and not ssid.strip():
+            return "High"
+        matches = sum(bool(item) for item in (oui_known, vendor_match, ssid_match))
+        return "High" if matches >= 2 else "Medium"
+
+    def flock_detection_reason(self, data, rule):
+        """Return a short human-readable description of what matched."""
+        mac, ssid, oui_known, vendor_match, ssid_match = self._flock_indicators(data)
+
+        reasons = []
+        if oui_known:
+            reasons.append("OUI prefix match ({})".format(normalized_oui(mac)))
+        if vendor_match:
+            reasons.append(
+                "vendor name match ({})".format(data.get("vendor_name") or "")
+            )
+        if ssid_match:
+            reasons.append("SSID match ({})".format(ssid))
+        return "; ".join(reasons) if reasons else "unknown"
 
     def is_remote_id_ssid(self, ssid):
         """Return True for drone Remote ID SSIDs such as DJI RID-* broadcasts."""

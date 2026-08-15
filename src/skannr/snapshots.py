@@ -291,22 +291,27 @@ def _event_count(entry, data, collector):
 
 
 def save_snapshots(snapshots, out_dir, retention_hours=DEFAULT_RETENTION_HOURS):
-    """Persist snapshots and purge files older than *retention_hours*."""
+    """Persist snapshots and purge files older than *retention_hours*.
+
+    A non-positive *retention_hours* disables purging entirely (unbounded
+    retention) — it must NOT be treated as "delete everything".
+    """
     os.makedirs(out_dir, exist_ok=True)
     ensure_owner(out_dir)
     now = int(time.time())
     cutoff = now - (retention_hours * 3600)
 
-    # Purge old
-    for fname in os.listdir(out_dir):
-        if not fname.startswith("snapshot_"):
-            continue
-        fpath = os.path.join(out_dir, fname)
-        try:
-            if os.path.getmtime(fpath) < cutoff:
-                os.remove(fpath)
-        except OSError:
-            pass
+    # Purge old (0 or negative retention = never purge)
+    if retention_hours > 0:
+        for fname in os.listdir(out_dir):
+            if not fname.startswith("snapshot_"):
+                continue
+            fpath = os.path.join(out_dir, fname)
+            try:
+                if os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+            except OSError:
+                pass
 
     # Write new
     for hour_epoch, snap in sorted(snapshots.items()):

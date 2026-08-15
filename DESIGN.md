@@ -1286,8 +1286,8 @@ raw-log scope. Insights then apply an additional recent-event lookback,
 Set the value to `0` to disable the additional Insights cutoff.
 
 The server rebuilds derived views autonomously on a background scheduler
-(`derived_scheduler_interval_sec`, default 15 min). The browser polls for
-new data at the interval set by `derived_auto_refresh_min` (default 15 min)
+(`derived_refresh_interval_min`, default 15 min). The same interval
+drives both the server rebuild scheduler and the browser poll cadence.
 and only re-renders when `data_version_epoch` has changed. Manual Refresh
 (POST) still triggers an immediate server-side rebuild.
 
@@ -1561,9 +1561,11 @@ the row timestamp because observations are regenerated on refresh; this prevents
 old device behavior from becoming "recent" merely because analysis was rebuilt.
 
 Current rule families include Wi-Fi encryption/channel/probe/BSSID patterns,
-Bluetooth signal/linger/presence patterns, and randomized-MAC population
-observations.  Each collector defines its own insight rules — see that
-collector's section under §6 Built-In Collectors.
+Bluetooth signal/linger/presence patterns, randomized-MAC population
+observations, and cross-collector device bundles (`device_bundle`
+observations: BLE + Wi-Fi devices that repeatedly arrive and depart
+together in tight time windows).  Each collector defines its own insight
+rules — see that collector's section under §6 Built-In Collectors.
 
 HistoryAnalyzer itself does not call an LLM — it applies deterministic
 rule-based heuristics over materialized Subject History. LLM-powered analysis

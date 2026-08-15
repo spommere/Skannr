@@ -7,6 +7,28 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.3.8 - 2026-08-15
+
+- **Cross-collector device bundle correlation.** New HistoryAnalyzer rule
+  family discovers groups of devices from different collectors (BLE + Wi-Fi)
+  that repeatedly arrive and depart together in tight time windows — a car's
+  Bluetooth head unit paired with its Wi-Fi hotspot, a phone bridging both
+  radios. Emits scored `device_bundle` Insights. Randomized MACs and anonymous
+  devices are excluded. Nine new `history_analysis` config keys
+  (`bundle_correlation_*`).
+- **Flock Safety camera alerts.** New `flock_camera` alert type detects Flock
+  Safety ALPR cameras from Wi-Fi probe requests and AP beacons using OUI,
+  vendor, and SSID patterns.
+- **SKIR delta timeline.** SKIR intelligence reports now include a "Delta
+  Since Last Report" presence timeline comparing the window since the previous
+  report with the current 24h window, so the LLM reports what changed instead
+  of only the current state.
+- **Config consolidation.** `derived_auto_refresh_min` and
+  `derived_scheduler_interval_sec` merged into `derived_refresh_interval_min`
+  (minutes). `snapshot_backfill_hours` merged into `snapshot_retention_hours`
+  — one parameter for both retention and startup backfill (default 24; 168
+  enables 7-day SKIR deltas).
+
 ## 0.3.7 - 2026-07-09
 
 - **ADS-B aircraft filtering.** New `filter:` config block with optional

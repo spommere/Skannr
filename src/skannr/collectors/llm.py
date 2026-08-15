@@ -568,37 +568,25 @@ class LLMCollector(BaseCollector):
 
     # ── 24h presence timeline ──────────────────────────────────
 
-    def _build_presence_timeline(self, snapshot_dir=None):
-        """Return a compact 24h presence timeline block for the SKIR context.
+    # Maximum hours in a "Delta Since Last Report" timeline block.  A SKIR
+    # generated more than a day after the previous one would otherwise emit
+    # unbounded-length presence masks and inflate the LLM context budget.
+    MAX_DELTA_HOURS = 96
 
-        Loads the last 24 hourly snapshots, classifies every subject by
-        presence pattern (continuous / intermittent / transient / appeared /
-        departed), and returns a text section the LLM can reason about.
+    @staticmethod
+    def _format_presence_timeline(snap_list, title):
+        """Build and format a presence timeline from *snap_list*.
+
+        *snap_list* must be a chronologically-ordered list of snapshot dicts.
+        Returns a formatted text block with per-subject presence masks and
+        classification labels.
         """
-        if snapshot_dir is None:
-            from ..paths import PROJECT_ROOT
-
-            snapshot_dir = os.path.join(PROJECT_ROOT, "runtime", "logs", "sh_snapshots")
-        snapshots = load_snapshots(snapshot_dir)
-        if not snapshots:
+        if len(snap_list) < 2:
             return ""
-
-        # Take the 24 most recent snapshots, sorted oldest→newest
-        hours = sorted(snapshots.keys())[-24:]
-        if len(hours) < 2:
-            return ""
-        snap_list = [snapshots[h] for h in hours]
-
+        n_hours = len(snap_list)
         first_label = snap_list[0].get("hour_start", "?")
         last_label = snap_list[-1].get("hour_start", "?")
 
-        # ── Build per-subject presence masks ──
-        # timeline[collector][subject_id] = {
-        #     "mask": 24-char string of ■/·,
-        #     "count": int,
-        #     "first_idx": int, "last_idx": int,
-        #     "info": {enrichment fields from latest snapshot},
-        # }
         from collections import OrderedDict
 
         timeline = OrderedDict()
@@ -619,15 +607,15 @@ class LLMCollector(BaseCollector):
                         continue
                     if subj_id not in timeline[coll]:
                         timeline[coll][subj_id] = {
-                            "mask": ["·"] * len(hours),
+                            "mask": ["·"] * n_hours,
                             "count": 0,
-                            "first_idx": len(hours),
+                            "first_idx": n_hours,
                             "last_idx": -1,
                             "info": info,
                         }
                     entry = timeline[coll][subj_id]
                     if entry["last_idx"] < idx:
-                        entry["info"] = info  # latest enrichment
+                        entry["info"] = info
                     entry["mask"][idx] = "■"
                     entry["count"] += 1
                     if idx < entry["first_idx"]:
@@ -635,10 +623,9 @@ class LLMCollector(BaseCollector):
                     if idx > entry["last_idx"]:
                         entry["last_idx"] = idx
 
-        # ── Classify and format ──
         lines = [
-            "## 24h Presence Timeline ({first} → {last})".format(
-                first=first_label, last=last_label
+            "## {title} ({first} → {last})".format(
+                title=title, first=first_label, last=last_label
             ),
             "Legend: ■ present  · absent  [C]=continuous [I]=intermittent "
             "[T]=transient [A]=appeared [D]=departed",
@@ -648,23 +635,30 @@ class LLMCollector(BaseCollector):
         for coll in sorted(timeline):
             entries = timeline[coll]
             cats = {"C": [], "I": [], "T": [], "A": [], "D": []}
+            # Thresholds: proportional to window size.  The continuous bound
+            # is integer-ceiled so it never understates the 90% claim made
+            # in the SKIR prompt (int(24*0.90)=21 would label 87.5% as
+            # continuous); the transient bound floors at ≤20% of hours.
+            _continuous_min = max(1, (n_hours * 90 + 99) // 100)
+            _transient_max = max(1, int(n_hours * 0.20))
+            _edge_hours = max(1, n_hours // 4)
             for subj_id, e in entries.items():
                 mask_str = "".join(e["mask"])
                 info = e["info"]
                 label = _timeline_label(subj_id, info, coll)
                 line = "  {label} | {mask} | {n}/{total}h".format(
-                    label=label[:55], mask=mask_str, n=e["count"], total=len(hours)
+                    label=label[:55], mask=mask_str, n=e["count"], total=n_hours
                 )
 
                 # Classification
-                first6 = sum(1 for ch in e["mask"][:6] if ch == "■")
-                last6 = sum(1 for ch in e["mask"][-6:] if ch == "■")
-                if e["count"] >= 22:
+                first_edge = sum(1 for ch in e["mask"][:_edge_hours] if ch == "■")
+                last_edge = sum(1 for ch in e["mask"][-_edge_hours:] if ch == "■")
+                if e["count"] >= _continuous_min:
                     cats["C"].append((label, e["count"], ""))
-                elif e["count"] <= 5:
-                    if first6 == 0 and last6 > 0:
+                elif e["count"] <= _transient_max:
+                    if first_edge == 0 and last_edge > 0:
                         cats["A"].append(line + " | appeared")
-                    elif first6 > 0 and last6 == 0:
+                    elif first_edge > 0 and last_edge == 0:
                         cats["D"].append(
                             line
                             + " | departed h{first}-h{last}".format(
@@ -679,11 +673,11 @@ class LLMCollector(BaseCollector):
                             )
                         cats["T"].append(line + span)
                 else:
-                    if first6 == 0 and last6 > 0:
+                    if first_edge == 0 and last_edge > 0:
                         cats["A"].append(
                             line + " | appeared h{first}".format(first=e["first_idx"])
                         )
-                    elif first6 > 0 and last6 == 0:
+                    elif first_edge > 0 and last_edge == 0:
                         cats["D"].append(
                             line + " | departed h{last}".format(last=e["last_idx"])
                         )
@@ -744,6 +738,77 @@ class LLMCollector(BaseCollector):
             lines.append("")
 
         return "\n".join(lines)
+
+    def _sh_snapshots_dir(self):
+        """Return the sh_snapshots directory under the configured log dir.
+
+        Writers (`main.py` snapshot hooks) resolve the configured runtime log
+        dir the same way; the reader must match or the timelines go silently
+        empty when ``persistence.filesystem.log_dir`` is customized.
+        """
+        base = os.path.dirname(self._resolve_log_dir())
+        return os.path.join(base, "sh_snapshots")
+
+    def _build_presence_timeline(self, snapshots=None, snapshot_dir=None):
+        """Return a 24h presence timeline for the current window.
+
+        *snapshots* is a pre-loaded snapshot dict shared with the delta
+        builder so one SKIR build parses the directory once.  When omitted,
+        snapshots are loaded from *snapshot_dir* (defaults to the configured
+        runtime log dir's ``sh_snapshots``).
+        """
+        if snapshots is None:
+            if snapshot_dir is None:
+                snapshot_dir = self._sh_snapshots_dir()
+            snapshots = load_snapshots(snapshot_dir)
+        if not snapshots:
+            return ""
+        hours = sorted(snapshots.keys())[-24:]
+        if len(hours) < 2:
+            return ""
+        return self._format_presence_timeline(
+            [snapshots[h] for h in hours], "24h Presence Timeline"
+        )
+
+    def _build_delta_timeline(self, snapshots=None, snapshot_dir=None):
+        """Return a presence timeline for the gap between the previous
+        SKIR and the current 24h window, or None if no prior SKIR exists.
+
+        The current window is the last 24 snapshot FILES; the delta is the
+        stretch before it.  Aligning both on the same axis avoids overlap
+        and off-by-one gaps when snapshot coverage is gappy.  Note the delta
+        is empty unless snapshot retention exceeds the 24h current window —
+        ``snapshot_retention_hours`` must be > 24 for this section to exist.
+        """
+        if snapshots is None:
+            if snapshot_dir is None:
+                snapshot_dir = self._sh_snapshots_dir()
+            snapshots = load_snapshots(snapshot_dir)
+        if not snapshots:
+            return None
+        last_skir = self.load_latest_skir(
+            log_dir=os.path.dirname(self._skir_dir())
+        )
+        if not last_skir:
+            return None
+        last_epoch = last_skir.get("generated_at_epoch")
+        if not last_epoch:
+            return None
+        all_hours = sorted(snapshots.keys())
+        if len(all_hours) < 2:
+            return None
+        current_hours = all_hours[-24:]
+        cutoff = current_hours[0]
+        delta_hours = [h for h in all_hours if last_epoch <= h < cutoff]
+        if len(delta_hours) < 2:
+            return None
+        # Cap the delta length: a SKIR > 24h old could otherwise produce
+        # 100+ hour mask strings per subject and blow the SKIR token budget.
+        delta_hours = delta_hours[-MAX_DELTA_HOURS:]
+        return self._format_presence_timeline(
+            [snapshots[h] for h in delta_hours],
+            "Delta Since Last Report",
+        )
 
     # ── SKIR: Skannr Intelligence Report ─────────────────────────
 
@@ -947,9 +1012,15 @@ class LLMCollector(BaseCollector):
             sections.append("")  # blank line after subject data
 
         # ── 24h presence timeline ──
-        timeline = self._build_presence_timeline()
+        snapshots = load_snapshots(self._sh_snapshots_dir())
+        timeline = self._build_presence_timeline(snapshots=snapshots)
         if timeline:
             sections.append(timeline)
+
+        # ── Delta since last report ──
+        delta = self._build_delta_timeline(snapshots=snapshots)
+        if delta:
+            sections.append(delta)
 
         # ── Priority reports with evidence ──
         priority = [
@@ -1101,19 +1172,27 @@ class LLMCollector(BaseCollector):
             "**warning_events_in_window** is a Skannr collector metric that "
             "includes harmless connectivity retries — ignore it for security "
             "analysis. Only flag Rayhunter when warning_count > 0.\n\n"
-            "24h PRESENCE TIMELINE:\n"
-            "The context includes a 24h presence timeline section showing "
-            "which subjects were active in each of the last 24 hours "
-            "(■ = present, · = absent). Classifications:\n"
-            "  [C] Continuous (≥22/24h) = resident, always there.\n"
-            "  [I] Intermittent (6-21/24h) = comes and goes.\n"
-            "  [T] Transient (≤5/24h) = brief visitor, seen once or twice.\n"
-            "  [A] Appeared = absent early, present late (new arrival).\n"
-            "  [D] Departed = present early, absent late (recently left).\n"
-            "Use this data to classify subjects' presence patterns. Example: "
-            '"Samsung TV is a continuous resident (24/24h), Bose speaker is '
-            "intermittent (6/24h, hours 4-10), Toyota TPMS appeared at hour 18 "
-            'and stayed." Mention arrivals and departures with hour windows.\n\n'
+            "PRESENCE TIMELINE:\n"
+            "Two presence timeline sections may appear:\n"
+            "1. '24h Presence Timeline' — the last 24 hours (current state).\n"
+            "2. 'Delta Since Last Report' — hours between the previous SKIR\n"
+            "   generation and 24h ago (what happened since you last looked).\n"
+            "Compare them to identify what CHANGED since the last report:\n"
+            "- Subjects in Current but NOT in Delta = new arrivals.\n"
+            "- Subjects in Delta but NOT in Current = recently departed.\n"
+            "- Subjects whose count/pattern changed significantly.\n"
+            "Use this to produce a 'What changed' section instead of only\n"
+            "describing the current state. Mention specific subjects and\n"
+            "time windows. Example: 'BLE tracker Tile-4A2F appeared at\n"
+            "hour 20 and stayed (absent in delta), while the garage door\n"
+            "sensor (present in delta, h12-h18) has not been seen in the\n"
+            "current 24h window.'\n"
+            "Classifications (proportional to window size):\n"
+            "  [C] Continuous (≥90% of hours) = resident.\n"
+            "  [I] Intermittent (20-90%) = comes and goes.\n"
+            "  [T] Transient (≤20%) = brief visitor.\n"
+            "  [A] Appeared = absent early, present late.\n"
+            "  [D] Departed = present early, absent late.\n\n"
             "CROSS-COLLECTOR ANALYSIS:\n"
             "Find connections the deterministic pipeline cannot:\n"
             "- Wi-Fi client MAC == LAN MAC? Same device on two layers.\n"
@@ -1284,9 +1363,9 @@ class LLMCollector(BaseCollector):
     def load_latest_skir(log_dir=None):
         """Return the most recent SKIR dict, or None."""
         if log_dir is None:
-            from ..paths import LOG_DIR
+            from ..paths import RUNTIME_LOG_DIR
 
-            log_dir = LOG_DIR
+            log_dir = RUNTIME_LOG_DIR
         path = os.path.join(log_dir, "skir", "latest.json")
         if not os.path.exists(path):
             return None
@@ -1300,9 +1379,9 @@ class LLMCollector(BaseCollector):
     def list_skirs(log_dir=None):
         """Return a list of available SKIR metadata dicts, newest first."""
         if log_dir is None:
-            from ..paths import LOG_DIR
+            from ..paths import RUNTIME_LOG_DIR
 
-            log_dir = LOG_DIR
+            log_dir = RUNTIME_LOG_DIR
         skir_dir = os.path.join(log_dir, "skir")
         if not os.path.isdir(skir_dir):
             return []
@@ -1331,9 +1410,9 @@ class LLMCollector(BaseCollector):
     def load_skir_by_id(log_dir, report_id):
         """Return a specific SKIR dict by report_id, or None."""
         if log_dir is None:
-            from ..paths import LOG_DIR
+            from ..paths import RUNTIME_LOG_DIR
 
-            log_dir = LOG_DIR
+            log_dir = RUNTIME_LOG_DIR
         skir_dir = os.path.join(log_dir, "skir")
         if not os.path.isdir(skir_dir):
             return None

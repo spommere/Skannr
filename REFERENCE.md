@@ -90,6 +90,7 @@ Alerts are the ACK/expiry-oriented layer. Each nested rule usually has `enabled`
 | `ack_memory_alert_types` | Alert types that use long-lived ACK memory. |
 | `pushover.*` | Optional Pushover notification integration and credentials. |
 | `drone_wifi.*` | Wi-Fi drone/remote-ID SSID/vendor/OUI alert patterns. |
+| `flock_camera.*` | Flock Safety ALPR camera detection via Wi-Fi probe/beacon OUI, vendor, and SSID patterns. |
 | `aprs_weather.*`, `pws_weather.*` | Weather alert thresholds for APRS/PWS data. |
 | `rayhunter_warning.*` | Rayhunter alert rule. |
 | `wifi_disruption.*` | Deauth/disassociation disruption alert window and counts. |
@@ -117,6 +118,7 @@ History analysis drives derived Device History and Subject History patterns.
 | `recent_activity_window_sec`, `insights_recent_minutes` | Recentness windows used by history/insight summaries. |
 | `wifi_short_lived_sec` | Wi-Fi short-lived subject threshold. |
 | `rtl433_recent_min_events` | Minimum recent RTL-433 events for history patterns. |
+| `bundle_correlation_*` | Cross-collector (BLE + Wi-Fi) device bundle correlation: sync margin, min co-occurrences, bundle size/caps, sources, per-device session minimum, and window span. |
 | `sensitive_ssids` | SSID patterns considered sensitive during history analysis. |
 
 ### `reports`
@@ -148,8 +150,8 @@ Reports are longer-window derived summaries. These thresholds can intentionally 
 | `poll_feed_live_ttl_sec` | Hides old live NOAA/USGS/SWPC rows without deleting raw logs/history/reports. |
 | `device_history_update_interval_sec` | Background cadence for compact Device History coalescing; 0 disables. |
 | `derived_stale_after_min` | Age after which derived views are considered stale. |
-| `derived_scheduler_interval_sec` | Server-side autonomous derived rebuild interval in seconds (default 900); 0 disables. |
-| `derived_auto_refresh_min` | Browser poll interval for new derived data (default 15 min); 0 disables. |
+| `derived_refresh_interval_min` | Server rebuild cadence and browser poll interval in minutes (default 15); 0 disables both. |
+| `snapshot_retention_hours` | Hours of snapshots to retain and backfill (default 24); 0 disables both. |
 | `derived_refresh_timeout_sec` | Timeout for derived refresh work. |
 | `manual_refresh_small_delta_reuse_bytes` | Optional threshold allowing small raw deltas to reuse cached derived views. |
 | `insights_recent_after_min` | Recentness window for insight freshness display. |

@@ -5,11 +5,19 @@ and evidence fields so results are reproducible and can be inspected without an
 LLM or a database.
 """
 
+import logging
+import time
 from datetime import datetime
 
 from .bus import local_now
-from .identity_policy import bluetooth_property_like_name
+from .identity_policy import bluetooth_property_like_name, locally_administered_mac
 from .log_utils import now_epoch, record_time_epoch, save_json_atomic, timestamp_epoch
+
+# Per-subject session-window cap for bundle correlation.  Pair scans are
+# O(windows_a × windows_b) per cross-collector pair, so each subject keeps
+# only its most recent windows; long retention (7-day session arrays) would
+# otherwise make the 15-min derived refresh prohibitively slow on a Pi.
+MAX_BUNDLE_WINDOWS_PER_SUBJECT = 50
 
 DEFAULT_ANALYSIS_CONFIG = {
     "new_device_window_sec": 3600,
@@ -31,6 +39,15 @@ DEFAULT_ANALYSIS_CONFIG = {
     "ble_population_min_strong_count": 3,
     "recent_activity_window_sec": 1800,
     "rtl433_recent_min_events": 1,
+    "bundle_correlation_enabled": True,
+    "bundle_correlation_sync_margin_sec": 300,
+    "bundle_correlation_min_cooccurrences": 3,
+    "bundle_correlation_min_bundle_size": 2,
+    "bundle_correlation_max_bundles": 10,
+    "bundle_correlation_sources": ["ble", "wifi"],
+    "bundle_correlation_min_sessions_per_device": 2,
+    "bundle_correlation_max_subjects_per_source": 100,
+    "bundle_correlation_max_window_span_sec": 3600,
     "wifi_short_lived_sec": 900,
     "sensitive_ssids": [],
 }
@@ -45,8 +62,14 @@ class HistoryAnalyzer:
         self._counter = 0
         self._generated_at_epoch = None
 
-    def analyze(self, history):
-        """Return ranked observations with concrete evidence and no LLM step."""
+    def analyze(self, history, bundle_history=None):
+        """Return ranked observations with concrete evidence and no LLM step.
+
+        *bundle_history* is an optional second input for the bundle
+        correlation rule.  When set it carries session arrays and a longer
+        lookback window (multi-hour co-movement), while *history* stays the
+        compact tactical input for the other rules.
+        """
         generated_at_epoch = self.history_generated_epoch(history)
         self._generated_at_epoch = generated_at_epoch
         generated_at = local_now(generated_at_epoch)
@@ -66,6 +89,12 @@ class HistoryAnalyzer:
         observations.extend(
             self.analyze_rtl433((history.get("rtl433") or []), generated_at)
         )
+        if self.config.get("bundle_correlation_enabled", True):
+            observations.extend(
+                self.analyze_bundle_correlation(
+                    bundle_history or history, generated_at
+                )
+            )
 
         # Show the most urgent/recent-looking rows first while preserving the
         # raw score as the secondary ordering inside each severity.
@@ -1258,6 +1287,456 @@ class HistoryAnalyzer:
         if first is None or last is None or last < first:
             return 0
         return last - first
+
+    # ------------------------------------------------------------------
+    # Cross-collector device bundle correlation
+    # ------------------------------------------------------------------
+
+    def analyze_bundle_correlation(self, history, timestamp):
+        """Find groups of devices from different collectors that repeatedly
+        appear together in tight time windows.
+
+        Returns a list of ``device_bundle`` observation dicts.
+        """
+        observations = []
+        if not self.config.get("bundle_correlation_enabled", True):
+            return observations
+
+        sources = self._canonical_bundle_sources(
+            self.config.get("bundle_correlation_sources", ["ble", "wifi"]))
+        sync_margin = float(self.config.get(
+            "bundle_correlation_sync_margin_sec", 300))
+        min_cooccur = int(self.config.get(
+            "bundle_correlation_min_cooccurrences", 3))
+        min_size = int(self.config.get(
+            "bundle_correlation_min_bundle_size", 2))
+        max_bundles = int(self.config.get(
+            "bundle_correlation_max_bundles", 10))
+        max_span = int(self.config.get(
+            "bundle_correlation_max_window_span_sec", 3600))
+        min_sessions = int(self.config.get(
+            "bundle_correlation_min_sessions_per_device", 2))
+        max_per_source = int(self.config.get(
+            "bundle_correlation_max_subjects_per_source", 100))
+
+        # Phase 1: extract time windows from every enabled source.  The
+        # per-source subject cap is applied inside extraction (before session
+        # parsing) so unselected subjects never cost window parsing.
+        all_subjects = []
+        windows_by_key = {}
+
+        for source in sources:
+            subjects, windows = self._extract_bundle_windows(
+                history, source, max_span, min_sessions, max_per_source)
+            all_subjects.extend(subjects)
+            windows_by_key.update(windows)
+
+        if len(all_subjects) < min_size:
+            return observations
+
+        # Build a key→subject lookup
+        subject_by_key = {s["key"]: s for s in all_subjects}
+
+        # Phase 2: count synchronized co-occurrences
+        pair_counts = self._count_cooccurrences(
+            all_subjects, windows_by_key, sync_margin)
+
+        # Build qualifying-pairs dict (only edges ≥ min_cooccur)
+        qualifying = {
+            pair: count for pair, count in pair_counts.items()
+            if count >= min_cooccur
+        }
+
+        # Phase 3: build clique bundles from qualifying pairs
+        bundles = self._build_clique_bundles(
+            all_subjects, subject_by_key, qualifying, min_size)
+
+        if not bundles:
+            return observations
+
+        # Phase 4: emit one observation per bundle, best first.  The
+        # observation's last_seen is the true latest co-occurrence end, not
+        # the analysis generation time — otherwise stale bundles would be
+        # stamped "recent" in the tactical feed.
+        bundle_obs = []
+        for bundle in bundles:
+            ends = [
+                window[1]
+                for key in bundle
+                for window in windows_by_key.get(key, [])
+            ]
+            last_seen = max(ends) if ends else timestamp
+            obs = self._bundle_observation(
+                bundle, qualifying, subject_by_key, timestamp,
+                last_seen=last_seen)
+            if obs:
+                bundle_obs.append(obs)
+
+        bundle_obs.sort(key=lambda o: o["score"], reverse=True)
+        return bundle_obs[:max_bundles]
+
+    @staticmethod
+    def _canonical_bundle_sources(sources):
+        """Normalize source aliases and drop synonyms.
+
+        "bluetooth" reads the same bucket as "ble", and "wifi_monitor"
+        subjects live in the same ``history["wifi"]`` structure as managed
+        Wi-Fi — without canonicalization both aliases would duplicate every
+        subject and produce phantom cross-collector self-pairs.
+        """
+        canonical = []
+        for source in sources or []:
+            if source in ("ble", "bluetooth"):
+                key = "ble"
+            elif source in ("wifi", "wifi_monitor"):
+                key = "wifi"
+            else:
+                key = source
+            if key not in canonical:
+                canonical.append(key)
+        return canonical
+
+    def _extract_bundle_windows(self, history, source, max_span,
+                                min_sessions, max_per_source=0):
+        """Return (subjects, windows_by_key) for one canonical collector source.
+
+        Uses per-device sessions when available; falls back to a single
+        ``first_seen``–``last_seen`` window for subjects whose total span
+        is ≤ *max_span*.  Subjects with fewer than *min_sessions* sessions
+        are skipped (filters stationary background devices); sessionless
+        subjects (Wi-Fi clients have no session arrays) participate via the
+        span fallback.  *max_per_source* caps candidates per source BEFORE
+        window parsing, by session count, for predictable runtime.
+        """
+        subjects = []
+        windows_by_key = {}
+
+        if source == "ble":
+            ble = history.get("bluetooth") or history.get("ble") or {}
+            records = [
+                dev for dev in (ble.get("devices") or [])
+                if not locally_administered_mac(
+                    (dev.get("mac") or "unknown").lower())
+                and not dev.get("grouped_randomized")
+            ]
+            if max_per_source > 0 and len(records) > max_per_source:
+                records.sort(
+                    key=lambda d: d.get("session_count")
+                    or len(d.get("sessions") or []),
+                    reverse=True)
+                records = records[:max_per_source]
+            for dev in records:
+                mac = (dev.get("mac") or "unknown").lower()
+                key = "ble:{}".format(mac)
+                windows = self._subject_windows(
+                    dev, max_span, min_sessions)
+                if not windows:
+                    continue
+                names = self.list_values(dev.get("names"))
+                vendor = dev.get("vendor_name") or ""
+                # Skip anonymous BLE devices: no vendor and no name → noise
+                if not vendor and not names:
+                    continue
+                label = names[0] if names else (vendor if vendor else mac)
+                subjects.append({
+                    "key": key, "collector": "ble",
+                    "subject_id": mac,
+                    "display_label": "BLE: {}".format(label),
+                    "vendor_name": vendor, "names": names,
+                })
+                windows_by_key[key] = windows
+
+        elif source == "wifi":
+            wifi = history.get("wifi") or {}
+            candidates = []
+            for kind, record in (
+                    [("ap", item) for item in (wifi.get("access_points") or [])]
+                    + [("client", item)
+                       for item in (wifi.get("clients") or [])]):
+                mac = ((record.get("bssid") or record.get("mac"))
+                       or "unknown").lower()
+                if locally_administered_mac(mac):
+                    continue
+                candidates.append((kind, record))
+            if max_per_source > 0 and len(candidates) > max_per_source:
+                candidates.sort(
+                    key=lambda item: item[1].get("session_count")
+                    or len(item[1].get("sessions") or []),
+                    reverse=True)
+                candidates = candidates[:max_per_source]
+            for kind, record in candidates:
+                if kind == "ap":
+                    bssid = ((record.get("bssid") or record.get("mac"))
+                             or "unknown").lower()
+                    key = "wifi_ap:{}".format(bssid)
+                    windows = self._subject_windows(
+                        record, max_span, min_sessions)
+                    if not windows:
+                        continue
+                    ssid = record.get("ssid") or ""
+                    vendor = record.get("vendor_name") or ""
+                    label = ssid if ssid else (vendor if vendor else bssid)
+                    subjects.append({
+                        "key": key, "collector": "wifi",
+                        "subject_id": bssid,
+                        "display_label": "Wi-Fi AP: {}".format(label),
+                        "vendor_name": vendor,
+                        "names": [ssid] if ssid else [],
+                    })
+                    windows_by_key[key] = windows
+                else:
+                    mac = (record.get("mac") or "unknown").lower()
+                    key = "wifi_client:{}".format(mac)
+                    windows = self._subject_windows(
+                        record, max_span, min_sessions)
+                    if not windows:
+                        continue
+                    vendor = record.get("vendor_name") or ""
+                    label = vendor if vendor else mac
+                    subjects.append({
+                        "key": key, "collector": "wifi",
+                        "subject_id": mac,
+                        "display_label": "Wi-Fi client: {}".format(label),
+                        "vendor_name": vendor, "names": [],
+                    })
+                    windows_by_key[key] = windows
+
+        return subjects, windows_by_key
+
+    def _subject_windows(self, record, max_span, min_sessions):
+        """Extract ``[(start, end), …]`` from a subject record.
+
+        Sessions are preferred.  Sessionless subjects (Wi-Fi clients never
+        get session arrays) fall back to the whole ``first_seen``–
+        ``last_seen`` span as a single window when the total span ≤
+        *max_span*.  Sessionful subjects with fewer than *min_sessions*
+        sessions are excluded — a device with one session has no movement
+        pattern to correlate.  Windows are capped to the most recent
+        ``MAX_BUNDLE_WINDOWS_PER_SUBJECT`` for predictable pair-scan cost.
+        """
+        sessions = record.get("sessions") or []
+        windows = []
+        if sessions:
+            if len(sessions) < min_sessions:
+                return []  # stationary device, skip
+            for s in sessions:
+                start = record_time_epoch(s, "start")
+                end = record_time_epoch(s, "end")
+                if (start is not None and end is not None
+                        and start <= end):
+                    windows.append((int(start), int(end)))
+        if not windows:
+            start = record_time_epoch(record, "first_seen")
+            end = record_time_epoch(record, "last_seen")
+            if (start is not None and end is not None
+                    and start <= end
+                    and (end - start) <= max_span):
+                windows.append((int(start), int(end)))
+        windows.sort(key=lambda item: item[0])
+        return windows[-MAX_BUNDLE_WINDOWS_PER_SUBJECT:]
+
+    @staticmethod
+    def _windows_synchronized(a_start, a_end, b_start, b_end, sync_margin):
+        """True when two sessions arrived and departed together."""
+        return (abs(a_start - b_start) <= sync_margin and
+                abs(a_end - b_end) <= sync_margin)
+
+    def _count_cooccurrences(self, subjects, windows_by_key, sync_margin):
+        """Count synchronized co-occurrences between cross-collector pairs.
+
+        Two sessions count as co-occurring only when they *arrived* and
+        *departed* within *sync_margin* seconds of each other — simple
+        temporal overlap is not enough.  This filters out stationary
+        background devices whose one long session overlaps everything.
+
+        The stored count is the minimum of the two directional counts
+        ("A-windows with ≥1 synchronized B-window" and vice versa) so the
+        result is symmetric and independent of subject iteration order.
+
+        Returns ``{(key_a, key_b): count}`` for cross-collector pairs only.
+        """
+        def directional(wins_a, wins_b):
+            count = 0
+            for wa in wins_a:
+                for wb in wins_b:
+                    if self._windows_synchronized(
+                            wa[0], wa[1], wb[0], wb[1], sync_margin):
+                        count += 1
+                        break  # at most one per A-window
+            return count
+
+        pairs = {}
+        for i, subj_a in enumerate(subjects):
+            wins_a = windows_by_key.get(subj_a["key"], [])
+            if not wins_a:
+                continue
+            for subj_b in subjects[i + 1:]:
+                if subj_a["collector"] == subj_b["collector"]:
+                    continue
+                wins_b = windows_by_key.get(subj_b["key"], [])
+                if not wins_b:
+                    continue
+                count = min(
+                    directional(wins_a, wins_b),
+                    directional(wins_b, wins_a),
+                )
+                if count > 0:
+                    ka, kb = subj_a["key"], subj_b["key"]
+                    if ka > kb:
+                        ka, kb = kb, ka
+                    pairs[(ka, kb)] = count
+        return pairs
+
+    def _build_clique_bundles(self, subjects, subject_by_key, qualifying,
+                              min_size):
+        """Build clique bundles from qualifying co-occurring pairs.
+
+        Unlike connected components (which allow transitive chaining),
+        a clique requires *every* pair of devices to co-occur directly.
+        Uses greedy construction: seeds from the strongest pairs, expands
+        by adding devices that co-occur with all current members.
+        """
+        if not qualifying:
+            return []
+
+        # One adjacency set per subject so clique-expansion membership tests
+        # are set operations instead of per-test tuple construction.
+        adjacency = {}
+        for (ka, kb) in qualifying:
+            adjacency.setdefault(ka, set()).add(kb)
+            adjacency.setdefault(kb, set()).add(ka)
+
+        # Sort pairs strongest-first
+        sorted_pairs = sorted(qualifying.items(),
+                              key=lambda item: item[1], reverse=True)
+        placed = set()
+        bundles = []
+
+        for (ka, kb), _ in sorted_pairs:
+            if ka in placed or kb in placed:
+                continue
+            # Seed a candidate clique with this pair
+            clique = {ka, kb}
+            clique_collectors = set()
+            sa = subject_by_key.get(ka)
+            sb = subject_by_key.get(kb)
+            if sa:
+                clique_collectors.add(sa["collector"])
+            if sb:
+                clique_collectors.add(sb["collector"])
+
+            # Try adding other devices that co-occur with ALL current members
+            for subj in subjects:
+                sk = subj["key"]
+                if sk in clique:
+                    continue
+                if clique <= adjacency.get(sk, set()):
+                    clique.add(sk)
+                    clique_collectors.add(subj["collector"])
+
+            if len(clique) >= min_size and len(clique_collectors) >= 2:
+                bundles.append(sorted(clique))
+                placed.update(clique)
+
+        return bundles
+
+    def _bundle_label(self, bundle_keys, subject_by_key):
+        """Short human label summarising a bundle."""
+        parts = []
+        for key in bundle_keys[:5]:
+            subj = subject_by_key.get(key)
+            if subj:
+                parts.append(subj["display_label"])
+        if len(bundle_keys) > 5:
+            parts.append("+{} more".format(len(bundle_keys) - 5))
+        return " / ".join(parts)
+
+    def _bundle_observation(self, bundle_keys, qualifying,
+                            subject_by_key, timestamp, last_seen=None):
+        """Build one ``device_bundle`` observation dict.
+
+        Only qualifying edges (≥ min_cooccurrences) are used for scoring
+        and evidence — weak pairs within the clique are not shown.
+        *last_seen* is the true latest co-occurrence end (not the analysis
+        generation time) so activity metadata ages the row honestly.
+        """
+        if not bundle_keys:
+            return None
+
+        devices = []
+        collectors = set()
+        for key in bundle_keys:
+            subj = subject_by_key.get(key)
+            if not subj:
+                continue
+            collectors.add(subj["collector"])
+            devices.append({
+                "collector": subj["collector"],
+                "subject_id": subj["subject_id"],
+                "display_label": subj["display_label"],
+                "vendor_name": subj["vendor_name"],
+                "names": subj.get("names") or [],
+            })
+
+        if len(collectors) < 2:
+            return None
+
+        # Score from qualifying edges only
+        edge_weights = []
+        pair_evidence = {}
+        for i in range(len(bundle_keys)):
+            for j in range(i + 1, len(bundle_keys)):
+                ka, kb = bundle_keys[i], bundle_keys[j]
+                if ka > kb:
+                    ka, kb = kb, ka
+                count = qualifying.get((ka, kb), 0)
+                if count:
+                    edge_weights.append(count)
+                    sa = subject_by_key.get(bundle_keys[i], {})
+                    sb = subject_by_key.get(bundle_keys[j], {})
+                    label_a = sa.get("subject_id", bundle_keys[i])
+                    label_b = sb.get("subject_id", bundle_keys[j])
+                    pair_evidence[
+                        "{} <-> {}".format(label_a, label_b)] = count
+
+        cooccurrence_count = min(edge_weights) if edge_weights else 0
+        collector_count = len(collectors)
+
+        score = 65 + min(cooccurrence_count, 20)
+        if collector_count > 2:
+            score += (collector_count - 2) * 5
+
+        label = self._bundle_label(bundle_keys, subject_by_key)
+        title = "Device bundle: {} devices across {} collectors".format(
+            len(bundle_keys), collector_count)
+        detail = label
+
+        # Build readable strings for the frontend (generic evidence
+        # formatter renders objects as "[object Object]")
+        device_list = ", ".join(
+            d["display_label"] for d in devices)
+        pairs_list = ", ".join(
+            "{}: {}".format(k, v) for k, v in pair_evidence.items())
+
+        evidence = {
+            "_devices": devices,
+            "device_list": device_list,
+            "cooccurrence_pairs": pairs_list,
+            "min_cooccurrence_count": cooccurrence_count,
+            "collector_count": collector_count,
+            "bundle_size": len(bundle_keys),
+            "last_seen": last_seen if last_seen is not None else timestamp,
+        }
+
+        first_collector = devices[0]["collector"] if devices else "ble"
+
+        return self.observation(
+            timestamp, "warning", first_collector,
+            "device_bundle", title, detail, evidence, score)
+
+    # ------------------------------------------------------------------
+    # Generic helpers
+    # ------------------------------------------------------------------
 
     def list_values(self, value):
         """Normalize a stored scalar/list into clean strings."""

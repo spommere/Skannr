@@ -142,6 +142,54 @@ alerts:
     - Yuneec
     oui_prefixes:
     - 60:60:1f
+  flock_camera:
+    enabled: true
+    level: warning
+    min_rssi: -85
+    ssid_patterns:
+    - Flock-*
+    - test_flck
+    - Penguin*
+    - Pigvision
+    - FlockOS
+    - FS_*
+    - '*flock*'
+    - '*flck*'
+    vendor_patterns:
+    - Flock Safety
+    oui_prefixes:
+    - 70:c9:4e
+    - 3c:91:80
+    - d8:f3:bc
+    - 80:30:49
+    - b8:35:32
+    - 14:5a:fc
+    - 74:4c:a1
+    - 08:3a:88
+    - 9c:2f:9d
+    - c0:35:32
+    - 94:08:53
+    - e4:aa:ea
+    - f4:6a:dd
+    - f8:a2:d6
+    - 24:b2:b9
+    - 00:f4:8d
+    - d0:39:57
+    - e8:d0:fc
+    - e0:4f:43
+    - b8:1e:a4
+    - 70:08:94
+    - 58:8e:81
+    - ec:1b:bd
+    - 3c:71:bf
+    - 58:00:e3
+    - 90:35:ea
+    - 5c:93:a2
+    - 64:6e:69
+    - 48:27:ea
+    - a4:cf:12
+    - 82:6b:f2
+    - b4:1e:52
   aprs_weather:
     enabled: true
     level: warning
@@ -287,6 +335,25 @@ history_analysis:
   insights_recent_minutes: 60
   wifi_short_lived_sec: 900
   rtl433_recent_min_events: 1
+  # Cross-collector device bundle correlation (BLE + Wi-Fi). Discovers groups
+  # of devices from different collectors that repeatedly appear and leave
+  # together within tight time windows (e.g. a car's Bluetooth head unit and
+  # its Wi-Fi hotspot). Randomized MACs and anonymous devices are excluded.
+  # A pair must reach min_cooccurrences SYNCHRONIZED sessions to qualify, so
+  # min_cooccurrences effectively sets the per-device session floor as well
+  # (with min_sessions_per_device=2 and min_cooccurrences=3, a pair with
+  # exactly 2 sessions never qualifies).
+  bundle_correlation_enabled: true
+  bundle_correlation_sync_margin_sec: 300
+  bundle_correlation_min_cooccurrences: 3
+  bundle_correlation_min_bundle_size: 2
+  bundle_correlation_max_bundles: 10
+  bundle_correlation_sources:
+  - ble
+  - wifi
+  bundle_correlation_min_sessions_per_device: 2
+  bundle_correlation_max_subjects_per_source: 100
+  bundle_correlation_max_window_span_sec: 3600
   sensitive_ssids: []
 # Reports are longer-window summaries computed from retained history. Report
 # thresholds can intentionally differ from live Findings/Alerts thresholds.
@@ -344,10 +411,15 @@ ui:
   # Background cadence for compact Device History coalescing. Set 0 to disable.
   device_history_update_interval_sec: 60
   derived_stale_after_min: 15
-  derived_auto_refresh_min: 15
-  # Server-side autonomous derived-data rebuild interval in seconds.
-  # 0 disables the scheduler. Default 900 (15 min).
-  derived_scheduler_interval_sec: 900
+  # Server rebuild interval and browser poll interval (minutes). Default 15.
+  # 0 disables the server scheduler and browser polling.
+  derived_refresh_interval_min: 15
+  # Hours of hourly snapshots to retain and backfill. Default 24.
+  # Set to 168 for 7 days — required for the SKIR "Delta Since Last Report"
+  # timeline, which only has data beyond the 24h current window when
+  # retention exceeds 24. 0 disables both retention (never purge) and
+  # backfill.
+  snapshot_retention_hours: 24
   derived_refresh_timeout_sec: 600
   # Manual Refresh runs a real refresh by default whenever raw work is pending.
   # Set this to a positive byte threshold to allow recent small device-history
