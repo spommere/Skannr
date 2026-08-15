@@ -25,3 +25,5 @@ __pycache__/
 *.tar.gz
 *.tgz
 *.zip
+docs/REVIEW_FINDINGS_*.md
+*.swp
