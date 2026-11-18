@@ -7,6 +7,24 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.3.9 - 2026-11-18
+
+- **Collector registry refresh.** Refreshed the four bundled IEEE registries
+  and three Bluetooth SIG assigned-number files from their upstream sources.
+- **Registry updater script.** Added the version-controlled
+  `scripts/update_collector_data.sh` utility for refreshing those seven files.
+- **Native Bluetooth SIG YAML data.** Bundled company identifiers, member UUIDs,
+  and service class mappings now use upstream `.yaml` files. Skannr reads the
+  YAML format directly; the company identifier loader still accepts the legacy
+  `.txt` filename.
+- **Registry source documentation.** README and DESIGN now identify the
+  upstream source for each bundled registry.
+- **Drone Wi-Fi signatures.** Added documented Holy Stone and Hubsan SSID
+  patterns and Holy Stone, FIMI, and Hubsan vendor patterns to the drone alert
+  rules.
+- **OUI YAML quoting.** Quoted Flock OUI prefixes in the example configuration
+  so YAML preserves them as strings.
+
 ## 0.3.8 - 2026-08-15
 
 - **Cross-collector device bundle correlation.** New HistoryAnalyzer rule
@@ -72,9 +90,6 @@ pre-1.0:
 - **Sample list rotation fix.** APRS-IS, ADS-B, and RTL-433 sample lists no
   longer freeze at their first entries. Frontend sample lists display
   newest-first.
-- **Project hygiene.** Validation scripts moved to `validation/`, dev-only test
-  scripts moved to gitignored `testscripts/`.
-
 ## 0.3.4 - 2026-06-27
 
 - **Wi-Fi Monitor CPU reduction.** Kernel BPF filter drops non-management frames

@@ -307,9 +307,9 @@ uuids:
  - uuid: 0xFE74
    name: unwire
  - uuid: 0xFE73
-   name: "Abbott (formerly St. Jude Medical, Inc.)"
+   name: "Abbott Medical (formerly St. Jude Medical, Inc.)"
  - uuid: 0xFE72
-   name: "Abbott (formerly St. Jude Medical, Inc.)"
+   name: "Abbott Medical (formerly St. Jude Medical, Inc.)"
  - uuid: 0xFE71
    name: Plume Design Inc
  - uuid: 0xFE70
@@ -1414,7 +1414,11 @@ uuids:
    name: "Block, Inc."
  - uuid: 0xFC43
    name: "Atmosic Technologies, Inc."
+ - uuid: 0xFC42
+   name: "Atmosic Technologies, Inc."
  - uuid: 0xFC41
+   name: Yoto Limited
+ - uuid: 0xFC40
    name: Yoto Limited
  - uuid: 0xFC3F
    name: Milwaukee Electric Tools
@@ -1442,3 +1446,45 @@ uuids:
    name: Mitsubishi Electric Corporation
  - uuid: 0xFC32
    name: "InPlay, Inc."
+ - uuid: 0xFC31
+   name: Ford Motor Company
+ - uuid: 0xFC30
+   name: Arashi Vision Inc.
+ - uuid: 0xFC2F
+   name: Arashi Vision Inc.
+ - uuid: 0xFC2E
+   name: Arashi Vision Inc.
+ - uuid: 0xFC2D
+   name: Arashi Vision Inc.
+ - uuid: 0xFC2C
+   name: Verkada Inc.
+ - uuid: 0xFC2B
+   name: "Elder Technologies, Inc"
+ - uuid: 0xFC2A
+   name: Troo Corporation
+ - uuid: 0xFC29
+   name: Google LLC
+ - uuid: 0xFC28
+   name: TechnoPartner Tecnologia Ltda.
+ - uuid: 0xFC27
+   name: Barking Labs Corp.
+ - uuid: 0xFC26
+   name: "Hudl, Inc."
+ - uuid: 0xFC25
+   name: "Trackonomy Systems, Inc."
+ - uuid: 0xFC24
+   name: Electronics and Telecommunications Research Institute
+ - uuid: 0xFC23
+   name: Helvar Oy Ab
+ - uuid: 0xFC22
+   name: "InPlay, Inc."
+ - uuid: 0xFC21
+   name: Plejd AB
+ - uuid: 0xFC20
+   name: PreStartGo Pty Ltd
+ - uuid: 0xFC1F
+   name: Eight Sleep Inc.
+ - uuid: 0xFC1E
+   name: Atomis Inc.
+ - uuid: 0xFC1D
+   name: BKS GmbH

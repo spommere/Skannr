@@ -628,13 +628,13 @@ def bluetooth_uuid_names():
 
     Company identifiers are manufacturer-data IDs and are handled by the BLE
     collector. This lookup covers Bluetooth UUID assigned-number files such as
-    member_uuids.txt, where values like 0xFEAF identify a vendor/member UUID
+    member_uuids.yaml, where values like 0xFEAF identify a vendor/member UUID
     advertised in the service UUID list. It also accepts Bluetooth classic
     service class files so older/common 16-bit service UUIDs like 0x110A can
     be resolved in the BLE UI.
 
     Results are cached for the process lifetime.  The source files are
-    small (~36 KB total) and do not change at runtime.
+    small (~250 KiB total for the bundled files) and do not change at runtime.
     """
     global _BLUETOOTH_UUID_NAMES_CACHE
     if _BLUETOOTH_UUID_NAMES_CACHE is not None:

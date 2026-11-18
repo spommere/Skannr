@@ -7307,12 +7307,6 @@ CB0000-CB0FFF                 (base 16)                     Konsmetal S.A.
                                                             Warsaw    00-028                             
                                                             PL                                           
 
-00-50-C2                      (hex)                         YOKOWO CO.,LTD                               
-CA5000-CA5FFF                 (base 16)                     YOKOWO CO.,LTD                               
-                                                            5-11 Takinogawa 7-Chome Kita-ku              
-                                                            Tokyo    114-8515                            
-                                                            JP                                           
-
 00-50-C2                      (hex)                         Kiefer technic GmbH                          
 CA0000-CA0FFF                 (base 16)                     Kiefer technic GmbH                          
                                                             Feldbacher Strasse 77                        
@@ -10564,6 +10558,12 @@ E00000-E00FFF                 (base 16)                     Aplex Technology Inc
                                                             15F-1, No.186, Jian Yi Road                  
                                                             Zhonghe District  New Taipei City 235   -    
                                                             TW                                           
+
+00-50-C2                      (hex)                         YOKOWO CO., LTD.                             
+CA5000-CA5FFF                 (base 16)                     YOKOWO CO., LTD.                             
+                                                            5-11 Takinogawa 7-Chome Kita-ku              
+                                                            Tokyo    114-8515                            
+                                                            JP                                           
 
 00-50-C2                      (hex)                         Karl DUNGS GmbH & Co. KG                     
 7F9000-7F9FFF                 (base 16)                     Karl DUNGS GmbH & Co. KG                     

@@ -2109,42 +2109,43 @@ Skannr parses classic OUI `(hex)` rows and MA-M/MA-S/IAB `(base 16)` ranges,
 then uses longest-prefix matching. When a MAC has the locally administered bit
 set, Skannr identifies it as locally administered/randomized.
 
-Skannr does not download or update these files. Replace them manually and
-restart Skannr to rebuild the in-memory lookup cache.
+Skannr does not update these files at runtime. The repository includes the
+version-controlled updater `scripts/update_collector_data.sh`. Run it from the
+checkout to refresh all seven bundled registry files, then restart Skannr to
+rebuild the in-memory lookup cache.
 
-The Wi-Fi manufacturer files currently bundled in this scratch tree were
-sourced on 2026-05-18.
+The Wi-Fi manufacturer files currently bundled here were refreshed from IEEE
+on 2026-11-18.
 
 ## BLE Manufacturer Names
 
 BLE advertisements may include Bluetooth SIG company identifiers such as
 `0x004C`. Skannr can resolve these IDs offline if this file exists:
 
-- `src/skannr/data/collectors/company_identifiers.txt`: copied content from `https://www.bluetooth.com/specifications/assigned-numbers/company-identifiers/`
+- `src/skannr/data/collectors/company_identifiers.yaml`: copied from the Bluetooth SIG [`company_identifiers.yaml`](https://bitbucket.org/bluetooth-SIG/public/src/main/assigned_numbers/company_identifiers/company_identifiers.yaml).
 
 Expected content format:
 
 ```yaml
-- value: 0x10C4
-  name: 'OPICA GmbH'
-
-- value: 0x004C
-  name: 'Apple, Inc.'
+company_identifiers:
+  - value: 0x114E
+    name: 'AutoStoa LLC'
 ```
 
 When the file is missing or an ID is not listed, Skannr keeps showing the raw
 ID, for example `0x004C`.
 
-Skannr does not download or update this file. Replace it manually and restart
-Skannr to rebuild the in-memory lookup cache.
+Skannr does not update this file at runtime. Use the version-controlled
+`scripts/update_collector_data.sh` to refresh all seven bundled registry files,
+then restart Skannr to rebuild the in-memory lookup cache.
 
-The BLE company identifier file currently bundled in this scratch tree was
-sourced on 2026-05-18.
+The BLE company identifier file currently bundled here was copied from the
+Bluetooth SIG YAML on 2026-11-18.
 
 ## Bluetooth UUID Names
 
 Bluetooth company identifiers and Bluetooth UUIDs are different assigned-number
-spaces. `company_identifiers.txt` resolves manufacturer-data IDs. Advertised
+spaces. `company_identifiers.yaml` resolves manufacturer-data IDs. Advertised
 BLE service/member UUIDs are decoded separately.
 
 Skannr has a small built-in table for common service UUIDs such as:
@@ -2153,10 +2154,16 @@ Skannr has a small built-in table for common service UUIDs such as:
 - `0x180F`: Battery
 - `0x1812`: Human Interface Device
 
-For broader offline decoding, place any of these optional Bluetooth SIG UUID
-files under `src/skannr/data/collectors/`:
+The bundled Bluetooth UUID data files come from these Bluetooth SIG YAMLs:
 
-- `src/skannr/data/collectors/member_uuids.txt`
+- `src/skannr/data/collectors/member_uuids.yaml`:
+  [`member_uuids.yaml`](https://bitbucket.org/bluetooth-SIG/public/src/main/assigned_numbers/uuids/member_uuids.yaml)
+- `src/skannr/data/collectors/service_class.yaml`:
+  [`service_class.yaml`](https://bitbucket.org/bluetooth-SIG/public/src/main/assigned_numbers/uuids/service_class.yaml)
+
+For additional GATT UUID mappings, place either of these optional Bluetooth
+SIG files under `src/skannr/data/collectors/`:
+
 - `src/skannr/data/collectors/service_uuids.txt`
 - `src/skannr/data/collectors/characteristic_uuids.txt`
 

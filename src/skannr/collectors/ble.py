@@ -1129,16 +1129,19 @@ class BLECollector(BaseCollector):
     def company_identifiers(self):
         """Load optional offline Bluetooth SIG company-id mappings.
 
-        Shipped text data lives under src/skannr/data/collectors. Optional
-        YAML overrides can live under config/collectors. The expected public
-        SIG shape is a list of entries like:
-          - value: 0x10C4
-            name: 'OPICA GmbH'
+        Shipped YAML data lives under src/skannr/data/collectors. Optional
+        YAML overrides can live under config/collectors. The SIG file wraps
+        entries under `company_identifiers`, for example:
+          company_identifiers:
+            - value: 0x114E
+              name: 'AutoStoa LLC'
         """
         if self._company_identifiers is not None:
             return self._company_identifiers
         self._company_identifiers = {}
         candidates = [
+            os.path.join(DATA_COLLECTORS_DIR, "company_identifiers.yaml"),
+            # Keep compatibility with installations carrying the old filename.
             os.path.join(DATA_COLLECTORS_DIR, "company_identifiers.txt"),
             os.path.join(CONFIG_COLLECTORS_DIR, "company_identifiers.yaml"),
             os.path.join(CONFIG_COLLECTORS_DIR, "company_identifiers.yml"),

@@ -53,6 +53,9 @@ DEFAULT_ALERT_CONFIG = {
             "Mini*",
             "Autel*",
             "Parrot*",
+            "HolyStoneFPV*",
+            "HolyStoneEIS-*",
+            "HUBSAN_H*",
         ],
         "vendor_patterns": [
             "DJI",
@@ -60,6 +63,9 @@ DEFAULT_ALERT_CONFIG = {
             "Autel",
             "Parrot",
             "Yuneec",
+            "Holy Stone",
+            "Fimi",
+            "Hubsan",
         ],
         "oui_prefixes": [
             "60:60:1f",

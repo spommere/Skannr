@@ -12231,6 +12231,3 @@ company_identifiers:
   - value: 0x0000
     name: 'Ericsson AB'
 
-  - value: 0xDEAD
-    name: 'Test'
-

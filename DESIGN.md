@@ -606,10 +606,11 @@ later drilldown.
 Skannr decodes common Bluetooth SIG UUIDs for display. It has a small built-in
 table for common service UUIDs such as `0x180A` Device Information, and can
 also load optional offline UUID assigned-number files from
-`src/skannr/data/collectors/member_uuids.txt`,
+`src/skannr/data/collectors/member_uuids.yaml`,
+`src/skannr/data/collectors/service_class.yaml`,
 `src/skannr/data/collectors/service_uuids.txt`, and
 `src/skannr/data/collectors/characteristic_uuids.txt`. This is separate from
-`company_identifiers.txt`, which resolves manufacturer-data company IDs.
+`company_identifiers.yaml`, which resolves manufacturer-data company IDs.
 Standard service UUID labels and member/vendor UUID labels are displayed in
 Services / UUIDs fields. Member UUIDs are labeled explicitly, for example
 `Member UUID FEAF: Nest Labs Inc`. Unknown UUIDs remain visible as raw values.
@@ -1763,12 +1764,12 @@ locally administered/randomized when applicable.
 
 Bluetooth company lookup:
 
-- `src/skannr/data/collectors/company_identifiers.txt`: `https://www.bluetooth.com/specifications/assigned-numbers/company-identifiers/`
+- `src/skannr/data/collectors/company_identifiers.yaml`: Bluetooth SIG [`company_identifiers.yaml`](https://bitbucket.org/bluetooth-SIG/public/src/main/assigned_numbers/company_identifiers/company_identifiers.yaml)
 
 Bluetooth UUID lookup:
 
-- `src/skannr/data/collectors/member_uuids.txt`: Bluetooth SIG member/vendor UUID assignments,
-  such as `0xFEAF` for Nest Labs Inc.
+- `src/skannr/data/collectors/member_uuids.yaml`: Bluetooth SIG [`member_uuids.yaml`](https://bitbucket.org/bluetooth-SIG/public/src/main/assigned_numbers/uuids/member_uuids.yaml), with member/vendor UUID assignments such as `0xFEAF` for Nest Labs Inc.
+- `src/skannr/data/collectors/service_class.yaml`: Bluetooth SIG [`service_class.yaml`](https://bitbucket.org/bluetooth-SIG/public/src/main/assigned_numbers/uuids/service_class.yaml)
 - `src/skannr/data/collectors/service_uuids.txt`: standard GATT service UUID assignments, such
   as `0x180A` for Device Information.
 - `src/skannr/data/collectors/characteristic_uuids.txt`: standard GATT characteristic UUID
@@ -1963,8 +1964,9 @@ complexity before the collector set stabilizes.
       app.js
       style.css
     data/collectors/
-      company_identifiers.txt
-      member_uuids.txt
+      company_identifiers.yaml
+      member_uuids.yaml
+      service_class.yaml
       oui.txt
       mam.txt
       oui36.txt
