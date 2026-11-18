@@ -12,8 +12,11 @@ skannr:
   # listeners:
   #   - "0.0.0.0:5004"
   #   - "[::]:5006"
-  # Python logging level for the web process and collectors. Common values are
-  # DEBUG, INFO, WARNING, and ERROR.
+  # Python logging level for the web process and collectors. INFO (default)
+  # records only lifecycle events (start/stop) plus warnings and errors in
+  # skannr.log. DEBUG adds per-cycle diagnostics (derived-refresh timing, SSE
+  # connects, per-feed chatter) — equivalent to running with --debug. Common
+  # values are DEBUG, INFO, WARNING, and ERROR.
   log_level: INFO
 
 # Persistence controls where raw JSONL collector events are written and how long

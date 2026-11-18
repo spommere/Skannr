@@ -341,7 +341,7 @@ def events():
     client = queue.Queue(maxsize=runtime_int("sse_queue_size", 200, minimum=1))
     runtime["sse_clients"].append(client)
     heartbeat_sec = runtime_int("sse_heartbeat_sec", 15, minimum=1)
-    logging.info(
+    logging.debug(
         "SSE client connected active_clients=%s heartbeat_sec=%s",
         len(runtime["sse_clients"]),
         heartbeat_sec,
@@ -389,7 +389,7 @@ def events():
                 runtime["sse_clients"].remove(client)
             except ValueError:
                 pass
-            logging.info(
+            logging.debug(
                 "SSE client disconnected active_clients=%s",
                 len(runtime["sse_clients"]),
             )
@@ -611,7 +611,7 @@ def view_metadata():
 def ui_debug():
     """Record low-volume browser diagnostics in the Skannr log."""
     payload = request.get_json(silent=True) or {}
-    logging.info(
+    logging.debug(
         "ui_debug client=%s event=%s detail=%s",
         payload.get("client_id") or "unknown",
         payload.get("event") or "unknown",
@@ -800,7 +800,7 @@ def json_response(payload, status=200, route_started=None):
     if encoding == "gzip":
         response.headers["Content-Encoding"] = "gzip"
         response.headers["Vary"] = "Accept-Encoding"
-    logging.info(
+    logging.debug(
         "%s response status=%s json_bytes=%s wire_bytes=%s encoding=%s "
         "serialize=%.2fs gzip=%.2fs route_elapsed=%.2fs",
         request.path,
@@ -926,7 +926,7 @@ def derived_views_status():
 def derived_views_ack():
     """Record that one browser finished rendering a derived bundle."""
     payload = request.get_json(silent=True) or {}
-    logging.info(
+    logging.debug(
         "derived ack client=%s window=%s generated_at=%s sections=%s",
         payload.get("client_id") or "unknown",
         payload.get("window") or "",
@@ -1815,7 +1815,7 @@ def _cached_load(key, loader, window_days):
     """
     started = time.monotonic()
     cached_derived_view(key, loader, window_days)
-    logging.info(
+    logging.debug(
         "derived cached load %s finished elapsed=%.2fs",
         key,
         time.monotonic() - started,
@@ -2184,7 +2184,7 @@ def build_derived_views(window_days="default", force=False):
 
     started, status = derived_refresh.try_start(window_days)
     if not started:
-        logging.info(
+        logging.debug(
             "derived refresh request joined active refresh; "
             "window=%s elapsed=%.1fs phase=%s/%s stage=%s",
             status.get("window"),
@@ -2238,11 +2238,11 @@ def build_derived_views_unlocked(window_days="default", force=False):
     window_days = resolve_window_days(window_days)
     started = time.monotonic()
     mode = "refresh" if force else "cached"
-    logging.info("derived views %s started; window=%s", mode, window_days)
+    logging.debug("derived views %s started; window=%s", mode, window_days)
     if force:
         reuse_response = reuse_recent_refresh_for_small_delta(window_days)
         if reuse_response is not None:
-            logging.info(
+            logging.debug(
                 "derived views refresh reused recent cached bundle; window=%s elapsed=%.2fs",
                 window_days,
                 time.monotonic() - started,
@@ -2278,7 +2278,7 @@ def build_derived_views_unlocked(window_days="default", force=False):
             if repair_response:
                 return repair_response
     bundle = build_cached_derived_bundle(window_days, mode=mode)
-    logging.info(
+    logging.debug(
         "derived views %s finished; window=%s elapsed=%.2fs",
         mode,
         window_days,
@@ -2301,7 +2301,7 @@ def reuse_recent_refresh_for_small_delta(window_days):
     pending_stats = subject_history_pending_jsonl_stats(history)
     pending_bytes = int(pending_stats.get("pending_bytes") or 0)
     threshold = small_delta_reuse_max_pending_bytes()
-    logging.info(
+    logging.debug(
         "derived manual refresh small-delta check finished elapsed=%.2fs "
         "effective_pending_raw=%s effective_pending_bytes=%s threshold_bytes=%s "
         "effective_pending_by_collector=%s subject_checkpoint_pending_bytes=%s "
@@ -2394,7 +2394,7 @@ def build_cached_derived_bundle(window_days, mode="cached"):
         bundle["data_version_epoch"] = (
             max(section_epochs) if section_epochs else generated_at_epoch
         )
-    logging.info(
+    logging.debug(
         "derived views %s reused cached summaries; window=%s generated_at=%s",
         mode,
         window_days,
@@ -2428,7 +2428,7 @@ def refresh_stale_cached_dependents(window_days):
         return None
     started, status = derived_refresh.try_start(window_days, mode="repair")
     if not started:
-        logging.info(
+        logging.debug(
             "derived cached repair joined active operation; "
             "window=%s elapsed=%.1fs phase=%s/%s stage=%s",
             status.get("window"),
@@ -2462,7 +2462,7 @@ def refresh_pending_raw_logs(window_days):
     if not subject_history_has_pending_jsonl(history):
         return None
     if recent_successful_derived_refresh():
-        logging.info(
+        logging.debug(
             "derived cached load found pending raw JSONL but recent refresh "
             "completed; deferring to normal refresh interval; window=%s "
             "subject_history_generated=%s",
@@ -2472,7 +2472,7 @@ def refresh_pending_raw_logs(window_days):
         return None
     started, status = derived_refresh.try_start(window_days, mode="refresh")
     if not started:
-        logging.info(
+        logging.debug(
             "derived cached load noticed active raw-log refresh; "
             "serving cached bundle; window=%s elapsed=%.1fs phase=%s/%s stage=%s",
             status.get("window"),
@@ -2482,7 +2482,7 @@ def refresh_pending_raw_logs(window_days):
             status.get("stage") or "unknown",
         )
         return None
-    logging.info(
+    logging.debug(
         "derived cached load found raw JSONL beyond Subject History checkpoint; "
         "starting background refresh; window=%s subject_history_generated=%s",
         window_days,
@@ -2712,11 +2712,11 @@ def derived_refresh_scheduler_loop(interval_sec):
         cycle_started = time.monotonic()
         try:
             if derived_refresh.is_active():
-                logging.info("derived scheduler skipped; refresh already in progress")
+                logging.debug("derived scheduler skipped; refresh already in progress")
             else:
-                logging.info("derived scheduler triggering periodic rebuild")
+                logging.debug("derived scheduler triggering periodic rebuild")
                 build_derived_views(force=True)
-                logging.info(
+                logging.debug(
                     "derived scheduler rebuild finished elapsed=%.2fs",
                     time.monotonic() - cycle_started,
                 )
@@ -2761,14 +2761,14 @@ def sleep_until_shutdown(seconds):
 def update_compact_device_history(reason="periodic"):
     """Advance compact Device History without rebuilding Subject History."""
     if derived_refresh.is_active():
-        logging.info(
+        logging.debug(
             "device_history background update skipped reason=%s active_refresh=true",
             reason,
         )
         return None
     lock = runtime["device_history_update_lock"]
     if not lock.acquire(blocking=False):
-        logging.info(
+        logging.debug(
             "device_history background update skipped reason=%s active_update=true",
             reason,
         )
@@ -2782,7 +2782,7 @@ def update_compact_device_history(reason="periodic"):
         )
         started = time.monotonic()
         summary = builder.build_summary()
-        logging.info(
+        logging.debug(
             "device_history background build finished reason=%s elapsed=%.2fs "
             "records=%s incremental_records=%s incremental_by_collector=%s "
             "raw_read_stats=%s",
@@ -2796,7 +2796,7 @@ def update_compact_device_history(reason="periodic"):
         prune_started = time.monotonic()
         summary, pruned_bluetooth = builder.prune_low_value_bluetooth_devices(summary)
         summary, pruned_ap_sessions = builder.prune_stale_ap_sessions(summary)
-        logging.info(
+        logging.debug(
             "device_history background prune finished reason=%s elapsed=%.2fs "
             "pruned_bluetooth=%s pruned_ap_sessions=%s",
             reason,
@@ -3020,7 +3020,7 @@ def repair_stale_cached_dependents_unlocked(window_days, history_epoch):
         history = runtime.get("subject_history") or {}
         analysis = runtime.get("history_analysis") or {}
     if dependent_summary_is_stale(analysis, history_epoch, window_days):
-        logging.info(
+        logging.debug(
             "derived cached repair refreshing history_analysis; "
             "subject_history_generated=%s analysis_generated=%s",
             history.get("generated_at") or "",
@@ -3030,7 +3030,7 @@ def repair_stale_cached_dependents_unlocked(window_days, history_epoch):
     with runtime["derived_cache_lock"]:
         reports = runtime.get("reports") or {}
     if dependent_summary_is_stale(reports, history_epoch, window_days):
-        logging.info(
+        logging.debug(
             "derived cached repair refreshing reports; "
             "subject_history_generated=%s reports_generated=%s "
             "reports_history_generated=%s",
@@ -3067,7 +3067,7 @@ def summary_generated_epoch(summary):
 def timed_derived_stage(name, callback, mode):
     """Run one derived-data stage and log elapsed time for hang diagnosis."""
     started, step, total, label = derived_refresh.start_phase(mode, name)
-    logging.info(
+    logging.debug(
         "derived phase %s/%s %s started; stage=%s",
         step,
         total,
@@ -3077,7 +3077,7 @@ def timed_derived_stage(name, callback, mode):
     try:
         return callback()
     finally:
-        logging.info(
+        logging.debug(
             "derived phase %s/%s %s finished; stage=%s elapsed=%.2fs",
             step,
             total,
@@ -3097,7 +3097,7 @@ def run_parallel_derived_stages(group_name, tasks):
     so the backend never publishes a partially refreshed bundle.
     """
     started, step, total, label = derived_refresh.start_phase("refresh", group_name)
-    logging.info(
+    logging.debug(
         "derived phase %s/%s %s started; stage=%s", step, total, label, group_name
     )
     errors = []
@@ -3116,7 +3116,7 @@ def run_parallel_derived_stages(group_name, tasks):
     elapsed = time.monotonic() - started
     if errors:
         raise errors[0][1]
-    logging.info(
+    logging.debug(
         "derived phase %s/%s %s finished; stage=%s elapsed=%.2fs",
         step,
         total,
@@ -3130,11 +3130,11 @@ def run_parallel_derived_stages(group_name, tasks):
 def run_derived_worker(name, callback):
     """Run one member of a parallel derived refresh group."""
     started = time.monotonic()
-    logging.info("derived worker %s started", name)
+    logging.debug("derived worker %s started", name)
     try:
         return callback()
     finally:
-        logging.info(
+        logging.debug(
             "derived worker %s finished elapsed=%.2fs",
             name,
             time.monotonic() - started,
@@ -5137,12 +5137,12 @@ def apply_live_overlay_and_prune_device_history(
         full_device_summary,
         copy_summary=not persist,
     )
-    logging.info(
+    logging.debug(
         "derived device_history live overlay finished elapsed=%.2fs",
         time.monotonic() - overlay_started,
     )
     if overlay_stats["wifi"] or overlay_stats["bluetooth"]:
-        logging.info(
+        logging.debug(
             "derived live overlay applied; wifi=%s/%s bluetooth=%s/%s "
             "max_lag=%.1fs newest_live_wifi=%s newest_history_wifi=%s "
             "newest_live_bluetooth=%s newest_history_bluetooth=%s",
@@ -5157,7 +5157,7 @@ def apply_live_overlay_and_prune_device_history(
             format_log_epoch(overlay_stats.get("newest_history_bluetooth_epoch")),
         )
     else:
-        logging.info(
+        logging.debug(
             "derived live overlay checked; live_wifi=%s live_bluetooth=%s "
             "newest_live_wifi=%s newest_history_wifi=%s "
             "newest_live_bluetooth=%s newest_history_bluetooth=%s",
@@ -5175,7 +5175,7 @@ def apply_live_overlay_and_prune_device_history(
     full_device_summary, pruned_ap_sessions = device_builder.prune_stale_ap_sessions(
         full_device_summary
     )
-    logging.info(
+    logging.debug(
         "derived device_history prune finished elapsed=%.2fs "
         "pruned_bluetooth=%s pruned_ap_sessions=%s",
         time.monotonic() - prune_started,
@@ -5197,7 +5197,7 @@ def build_or_reuse_device_history_for_refresh(log_dir, window_days):
         max_age_sec = max(device_history_update_interval_sec() * 2, 30)
         cached_summary, age_sec = recent_device_history_summary(max_age_sec)
         if isinstance(cached_summary, dict):
-            logging.info(
+            logging.debug(
                 "derived device_history reused cached summary while background "
                 "update is active; age=%ss max_age=%ss records=%s generated=%s",
                 age_sec,
@@ -5209,21 +5209,21 @@ def build_or_reuse_device_history_for_refresh(log_dir, window_days):
                 device_builder, cached_summary, persist=False
             )
         wait_started = time.monotonic()
-        logging.info(
+        logging.debug(
             "derived device_history waiting for active background update; "
             "cached_age=%s max_age=%s",
             age_sec if age_sec is not None else "none",
             max_age_sec,
         )
         lock.acquire()
-        logging.info(
+        logging.debug(
             "derived device_history wait for active background update finished elapsed=%.2fs",
             time.monotonic() - wait_started,
         )
     try:
         started = time.monotonic()
         full_device_summary = device_builder.build_summary()
-        logging.info(
+        logging.debug(
             "derived device_history build_summary finished elapsed=%.2fs records=%s "
             "incremental_records=%s incremental_by_collector=%s raw_read_stats=%s",
             time.monotonic() - started,
@@ -5386,7 +5386,7 @@ def _save_hourly_snapshot(subject_display):
             return
         snap = build_snapshot_from_sh(subject_display, hour_epoch=hour_epoch)
         save_snapshots({hour_epoch: snap}, snapshot_dir, retention_hours=snapshot_retention_hours())
-        logging.info(
+        logging.debug(
             "hourly snapshot saved hour=%s subjects=%s",
             time.strftime("%Y-%m-%d %H:00", time.localtime(hour_epoch)),
             sum(
@@ -5408,7 +5408,7 @@ def refresh_subject_history(window_days="default"):
     cached_full_summary = read_json_file(subject_history_path())
     pending_stats = subject_history_pending_jsonl_stats(cached_full_summary)
     pending_raw = pending_stats.get("pending", False)
-    logging.info(
+    logging.debug(
         "derived subject_history pending check finished elapsed=%.2fs "
         "pending_raw=%s pending_bytes=%s pending_files=%s pending_by_collector=%s "
         "cached_generated=%s",
@@ -5435,7 +5435,7 @@ def refresh_subject_history(window_days="default"):
             runtime["device_history"] = device_display
         _push_known_bssids_to_alerts(subject_display)
         _save_hourly_snapshot(subject_display)
-        logging.info(
+        logging.debug(
             "derived subject_history reused cached summary; window=%s elapsed=%.2fs subjects=%s generated=%s",
             window_days,
             time.monotonic() - reuse_started,
@@ -5456,7 +5456,7 @@ def refresh_subject_history(window_days="default"):
     subject_started = time.monotonic()
     full_subject_summary = subject_builder.build_summary()
     full_subject_summary = apply_subject_annotations(full_subject_summary)
-    logging.info(
+    logging.debug(
         "derived subject_history build_summary finished elapsed=%.2fs subjects=%s "
         "records=%s incremental_records=%s incremental_by_collector=%s raw_read_stats=%s",
         time.monotonic() - subject_started,
@@ -5471,7 +5471,7 @@ def refresh_subject_history(window_days="default"):
     try:
         save_started = time.monotonic()
         save_json_file(subject_history_path(), full_subject_summary)
-        logging.info(
+        logging.debug(
             "derived subject_history save finished elapsed=%.2fs",
             time.monotonic() - save_started,
         )
@@ -5481,11 +5481,11 @@ def refresh_subject_history(window_days="default"):
     display_started = time.monotonic()
     subject_display = subject_builder.display_summary(full_subject_summary, window_days)
     device_display = device_history_from_subject_history(subject_display, window_days)
-    logging.info(
+    logging.debug(
         "derived subject_history display_summary finished elapsed=%.2fs",
         time.monotonic() - display_started,
     )
-    logging.info(
+    logging.debug(
         "derived subject_history display cache disabled; display derived on demand"
     )
     with runtime["derived_cache_lock"]:
@@ -5534,7 +5534,7 @@ def refresh_history_analysis(window_days="default"):
     if history_epoch and not dependent_summary_is_stale(
         cached_analysis, history_epoch, window_days
     ):
-        logging.info(
+        logging.debug(
             "derived history_analysis reused cached summary; window=%s generated=%s subject_history_generated=%s observations=%s",
             window_days,
             (cached_analysis or {}).get("generated_at") or "",
@@ -5563,7 +5563,7 @@ def refresh_history_analysis(window_days="default"):
             cutoff_epoch=now_epoch() - 86400,
         )
     analysis = analyzer.analyze(analysis_input, bundle_history=bundle_input)
-    logging.info(
+    logging.debug(
         "derived history_analysis build finished elapsed=%.2fs observations=%s",
         time.monotonic() - analyze_started,
         len(analysis.get("observations") or []),
@@ -5578,7 +5578,7 @@ def refresh_history_analysis(window_days="default"):
     try:
         save_started = time.monotonic()
         save_analysis(analysis_path, analysis)
-        logging.info(
+        logging.debug(
             "derived history_analysis save finished elapsed=%.2fs",
             time.monotonic() - save_started,
         )
@@ -5607,7 +5607,7 @@ def refresh_reports(window_days="default"):
     if history_epoch and not dependent_summary_is_stale(
         cached_reports, history_epoch, window_days
     ):
-        logging.info(
+        logging.debug(
             "derived reports reused cached summary; window=%s generated=%s subject_history_generated=%s reports=%s",
             window_days,
             (cached_reports or {}).get("generated_at") or "",
@@ -5633,7 +5633,7 @@ def refresh_reports(window_days="default"):
         insight_data=insight_data,
         collector_health=collector_health,
     )
-    logging.info(
+    logging.debug(
         "derived reports build finished elapsed=%.2fs reports=%s",
         time.monotonic() - build_started,
         len(report.get("reports") or []),
@@ -5642,7 +5642,7 @@ def refresh_reports(window_days="default"):
     try:
         save_started = time.monotonic()
         save_reports(reports_path(), report)
-        logging.info(
+        logging.debug(
             "derived reports save finished elapsed=%.2fs",
             time.monotonic() - save_started,
         )

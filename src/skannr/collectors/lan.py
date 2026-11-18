@@ -682,7 +682,7 @@ class LANCollector(BaseCollector):
             self.add_vendor(item)
             output.append(item)
         if self._active_arp_scan_refreshed:
-            logging.info(
+            logging.debug(
                 "LAN poll merged_subjects=%s raw_records=%s active_arp_raw_rows=%s "
                 "active_arp_retained_subjects=%s",
                 len(output),
@@ -990,7 +990,7 @@ class LANCollector(BaseCollector):
             self.note_listener_warning("avahi-browse failed: {}".format(exc))
             return []
         records = self.parse_avahi_browse_output(output)
-        logging.info(
+        logging.debug(
             "LAN avahi-browse parsed_rows=%s command=%s", len(records), command
         )
         return records
@@ -1060,7 +1060,7 @@ class LANCollector(BaseCollector):
         self.update_arp_scan_cache(fresh_records)
         self._arp_scan_records = self.current_arp_scan_records()
         self._active_arp_scan_refreshed = True
-        logging.info(
+        logging.debug(
             "LAN active arp-scan cache fresh_rows=%s retained_subjects=%s retention_sec=%.0f",
             len(fresh_records),
             len(self._arp_scan_records),
@@ -1151,7 +1151,7 @@ class LANCollector(BaseCollector):
                 continue
             self.note_arp_scan_output_warnings(output)
             parsed = self.parse_arp_scan_output(output, interface)
-            logging.info(
+            logging.debug(
                 "LAN active arp-scan interface=%s command=%s cwd=%s parsed_rows=%s",
                 interface or "(default)",
                 " ".join(command),

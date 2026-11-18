@@ -228,6 +228,12 @@ SKANNR_DIR=/path/to/skannr
 sudo env PYTHONPATH="$SKANNR_DIR/src" "$SKANNR_DIR/.venv/bin/python" -m skannr.main --config "$SKANNR_DIR/~/.config/skannr/skannr.yaml"
 ```
 
+By default `runtime/logs/skannr.log` is quiet: it records process and collector
+start/stop, startup configuration summaries, and warnings/errors only. Per-cycle
+diagnostics (derived-refresh timing, SSE connects, per-request and per-feed
+detail) are written at DEBUG level and only appear with `--debug` or
+`log_level: DEBUG`.
+
 For live troubleshooting, start with `--debug`:
 
 ```bash
@@ -463,7 +469,9 @@ installs. `config/` is machine-specific local state.
 `skannr`:
 
 - `listeners`: quoted `host:port` or `[IPv6]:port` HTTP listener strings.
-- `log_level`: Python logging level such as `INFO` or `DEBUG`.
+- `log_level`: Python logging level such as `INFO` or `DEBUG`. `INFO`
+  (default) logs lifecycle events (start/stop) plus warnings and errors;
+  `DEBUG` adds per-cycle diagnostics — the same verbosity as `--debug`.
 
 `persistence`:
 
@@ -977,7 +985,8 @@ kept running.
 
 While a derived refresh is running, the browser polls `/derived_views/status`
 and shows the numbered backend phase in the status strip. Use the same phase
-numbers in `runtime/logs/skannr.log` when debugging a long refresh:
+numbers in `runtime/logs/skannr.log` when debugging a long refresh (phase and
+timing lines are DEBUG-level — start with `--debug` or `log_level: DEBUG`):
 
 - Phase 1/2, Subject History: fold new collector JSONL bytes into compact
   per-collector subject state and the collector-neutral subject cache.

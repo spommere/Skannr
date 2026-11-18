@@ -621,7 +621,7 @@ class APRSISCollector(BaseCollector):
                 self.set_feed_stat(
                     feed, "last_connect_attempt_epoch", round(now_epoch(), 3)
                 )
-                logging.info(
+                logging.debug(
                     "APRS-IS feed connecting name=%s host=%s port=%s "
                     "filter=%s preferred=%s attempt=%s",
                     feed.get("name") or "",
@@ -635,7 +635,7 @@ class APRSISCollector(BaseCollector):
                     asyncio.open_connection(feed["host"], feed["port"]),
                     timeout=timeout,
                 )
-                logging.info(
+                logging.debug(
                     "APRS-IS TCP connected name=%s host=%s port=%s",
                     feed.get("name") or "",
                     feed.get("host") or "",
@@ -644,7 +644,7 @@ class APRSISCollector(BaseCollector):
                 await self.read_server_banner(reader, feed)
                 await self.login(writer, feed)
                 await self.confirm_preferred_server(reader, feed)
-                logging.info(
+                logging.debug(
                     "APRS-IS feed connected name=%s host=%s port=%s filter=%s",
                     feed.get("name") or "",
                     feed.get("host") or "",
@@ -662,7 +662,7 @@ class APRSISCollector(BaseCollector):
                 raise
             except Exception as exc:
                 self.record_disconnect(feed, exc)
-                logging.info(
+                logging.debug(
                     "APRS-IS feed disconnected name=%s host=%s port=%s " "reason=%s %s",
                     feed.get("name") or "",
                     feed.get("host") or "",
@@ -685,7 +685,7 @@ class APRSISCollector(BaseCollector):
                             pass
             if self._running:
                 retry_interval = self.config.get("retry_interval_sec", 5)
-                logging.info(
+                logging.debug(
                     "APRS-IS feed reconnecting name=%s host=%s port=%s " "retry_in=%ss",
                     feed.get("name") or "",
                     feed.get("host") or "",
@@ -705,7 +705,7 @@ class APRSISCollector(BaseCollector):
             self.log_preferred_server_reached(feed)
             return
         timeout = self.preferred_server_timeout(feed)
-        logging.info(
+        logging.debug(
             "APRS-IS preferred server pending name=%s host=%s preferred=%s "
             "timeout=%ss",
             feed.get("name") or "",
@@ -717,7 +717,7 @@ class APRSISCollector(BaseCollector):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
         except asyncio.TimeoutError:
             server_name = self.feed_stats(feed).get("server_name") or "unknown"
-            logging.info(
+            logging.debug(
                 "APRS-IS preferred server timeout name=%s host=%s preferred=%s "
                 "connected=%s",
                 feed.get("name") or "",
@@ -804,7 +804,7 @@ class APRSISCollector(BaseCollector):
         stats["preferred_server_last_miss_reason"] = reason or ""
         limit = self.preferred_server_max_attempts(feed)
         preferred = (feed or {}).get("preferred_servers") or []
-        logging.info(
+        logging.debug(
             "APRS-IS preferred server miss name=%s host=%s preferred=%s "
             "connected=%s reason=%s attempt=%s limit=%s",
             feed.get("name") or "",
@@ -834,7 +834,7 @@ class APRSISCollector(BaseCollector):
         stats = self.feed_stats(feed)
         stats["preferred_server_attempts"] = 0
         stats["preferred_server_fallback"] = False
-        logging.info(
+        logging.debug(
             "APRS-IS preferred server reached name=%s host=%s server=%s " "address=%s",
             feed.get("name") or "",
             feed.get("host") or "",
@@ -883,7 +883,7 @@ class APRSISCollector(BaseCollector):
         try:
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
         except asyncio.TimeoutError:
-            logging.info(
+            logging.debug(
                 "APRS-IS banner timeout feed=%s host=%s port=%s",
                 feed.get("name") or "",
                 feed.get("host") or "",
@@ -924,7 +924,7 @@ class APRSISCollector(BaseCollector):
             except asyncio.TimeoutError:
                 await self.emit_status(feed)
                 if read_timeout > 0 and now_epoch() - last_line_epoch >= read_timeout:
-                    logging.info(
+                    logging.debug(
                         "APRS-IS read timeout name=%s host=%s idle=%ss %s",
                         feed.get("name") or "",
                         feed.get("host") or "",
@@ -936,7 +936,7 @@ class APRSISCollector(BaseCollector):
                     )
                 continue
             if not line:
-                logging.info(
+                logging.debug(
                     "APRS-IS feed closed by server name=%s host=%s %s",
                     feed.get("name") or "",
                     feed.get("host") or "",
@@ -1016,7 +1016,7 @@ class APRSISCollector(BaseCollector):
         self.set_feed_stat(feed, "last_dropped_packet_type", packet_type)
         self.set_feed_stat(feed, "last_dropped_packet", compact_aprs_text(line, 180))
         if aprsis_bool(self.config.get("log_dropped_packets"), True):
-            logging.info(
+            logging.debug(
                 "APRS-IS packet dropped feed=%s reason=%s callsign=%s type=%s "
                 "packet=%s",
                 (feed or {}).get("name") or "",
@@ -1036,7 +1036,7 @@ class APRSISCollector(BaseCollector):
             self.set_feed_stat(feed, "server_name", identity["server_name"])
         if identity.get("server_address"):
             self.set_feed_stat(feed, "server_address", identity["server_address"])
-        logging.info(
+        logging.debug(
             "APRS-IS server comment feed=%s message=%s",
             feed.get("name") or "",
             message,
@@ -1151,7 +1151,7 @@ class APRSISCollector(BaseCollector):
         if previous and now - previous < interval:
             return
         self._last_offline_emit_epoch[feed_name] = now
-        logging.info(
+        logging.debug(
             "APRS-IS feed offline name=%s host=%s port=%s reason=%s",
             feed.get("name") or "",
             feed.get("host") or "",
@@ -1213,7 +1213,7 @@ class APRSISCollector(BaseCollector):
             parsed = self.parse_payload(payload, packet_type, destination)
         except Exception as exc:
             self.record_packet_drop(feed, "parse", line, data)
-            logging.info(
+            logging.debug(
                 "APRS-IS parser failed feed=%s callsign=%s type=%s error=%s",
                 feed.get("name") or "",
                 data.get("callsign") or "",

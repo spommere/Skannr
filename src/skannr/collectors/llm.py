@@ -1078,7 +1078,7 @@ class LLMCollector(BaseCollector):
 
         skir_model = str(self.config.get("skir_model") or "").strip() or None
         effective = skir_model or str(self.config.get("model", ""))
-        logging.info(
+        logging.debug(
             "SKIR model=%s max_tokens=%s context_chars=%s",
             effective,
             max_tok,

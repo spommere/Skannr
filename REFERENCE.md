@@ -31,7 +31,7 @@ Collector files share these top-level fields:
 | Parameter | Meaning |
 | --- | --- |
 | `listeners` | Web listener endpoints. Use `127.0.0.1:5004` for local-only, `0.0.0.0:5004` for all IPv4, or `[::]:5006` for IPv6. |
-| `log_level` | Python logging level for Skannr, such as `INFO` or `DEBUG`. |
+| `log_level` | Python logging level for Skannr, such as `INFO` or `DEBUG`. `INFO` (default) logs lifecycle events (start/stop) plus warnings/errors in `skannr.log`; `DEBUG` adds per-cycle diagnostics — same verbosity as `--debug`. |
 
 ### `persistence`
 

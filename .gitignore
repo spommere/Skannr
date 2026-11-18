@@ -21,6 +21,7 @@ __pycache__/
 
 # Local helper/output files.
 /crtar.sh
+/AGENTS.md
 *.tar
 *.tar.gz
 *.tgz

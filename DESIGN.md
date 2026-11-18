@@ -1298,7 +1298,8 @@ Normal derived-bundle loads also check `/derived_views/status` before reading
 cached summaries. If a forced refresh is active, the browser joins the active
 refresh and waits for completion instead of rendering older cached data.
 Each backend stage logs start/finish timings with an operator-facing phase
-number:
+number at DEBUG level (visible with `--debug` or `log_level: DEBUG`); the
+default INFO log records only lifecycle events plus warnings/errors:
 
 - Phase 1/2, Subject History: fold raw collector logs into the
   collector-neutral subject cache.
@@ -1312,7 +1313,11 @@ the status strip can distinguish a frontend stuck-state from a backend phase
 that is still running.
 Starting Skannr with `--debug` raises process logging to DEBUG and attempts to
 open a graphical terminal tailing `runtime/logs/skannr.log`. On headless or systemd
-deployments the same debug output remains available in the log file.
+deployments the same debug output remains available in the log file. Without the
+flag, `skannr.log` stays at INFO and contains only start/stop lifecycle events,
+startup configuration summaries, and warnings/errors — per-cycle diagnostics are
+DEBUG-level. Setting `log_level: DEBUG` in `skannr.yaml` enables the same
+verbosity without the terminal window.
 When live Wi-Fi/Bluetooth rows arrive, or collector status shows scan events
 have already happened while Subject History is still empty, the browser treats
 that as evidence that raw scan data exists and starts a throttled catch-up
