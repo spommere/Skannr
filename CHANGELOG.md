@@ -13,6 +13,11 @@ pre-1.0:
   and three Bluetooth SIG assigned-number files from their upstream sources.
 - **Registry updater script.** Added the version-controlled
   `scripts/update_collector_data.sh` utility for refreshing those seven files.
+- **Installer syntax fix.** Fixed an unmatched conditional that prevented
+  `install.sh` from running.
+- **Installer tool detection.** Include standard system `sbin` directories in
+  installer checks so tools such as `iw` are found when run by an unprivileged
+  user.
 - **Native Bluetooth SIG YAML data.** Bundled company identifiers, member UUIDs,
   and service class mappings now use upstream `.yaml` files. Skannr reads the
   YAML format directly; the company identifier loader still accepts the legacy

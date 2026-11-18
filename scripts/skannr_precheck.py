@@ -25,6 +25,7 @@ DEFAULT_CONFIG_DIR = (
 )
 DEFAULT_OUTPUT = DEFAULT_CONFIG_DIR / "precheck.yaml"
 DEFAULT_COLLECTOR_DIR = DEFAULT_CONFIG_DIR / "collectors"
+SYSTEM_COMMAND_DIRS = ("/usr/local/sbin", "/usr/sbin", "/sbin")
 
 COLLECTORS = [
     {
@@ -142,8 +143,20 @@ COLLECTORS = [
 ]
 
 
+def command_path(name):
+    """Find commands in PATH and standard sbin dirs omitted by some users."""
+    resolved = shutil.which(name)
+    if resolved:
+        return resolved
+    for directory in SYSTEM_COMMAND_DIRS:
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def command_found(name):
-    return shutil.which(name) is not None
+    return command_path(name) is not None
 
 
 def python_module_found(name):
@@ -155,7 +168,7 @@ def python_module_found(name):
 
 
 def rtl_sdr_hardware_found():
-    rtl_test = shutil.which("rtl_test")
+    rtl_test = command_path("rtl_test")
     if not rtl_test:
         return False, "rtl_test missing; cannot probe RTL-SDR hardware"
     try:
@@ -212,9 +225,12 @@ def interface_sort_key(name):
 
 
 def monitor_mode_interfaces():
+    iw = command_path("iw")
+    if not iw:
+        return []
     try:
         output = subprocess.check_output(
-            ["iw", "dev"],
+            [iw, "dev"],
             stderr=subprocess.STDOUT,
             universal_newlines=True,
             timeout=5,

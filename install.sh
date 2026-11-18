@@ -2,6 +2,10 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Debian/Raspberry Pi OS put administrator commands such as iw in sbin paths,
+# which may be absent from an unprivileged user's non-login PATH.
+PATH="/usr/local/sbin:/usr/sbin:/sbin:$PATH"
+export PATH
 PYTHON_BIN=${PYTHON:-python3}
 VENV_DIR=${VENV_DIR:-"$ROOT_DIR/.venv"}
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/skannr"
@@ -96,6 +100,7 @@ if [ "$FRESH_CONFIG" -eq 1 ]; then
     echo "Applying collector enabled flags from $PRECHECK_FILE"
     "$PYTHON_BIN" "$ROOT_DIR/scripts/skannr_precheck.py" --apply --precheck "$PRECHECK_FILE" --collector-dir "$CONFIG_DIR/collectors"
   fi
+fi
 
 if [ ! -d "$VENV_DIR" ]; then
   "$PYTHON_BIN" -m venv "$VENV_DIR"
