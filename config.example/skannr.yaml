@@ -272,6 +272,10 @@ alerts:
     enabled: true
     level: warning
     critical_level: critical
+    # Alert only when the earthquake origin time is within this many hours.
+    # Older events and later revisions remain in the USGS feed/history.
+    # Set to 0 to disable the age limit.
+    max_event_age_hours: 24
     warning_magnitude_nearby: 4.0
     critical_magnitude_nearby: 5.0
     warning_magnitude_global: 6.5

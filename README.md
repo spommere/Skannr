@@ -593,6 +593,9 @@ installs. `config/` is machine-specific local state.
   because System Status already shows collector setup problems.
 - `noaa_hazard.critical_events`, `critical_severities`: NWS/NHC/tsunami.gov
   hazard terms and severities that escalate to the critical level.
+- `usgs_earthquake.max_event_age_hours`: maximum age of an earthquake, measured
+  from its origin time, for opening or refreshing an alert; `0` disables this
+  limit. Older events and later revisions remain in the USGS feed/history.
 - `usgs_earthquake.warning_magnitude_nearby`,
   `critical_magnitude_nearby`, `warning_magnitude_global`,
   `critical_magnitude_global`, `nearby_radius_km`, `critical_alert_colors`:
@@ -1868,6 +1871,13 @@ Global M6.5+ earthquakes alert by default; global M7.5+ earthquakes are
 critical by default. USGS subjects are keyed by the USGS event ID, and material
 fingerprints include the event time plus magnitude, place, status, felt/CDI/MMI,
 alert color, and tsunami flag.
+
+USGS alerts have a 24-hour maximum event age by default. The limit uses the
+earthquake's origin time, so a later USGS revision to an older event will not
+open or refresh an alert. Older events and their revisions remain available in
+the live feed, Subject History, and Reports. Set
+`alerts.usgs_earthquake.max_event_age_hours` to a different number of hours, or
+`0` to disable the limit.
 
 Reports also include weekly, monthly, and yearly USGS period rows. These rows
 summarize unique earthquake count, local versus global-major count, notable and

@@ -98,6 +98,7 @@ Alerts are the ACK/expiry-oriented layer. Each nested rule usually has `enabled`
 | `ble_tracker.*` | BLE tracker name/manufacturer/service UUID patterns. |
 | `collector_issue.*` | Optional collector availability alerting. Off by default because System Status already shows it. |
 | `noaa_hazard.*` | NOAA severity/event-name alert rules. |
+| `usgs_earthquake.max_event_age_hours` | Maximum earthquake origin age for opening or refreshing an alert; `0` disables the limit. |
 | `usgs_earthquake.*` | Earthquake magnitude, distance, and alert-color thresholds. |
 | `swpc_space_weather.*` | Space-weather alert and critical thresholds. |
 | `lan_gateway_change.*`, `lan_new_device.*` | LAN alert rules. New-device alerting is off by default because normal LANs are noisy. |

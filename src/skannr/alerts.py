@@ -202,6 +202,7 @@ DEFAULT_ALERT_CONFIG = {
         "enabled": True,
         "level": "warning",
         "critical_level": "critical",
+        "max_event_age_hours": 24,
         "warning_magnitude_nearby": 4.0,
         "critical_magnitude_nearby": 5.0,
         "warning_magnitude_global": 6.5,
@@ -1210,6 +1211,13 @@ class AlertEngine:
         if not rule.get("enabled", True):
             return []
         data = clean_usgs_data(data)
+        event_epoch = self.to_number(data.get("event_time_epoch"))
+        max_event_age_hours = self.to_number(rule.get("max_event_age_hours", 24))
+        if max_event_age_hours is None:
+            max_event_age_hours = 24
+        if max_event_age_hours > 0:
+            if event_epoch is None or now - event_epoch > max_event_age_hours * 3600:
+                return []
         magnitude = self.to_number(data.get("magnitude"))
         distance = self.to_number(data.get("distance_km"))
         if magnitude is None:
