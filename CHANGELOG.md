@@ -7,6 +7,13 @@ pre-1.0:
 - `0.2.x`: meaningful feature additions or data format changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
 
+## 0.3.10 - 2026-11-20
+
+- **Derived refresh performance.** Reduced work when updating Subject and Device
+  History and stopped persisting a duplicate BLE compatibility view. This
+  lowers derived-state storage and refresh overhead while preserving the BLE
+  data available to Skannr's views.
+
 ## 0.3.9 - 2026-11-18
 
 - **Collector registry refresh.** Refreshed the four bundled IEEE registries
