@@ -8,7 +8,9 @@ summaries from saved byte offsets on later refreshes.
 
 import copy
 import json
+import logging
 import os
+import time
 from collections import defaultdict
 
 from .bus import local_now
@@ -93,9 +95,29 @@ class WiFiBLEPostprocessor:
             self.save_summary(summary)
         return self.display_summary(summary, self.window_days)
 
-    def build_summary(self, merge_previous=True):
+    def build_summary(self, merge_previous=True, previous_summary=None):
         """Return the full materialized summary without persisting or filtering."""
-        previous = self.load_persisted_summary() if merge_previous else None
+        if not merge_previous:
+            previous = None
+        elif isinstance(previous_summary, dict):
+            previous = previous_summary
+            sanitize_started = time.monotonic()
+            try:
+                self.sanitize_bluetooth_names(previous)
+            except Exception:
+                # Keep the same recovery behavior as load_persisted_summary()
+                # when a supplied cached summary is malformed.
+                logging.debug(
+                    "device_history supplied summary could not be normalized; "
+                    "retrying persisted load"
+                )
+                previous = self.load_persisted_summary()
+            logging.debug(
+                "device_history supplied summary sanitize finished elapsed=%.2fs",
+                time.monotonic() - sanitize_started,
+            )
+        else:
+            previous = self.load_persisted_summary()
         if previous and has_jsonl_checkpoint(previous):
             # Normal fast path: a modern summary already knows how far each
             # collector log file was processed, so only new bytes are scanned.
@@ -207,7 +229,13 @@ class WiFiBLEPostprocessor:
 
     def incremental_update(self, previous):
         """Fold only not-yet-processed JSONL bytes into a persisted summary."""
-        summary = copy.deepcopy(previous)
+        maps_started = time.monotonic()
+        # The record maps below deep-copy every Wi-Fi/BLE record before event
+        # folding. Keep only a shallow summary shell here so we do not also
+        # deep-copy the entire persisted history (including all BLE sessions).
+        # The checkpoint is copied separately because the incremental readers
+        # advance it in place.
+        summary = dict(previous)
         # Persisted JSON cannot store sets, but the event-folding code uses sets
         # for values that accumulate over time. Convert records back to the
         # mutable shape before applying incremental events.
@@ -229,13 +257,22 @@ class WiFiBLEPostprocessor:
             "mac",
             ["names", "service_uuids", "transports"],
         )
+        logging.debug(
+            "device_history incremental record maps finished elapsed=%.2fs "
+            "wifi_aps=%s wifi_clients=%s ble_devices=%s",
+            time.monotonic() - maps_started,
+            len(wifi_aps),
+            len(wifi_clients),
+            len(ble_devices),
+        )
         records_by_collector = defaultdict(int)
         records_read = 0
         read_stats = {}
-        checkpoint = summary.get("checkpoint") or current_jsonl_checkpoint(
-            self.log_dir, ()
+        checkpoint = copy.deepcopy(summary.get("checkpoint")) or (
+            current_jsonl_checkpoint(self.log_dir, ())
         )
 
+        fold_started = time.monotonic()
         for event in read_incremental_jsonl_events(
             self.log_dir, "wifi", checkpoint, read_stats=read_stats
         ):
@@ -266,11 +303,28 @@ class WiFiBLEPostprocessor:
             records_read += 1
             records_by_collector["bt_classic"] += 1
             self.apply_bt_classic_event(event, ble_devices)
+        logging.debug(
+            "device_history incremental event fold finished elapsed=%.2fs "
+            "records=%s by_collector=%s bytes_read=%s",
+            time.monotonic() - fold_started,
+            records_read,
+            dict(records_by_collector),
+            sum(int(values.get("bytes_read") or 0) for values in read_stats.values()),
+        )
+
+        compact_started = time.monotonic()
         bluetooth_devices = self.compact_bluetooth_devices_for_storage(
             self.sorted_records(ble_devices.values())
         )
         wifi_clients_compact = self.compact_wifi_clients_for_storage(
             self.sorted_records(wifi_clients.values())
+        )
+        logging.debug(
+            "device_history incremental compact and sort finished elapsed=%.2fs "
+            "ble_devices=%s wifi_clients=%s",
+            time.monotonic() - compact_started,
+            len(bluetooth_devices),
+            len(wifi_clients_compact),
         )
         files_by_collector = {
             collector: count_jsonl_files(self.log_dir, collector)
@@ -1341,10 +1395,19 @@ class WiFiBLEPostprocessor:
 
     def load_persisted_summary(self):
         """Load the durable device-history file if it exists."""
+        started = time.monotonic()
         try:
             with open(self.state_path, "r", encoding="utf-8") as fh:
                 loaded = json.load(fh)
                 self.sanitize_bluetooth_names(loaded)
+                bluetooth = (loaded.get("ble") or loaded.get("bluetooth") or {})
+                devices = bluetooth.get("devices") or []
+                logging.debug(
+                    "device_history persisted load and sanitize finished "
+                    "elapsed=%.2fs ble_devices=%s",
+                    time.monotonic() - started,
+                    len(devices),
+                )
                 return loaded
         except FileNotFoundError:
             return None
@@ -1375,7 +1438,11 @@ class WiFiBLEPostprocessor:
 
     def save_summary(self, summary):
         """Persist the merged summary so first_seen survives restarts."""
+        started = time.monotonic()
         save_json_atomic(self.state_path, summary)
+        logging.debug(
+            "device_history save finished elapsed=%.2fs", time.monotonic() - started
+        )
 
     def prune_low_value_bluetooth_devices(self, summary):
         """Drop stale anonymous one-off BLE addresses from the materialized cache."""

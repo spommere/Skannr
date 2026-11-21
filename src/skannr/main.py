@@ -2821,7 +2821,7 @@ def subject_history_has_pending_jsonl(history):
     return subject_history_pending_jsonl_stats(history).get("pending", False)
 
 
-def subject_history_pending_jsonl_stats(history):
+def subject_history_pending_jsonl_stats(history, loaded_state=None):
     """Return pending raw work for the current Subject History pipeline.
 
     Device History-backed collectors are materialized upstream and Subject
@@ -2850,6 +2850,8 @@ def subject_history_pending_jsonl_stats(history):
         subject_checkpoint = history.get("checkpoint") or {}
 
     device_summary = read_json_file(device_history_path())
+    if loaded_state is not None:
+        loaded_state["device_history"] = device_summary
     device_checkpoint = None
     device_checkpoint_source = "none"
     if (
@@ -5406,7 +5408,10 @@ def refresh_subject_history(window_days="default"):
     derived_refresh.set_stage_label("Subject History — checking pending data")
     pending_started = time.monotonic()
     cached_full_summary = read_json_file(subject_history_path())
-    pending_stats = subject_history_pending_jsonl_stats(cached_full_summary)
+    loaded_state = {}
+    pending_stats = subject_history_pending_jsonl_stats(
+        cached_full_summary, loaded_state=loaded_state
+    )
     pending_raw = pending_stats.get("pending", False)
     logging.debug(
         "derived subject_history pending check finished elapsed=%.2fs "
@@ -5454,7 +5459,10 @@ def refresh_subject_history(window_days="default"):
         ),
     )
     subject_started = time.monotonic()
-    full_subject_summary = subject_builder.build_summary()
+    full_subject_summary = subject_builder.build_summary(
+        previous_summary=cached_full_summary,
+        device_history_summary=loaded_state.get("device_history"),
+    )
     full_subject_summary = apply_subject_annotations(full_subject_summary)
     logging.debug(
         "derived subject_history build_summary finished elapsed=%.2fs subjects=%s "

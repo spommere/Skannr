@@ -8,8 +8,10 @@ endpoints, RF decoder subjects, aircraft, weather stations, and LAN devices.
 
 import copy
 import datetime
+import logging
 import math
 import os
+import time
 from collections import Counter, defaultdict
 
 from .bus import local_now
@@ -143,7 +145,7 @@ class SubjectHistoryBuilder:
             self.save_summary(summary)
         return self.display_summary(summary, self.window_days)
 
-    def build_summary(self):
+    def build_summary(self, previous_summary=None, device_history_summary=None):
         """Build the materialized summary for the selected view window.
 
         Reads raw JSONL for all collectors. Wi-Fi/BLE observations are
@@ -151,7 +153,14 @@ class SubjectHistoryBuilder:
         tracking, vendor enrichment, and privacy grouping. Direct collectors
         use registry-based per-collector builders.
         """
-        previous_summary = self.load_persisted_summary() or {}
+        previous_started = time.monotonic()
+        if previous_summary is None:
+            previous_summary = self.load_persisted_summary()
+        previous_summary = previous_summary or {}
+        logging.debug(
+            "subject_history previous summary load finished elapsed=%.2fs",
+            time.monotonic() - previous_started,
+        )
         if self.progress_callback:
             self.progress_callback("Wi-Fi / BLE device history")
         wifi_ble = WiFiBLEPostprocessor(
@@ -161,14 +170,29 @@ class SubjectHistoryBuilder:
             progress_callback=self.progress_callback,
             reference_epoch=self.reference_epoch,
         )
-        wifi_ble_result = wifi_ble.build_summary()
+        device_started = time.monotonic()
+        wifi_ble_result = wifi_ble.build_summary(
+            previous_summary=device_history_summary
+        )
+        logging.debug(
+            "subject_history device history build finished elapsed=%.2fs "
+            "incremental_records=%s",
+            time.monotonic() - device_started,
+            wifi_ble_result.get("incremental_records_read", 0),
+        )
         try:
             wifi_ble.save_summary(wifi_ble_result)
         except OSError as exc:
             logging.exception("failed to persist device history: %s", exc)
+        display_started = time.monotonic()
         wifi_ble_display = wifi_ble.display_summary(wifi_ble_result, self.window_days)
+        logging.debug(
+            "subject_history device history display finished elapsed=%.2fs",
+            time.monotonic() - display_started,
+        )
         if self.progress_callback:
             self.progress_callback("Reading direct collector logs")
+        direct_started = time.monotonic()
         (
             direct_observations,
             direct_checkpoint,
@@ -176,8 +200,15 @@ class SubjectHistoryBuilder:
             direct_incremental_records,
             direct_read_stats,
         ) = self.build_direct_observations()
+        logging.debug(
+            "subject_history direct observation read finished elapsed=%.2fs "
+            "incremental_by_collector=%s",
+            time.monotonic() - direct_started,
+            dict(direct_incremental_records),
+        )
         if self.progress_callback:
             self.progress_callback("Building collector histories")
+        collector_history_started = time.monotonic()
         aprsis_events, aprsis_records = self.build_or_keep_direct_history(
             previous_summary,
             "aprsis",
@@ -249,6 +280,10 @@ class SubjectHistoryBuilder:
         else:
             lan_events = copy.deepcopy((previous_summary or {}).get("lan") or [])
             lan_records = 0
+        logging.debug(
+            "subject_history collector histories finished elapsed=%.2fs",
+            time.monotonic() - collector_history_started,
+        )
         previous_generated_epoch = 0
         try:
             previous_generated_epoch = int(
@@ -333,8 +368,15 @@ class SubjectHistoryBuilder:
         subject_input["bluetooth"] = (
             wifi_ble_display.get("bluetooth") or subject_input["ble"]
         )
+        subjects_started = time.monotonic()
         summary["subjects"] = self.build_subject_records(subject_input)
         summary["subject_counts"] = self.count_subjects(summary["subjects"])
+        logging.debug(
+            "subject_history subject rows finished elapsed=%.2fs subjects=%s",
+            time.monotonic() - subjects_started,
+            len(summary["subjects"]),
+        )
+        direct_state_started = time.monotonic()
         self.save_direct_observation_state(
             {
                 "aprsis": aprsis_events,
@@ -353,6 +395,10 @@ class SubjectHistoryBuilder:
             direct_incremental_records,
             direct_read_stats,
             generated_at_epoch,
+        )
+        logging.debug(
+            "subject_history direct state save finished elapsed=%.2fs",
+            time.monotonic() - direct_state_started,
         )
         return summary
 
