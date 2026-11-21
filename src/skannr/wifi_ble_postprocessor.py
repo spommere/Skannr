@@ -1439,7 +1439,14 @@ class WiFiBLEPostprocessor:
     def save_summary(self, summary):
         """Persist the merged summary so first_seen survives restarts."""
         started = time.monotonic()
-        save_json_atomic(self.state_path, summary)
+        persisted = summary
+        if isinstance(summary, dict) and "bluetooth" in summary:
+            # ``bluetooth`` is a compatibility alias for the canonical ``ble``
+            # subtree. Keep both names in memory for existing callers, but do
+            # not serialize the same large device/session tree twice.
+            persisted = dict(summary)
+            persisted.pop("bluetooth", None)
+        save_json_atomic(self.state_path, persisted)
         logging.debug(
             "device_history save finished elapsed=%.2fs", time.monotonic() - started
         )
@@ -1716,13 +1723,27 @@ class WiFiBLEPostprocessor:
         return filtered
 
     def record_map(self, records, key, set_fields):
-        """Convert persisted records back to mutable records used while folding events."""
+        """Prepare records for incremental updates with selective copying.
+
+        Persisted record dictionaries and historical session rows are treated
+        as immutable. Copy each record shell, the session list that may receive
+        an appended row, and the active session that event folding may update.
+        Accumulated scalar sets are rebuilt as before. This avoids recursively
+        copying the long history under every BLE device before a small log tail
+        is folded.
+        """
         mapped = {}
         for record in records:
             record_key = record.get(key)
             if not record_key:
                 continue
-            item = copy.deepcopy(record)
+            item = dict(record)
+            sessions = item.get("sessions")
+            if isinstance(sessions, list):
+                item["sessions"] = list(sessions)
+            active = item.get("active_session")
+            if isinstance(active, dict):
+                item["active_session"] = dict(active)
             for field in set_fields:
                 value = item.get(field)
                 # JSON stores accumulated values as lists. The folding code

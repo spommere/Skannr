@@ -877,7 +877,13 @@ class SubjectHistoryBuilder:
 
     def save_summary(self, summary):
         """Persist the subject-history summary."""
-        save_json_atomic(self.state_path, summary)
+        persisted = summary
+        if isinstance(summary, dict) and "bluetooth" in summary:
+            # Persist one canonical BLE subtree; display_summary and the
+            # postprocessor restore the bluetooth compatibility alias.
+            persisted = dict(summary)
+            persisted.pop("bluetooth", None)
+        save_json_atomic(self.state_path, persisted)
 
     def save_direct_observation_state(
         self,
