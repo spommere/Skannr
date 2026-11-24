@@ -5,6 +5,7 @@ collector keys from YAML metadata to concrete Python classes.
 """
 
 from .adsb import ADSBCollector
+from .gpsd import GPSDCollector
 from .aprsis import APRSISCollector
 from .lan import LANCollector
 from .lan_identify import LANIdentifyCollector
@@ -32,6 +33,7 @@ COLLECTOR_CLASS_BY_KEY = {
     "bt_classic": BluetoothClassicCollector,
     "rtl433": RTL433Collector,
     "adsb": ADSBCollector,
+    "gpsd": GPSDCollector,
     "rayhunter": RayhunterCollector,
     "aprsis": APRSISCollector,
     "noaa": NOAACollector,

@@ -78,6 +78,14 @@ FALLBACK_COLLECTOR_DEFINITIONS = [
         "has_subject_history": True,
     },
     {
+        "key": "gpsd",
+        "order": 57,
+        "label": "GPSD Location",
+        "description": "Optional live observer location from GPSD JSON reports",
+        "acquisition_mode": ACQUISITION_LISTEN,
+        "has_subject_history": False,
+    },
+    {
         "key": "rayhunter",
         "order": 60,
         "label": "Rayhunter",

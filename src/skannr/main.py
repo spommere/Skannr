@@ -1141,6 +1141,10 @@ def process_bus_event(event):
             event.get("collector") == "rtl433"
             and event.get("type") == "scanner_frequency"
         )
+        or (
+            event.get("collector") == "gpsd"
+            and event.get("type") == "gps_status"
+        )
     )
     if persistence and not high_rate_state_event:
         try:

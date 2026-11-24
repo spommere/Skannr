@@ -9161,6 +9161,22 @@ function collectorStatusDetailForBanner(item) {
 }
 
 function collectorStatusDetail(item) {
+  if (item.key === "gpsd") {
+    if (item.state === "DISABLED") return "live location disabled";
+    const hardware = hardwareSummary(item);
+    if (!item.fix_valid) {
+      return `${hardware} | waiting for a fresh GPS fix${displayWarning(item) ? ` | ${displayWarning(item)}` : ""}`;
+    }
+    const accuracyValue = item.fix_accuracy_m == null ? NaN : Number(item.fix_accuracy_m);
+    const accuracy = Number.isFinite(accuracyValue)
+      ? ` | accuracy ±${accuracyValue.toFixed(1)} m`
+      : "";
+    const ageValue = item.fix_age_sec == null ? NaN : Number(item.fix_age_sec);
+    const age = Number.isFinite(ageValue)
+      ? ` | fix ${Math.max(0, Math.round(ageValue))} s old`
+      : "";
+    return `${hardware}${accuracy}${age}`;
+  }
   if (item.key === "aprsis" && Array.isArray(item.feed_statuses) && item.feed_statuses.length) {
     return item.feed_statuses
       .map((feed) => aprsisStatusDetail(feed, {includeState: true}))
@@ -9254,6 +9270,11 @@ function renderSystemStatus(status) {
 
 function hardwareSummary(item) {
   const detected = (latestSystemStatus.hardware || {})[item.key] || {};
+  if (item.key === "gpsd") {
+    return detected.endpoint
+      ? `GPSD endpoint: ${detected.endpoint}`
+      : "GPSD endpoint: 127.0.0.1:2947";
+  }
   if (item.key === "wifi") {
     return availabilitySummary(
       "Wi-Fi interfaces",

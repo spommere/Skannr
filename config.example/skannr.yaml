@@ -199,6 +199,39 @@ alerts:
     - "a4:cf:12"
     - "82:6b:f2"
     - "b4:1e:52"
+  # Candidate BLE/Wi-Fi signatures cross-referenced from RF Sentinel's public
+  # detection list. A match is a possible equipment signature, not proof of
+  # ownership or use. Add local patterns only after reviewing their evidence.
+  public_safety_equipment:
+    enabled: true
+    level: warning
+    min_rssi: -90
+    body_camera:
+      enabled: true
+      ble_company_ids:
+      - "0x034D"
+      ble_service_uuid_patterns:
+      - fc81
+      - fe6b
+      - fe6c
+      ble_name_patterns: []
+      ble_payload_patterns:
+      - BWCDEVICE
+      wifi_oui_prefixes:
+      - "00:25:df"
+      wifi_ssid_patterns: []
+    flock_alpr:
+      enabled: true
+      ble_company_ids:
+      - "0x09C8"
+      ble_name_patterns:
+      - FS Ext Battery
+      - Penguin-*
+      - FS-*
+      ble_service_uuid_patterns: []
+      ble_payload_patterns: []
+      wifi_oui_prefixes: []
+      wifi_ssid_patterns: []
   aprs_weather:
     enabled: true
     level: warning

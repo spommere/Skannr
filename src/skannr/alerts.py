@@ -123,6 +123,32 @@ DEFAULT_ALERT_CONFIG = {
             "b4:1e:52",
         ],
     },
+    # Candidate equipment signatures are sourced from the RF Sentinel public
+    # detection reference. They are emitted as possible equipment matches, not
+    # claims about the device's owner or use.
+    "public_safety_equipment": {
+        "enabled": True,
+        "level": "warning",
+        "min_rssi": -90,
+        "body_camera": {
+            "enabled": True,
+            "ble_company_ids": ["0x034D"],
+            "ble_service_uuid_patterns": ["fc81", "fe6b", "fe6c"],
+            "ble_name_patterns": [],
+            "ble_payload_patterns": ["BWCDEVICE"],
+            "wifi_oui_prefixes": ["00:25:df"],
+            "wifi_ssid_patterns": [],
+        },
+        "flock_alpr": {
+            "enabled": True,
+            "ble_company_ids": ["0x09C8"],
+            "ble_name_patterns": ["FS Ext Battery", "Penguin-*", "FS-*"],
+            "ble_service_uuid_patterns": [],
+            "ble_payload_patterns": [],
+            "wifi_oui_prefixes": [],
+            "wifi_ssid_patterns": [],
+        },
+    },
     "aprs_weather": {
         "enabled": True,
         "level": "warning",
@@ -481,19 +507,30 @@ class AlertEngine:
 
     def process_wifi(self, source, event_type, data, timestamp, now, emit):
         """Return Wi-Fi alert events from AP and disruption observations."""
+        alerts = []
         if event_type == "ap_beacon":
-            return self.wifi_ap_alerts(source, data, timestamp, now, emit)
-        if event_type == "probe_request":
-            return self.wifi_flock_alerts(source, data, timestamp, now, emit)
+            alerts.extend(self.wifi_ap_alerts(source, data, timestamp, now, emit))
+        elif event_type == "probe_request":
+            alerts.extend(self.wifi_flock_alerts(source, data, timestamp, now, emit))
         if event_type in ("deauth_seen", "disassoc_seen"):
-            return self.wifi_disruption_alerts(
-                source, event_type, data, timestamp, now, emit
+            alerts.extend(
+                self.wifi_disruption_alerts(
+                    source, event_type, data, timestamp, now, emit
+                )
             )
-        if event_type in ("collector_offline", "collector_retrying"):
-            return self.collector_issue_alert(
-                source, event_type, data, timestamp, now, emit
+        elif event_type in ("collector_offline", "collector_retrying"):
+            alerts.extend(
+                self.collector_issue_alert(
+                    source, event_type, data, timestamp, now, emit
+                )
             )
-        return []
+        if event_type in ("ap_beacon", "probe_request"):
+            alerts.extend(
+                self.public_safety_equipment_alerts(
+                    source, event_type, data, timestamp, now, emit
+                )
+            )
+        return alerts
 
     def wifi_ap_alerts(self, source, data, timestamp, now, emit):
         """Return AP-level alerts such as drone or sensitive open SSID."""
@@ -858,46 +895,192 @@ class AlertEngine:
                 )
             return []
         rule = self.rule("ble_tracker")
+        alerts = []
+        if rule.get("enabled", True) and self.matches_ble_tracker(data, rule):
+            mac = data.get("mac") or "unknown"
+            name = data.get("name") or data.get("findmy_label") or mac
+            summary = "Tracker-like BLE device seen nearby: {}; {}; {}".format(
+                name,
+                mac,
+                self.ble_signal_summary(data),
+            )
+            alerts.extend(
+                self.emit_alert(
+                    "ble_tracker",
+                    "ble-tracker:{}".format(normalized_key(mac)),
+                    rule.get("level", "critical"),
+                    "ble",
+                    "Tracker-like BLE device nearby",
+                    name,
+                    summary,
+                    timestamp,
+                    now,
+                    emit,
+                    {
+                        "mac": mac,
+                        "name": data.get("name") or "",
+                        "manufacturer": data.get("manufacturer") or "",
+                        "service_uuids": data.get("service_uuids") or [],
+                        "findmy_accessory": bool(data.get("findmy_accessory")),
+                        "findmy_label": data.get("findmy_label") or "",
+                        "findmy_payload_type": data.get("findmy_payload_type") or "",
+                        "findmy_status": data.get("findmy_status") or "",
+                        "findmy_hint": data.get("findmy_hint") or "",
+                        "rssi": self.to_number(data.get("rssi")),
+                        "confidence": (
+                            "High"
+                            if data.get("name") or data.get("findmy_accessory")
+                            else "Medium"
+                        ),
+                    },
+                )
+            )
+        alerts.extend(
+            self.public_safety_equipment_alerts(
+                "ble", event_type, data, timestamp, now, emit
+            )
+        )
+        return alerts
+
+    def public_safety_equipment_alerts(
+        self, source, event_type, data, timestamp, now, emit
+    ):
+        """Emit cautious alerts for configured BLE/Wi-Fi equipment signatures."""
+        rule = self.rule("public_safety_equipment")
         if not rule.get("enabled", True):
             return []
-        if not self.matches_ble_tracker(data, rule):
+        rssi = self.to_number(data.get("rssi"))
+        min_rssi = self.to_number(rule.get("min_rssi"))
+        if rssi is not None and min_rssi is not None and rssi < min_rssi:
             return []
-        mac = data.get("mac") or "unknown"
-        name = data.get("name") or data.get("findmy_label") or mac
-        summary = "Tracker-like BLE device seen nearby: {}; {}; {}".format(
-            name,
-            mac,
-            self.ble_signal_summary(data),
+
+        is_ble = source == "ble"
+        mac = data.get("mac") if is_ble else (
+            data.get("client_mac") or data.get("bssid") or ""
         )
-        return self.emit_alert(
-            "ble_tracker",
-            "ble-tracker:{}".format(normalized_key(mac)),
-            rule.get("level", "critical"),
-            "ble",
-            "Tracker-like BLE device nearby",
-            name,
-            summary,
-            timestamp,
-            now,
-            emit,
-            {
-                "mac": mac,
-                "name": data.get("name") or "",
-                "manufacturer": data.get("manufacturer") or "",
-                "service_uuids": data.get("service_uuids") or [],
-                "findmy_accessory": bool(data.get("findmy_accessory")),
-                "findmy_label": data.get("findmy_label") or "",
-                "findmy_payload_type": data.get("findmy_payload_type") or "",
-                "findmy_status": data.get("findmy_status") or "",
-                "findmy_hint": data.get("findmy_hint") or "",
-                "rssi": self.to_number(data.get("rssi")),
-                "confidence": (
-                    "High"
-                    if data.get("name") or data.get("findmy_accessory")
-                    else "Medium"
-                ),
-            },
-        )
+        ssid = data.get("ssid_probed") or data.get("ssid") or ""
+        company_ids = self.ble_company_ids(data) if is_ble else set()
+        services = [str(item).lower() for item in data.get("service_uuids") or []]
+        name = str(data.get("name") or "") if is_ble else ""
+        matches = []
+        for equipment_type in ("body_camera", "flock_alpr"):
+            signature = rule.get(equipment_type) or {}
+            if not signature.get("enabled", True):
+                continue
+            evidence = []
+            if is_ble:
+                wanted_company_ids = {
+                    self.normalize_company_id(item)
+                    for item in signature.get("ble_company_ids") or []
+                }
+                for company_id in sorted(company_ids & wanted_company_ids):
+                    evidence.append("BLE company ID 0x{}".format(company_id))
+                for service in services:
+                    if pattern_match(
+                        service, signature.get("ble_service_uuid_patterns")
+                    ):
+                        evidence.append("BLE service UUID {}".format(service))
+                if pattern_match(name, signature.get("ble_name_patterns")):
+                    evidence.append("BLE advertised name '{}'".format(name))
+                if self.ble_payload_matches(
+                    data, signature.get("ble_payload_patterns")
+                ):
+                    evidence.append("BLE advertisement payload signature")
+            else:
+                oui = normalized_oui(mac)
+                wanted_ouis = {
+                    normalized_oui(item)
+                    for item in signature.get("wifi_oui_prefixes") or []
+                }
+                if oui and oui in wanted_ouis:
+                    evidence.append("Wi-Fi OUI {}".format(oui))
+                if pattern_match(ssid, signature.get("wifi_ssid_patterns")):
+                    evidence.append("Wi-Fi SSID '{}'".format(ssid))
+            if evidence:
+                matches.append((equipment_type, evidence))
+
+        alerts = []
+        for equipment_type, evidence in matches:
+            confidence = "High" if len(evidence) >= 2 else "Medium"
+            label = (
+                "body camera" if equipment_type == "body_camera" else "Flock ALPR"
+            )
+            identity = name or ssid or mac or "unknown device"
+            summary = (
+                "Possible {} wireless signature: {}; evidence={}; confidence={}; {}"
+            ).format(
+                label,
+                identity,
+                ", ".join(evidence),
+                confidence,
+                self.ble_signal_summary(data) if is_ble else self.wifi_signal_summary(data),
+            )
+            alerts.extend(
+                self.emit_alert(
+                    "wireless_equipment",
+                    "wireless-equipment:{}:{}".format(
+                        equipment_type, normalized_key(mac or identity)
+                    ),
+                    rule.get("level", "warning"),
+                    source,
+                    "Possible {} signal".format(label),
+                    identity,
+                    summary,
+                    timestamp,
+                    now,
+                    emit,
+                    {
+                        "equipment_type": equipment_type,
+                        "transport": "ble" if is_ble else "wifi",
+                        "mac": mac or "",
+                        "name": name,
+                        "ssid": ssid,
+                        "company_ids": sorted("0x{}".format(item) for item in company_ids),
+                        "service_uuids": services if is_ble else [],
+                        "rssi": rssi,
+                        "matched_evidence": evidence,
+                        "signature_source": "RF Sentinel public detection reference",
+                        "confidence": confidence,
+                    },
+                )
+            )
+        return alerts
+
+    def ble_payload_matches(self, data, patterns):
+        """Match configured text markers in decoded BLE manufacturer payloads."""
+        if not patterns:
+            return False
+        payloads = data.get("adv_data_hex") or {}
+        if not isinstance(payloads, dict):
+            return False
+        for raw_hex in payloads.values():
+            try:
+                decoded = bytes.fromhex(str(raw_hex)).decode("ascii", errors="ignore")
+            except (TypeError, ValueError):
+                continue
+            if pattern_match(decoded, patterns):
+                return True
+        return False
+
+    def ble_company_ids(self, data):
+        """Extract normalized Bluetooth company identifiers from a BLE event."""
+        identifiers = set()
+        raw = data.get("adv_data_hex") or {}
+        if isinstance(raw, dict):
+            identifiers.update(
+                self.normalize_company_id(item) for item in raw.keys()
+            )
+        for match in re.findall(r"0x([0-9a-fA-F]{4})", str(data.get("manufacturer") or "")):
+            identifiers.add(self.normalize_company_id(match))
+        return {item for item in identifiers if item}
+
+    def normalize_company_id(self, value):
+        """Normalize a Bluetooth company ID as four uppercase hex digits."""
+        text = str(value or "").strip()
+        if text.lower().startswith("0x"):
+            text = text[2:]
+        text = re.sub(r"[^0-9a-fA-F]", "", text)
+        return text[-4:].upper() if text else ""
 
     def matches_ble_tracker(self, data, rule):
         """Return True when BLE fields match configured tracker indicators."""

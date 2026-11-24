@@ -878,6 +878,34 @@ Alert behavior:
 - Generic collector-health alerts are controlled separately by
   `alerts.collector_issue`.
 
+### GPSD Location (`gpsd`)
+
+Purpose: provide an optional live observer fix for mobile Skannr hosts without
+binding Skannr to one USB GNSS receiver or serial-device name. GPSD owns the
+receiver; Skannr consumes its JSON stream, defaulting to `127.0.0.1:2947`.
+
+Implementation:
+
+- Disabled by default. A missing GPSD service does not affect other collectors.
+- Consumes GPSD `TPV` reports with a 2D or 3D fix and valid latitude/longitude.
+- Publishes coordinate-free `gps_status` events with fix mode and accuracy;
+  periodic status events are excluded from durable event logs.
+- Keeps only the latest valid observer fix in the process-local location store.
+  The fix expires after `stale_after_sec`; stopping GPSD collection clears it.
+- Does not persist a location track. Static observer coordinates in NOAA, USGS,
+  and ADS-B configuration remain independent options for fixed deployments.
+
+Important events:
+
+- `collector_online`
+- `gps_status` (coordinate-free, not durably persisted)
+- `collector_retrying`
+- `collector_offline`
+
+The in-memory `current_observer_location()` interface returns a fresh fix to
+future alert or map code. No camera-map or route-history consumer is included
+in this first provider implementation.
+
 ### APRS-IS (`aprsis`)
 
 Purpose: internet-fed APRS situational context for a configured local-area
