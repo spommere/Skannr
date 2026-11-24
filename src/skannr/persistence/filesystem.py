@@ -27,6 +27,17 @@ class FilesystemPersistence(BasePersistence):
         super().__init__(config)
         self.log_dir = config.get("log_dir", "runtime/logs")
         self.retention_days = normalize_retention_days(config.get("retention_days", 30))
+        raw_collector_retention = config.get("collector_retention_days") or {}
+        if not isinstance(raw_collector_retention, dict):
+            raise ValueError("collector_retention_days must be a mapping")
+        self.collector_retention_days = {
+            str(collector): normalize_retention_days(days, self.retention_days)
+            for collector, days in raw_collector_retention.items()
+        }
+        # Preserve the global zero-retention behavior as an explicit purge-all
+        # operation, even when the default collector overrides are present.
+        if self.retention_days == 0:
+            self.collector_retention_days = {}
         os.makedirs(self.log_dir, exist_ok=True)
         ensure_owner(self.log_dir)
         self.rotate()
@@ -89,9 +100,15 @@ class FilesystemPersistence(BasePersistence):
             return []
 
     def rotate(self):
-        """Delete old JSONL files based on retention_days."""
-        cutoff = now_epoch() - (self.retention_days * 86400)
+        """Delete old JSONL files using global or per-collector retention."""
+        now = now_epoch()
         for root, _dirs, files in os.walk(self.log_dir):
+            relative = os.path.relpath(root, self.log_dir)
+            collector = relative.split(os.sep, 1)[0] if relative != "." else None
+            retention_days = self.collector_retention_days.get(
+                collector, self.retention_days
+            )
+            cutoff = now - (retention_days * 86400)
             for filename in files:
                 path = os.path.join(root, filename)
                 if filename.endswith(".jsonl") and os.path.getmtime(path) < cutoff:

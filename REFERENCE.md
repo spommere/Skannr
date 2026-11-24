@@ -39,7 +39,8 @@ Collector files share these top-level fields:
 | --- | --- |
 | `backend` | Persistence backend. The example uses `filesystem`. |
 | `filesystem.log_dir` | Base directory for runtime JSONL logs and supporting collector artifacts. |
-| `filesystem.retention_days` | Age-based retention for local filesystem event logs. |
+| `filesystem.retention_days` | Default age-based retention for local filesystem event logs; 30 days by default. Setting it to `0` purges all raw JSONL, including per-collector overrides. |
+| `filesystem.collector_retention_days` | Mapping of collector keys to retention days. Defaults: `ble`, `wifi`, `wifi_monitor`, and `lan` keep 3 days; unlisted collectors use `retention_days`. Cleanup runs at startup and removes old JSONL files by modification time. Existing materialized history remains, but retained raw logs are the rebuild source if a summary is lost. |
 
 ### `runtime`
 
@@ -394,6 +395,8 @@ messages from BLE service data and Wi-Fi beacon vendor elements. BLE Scan and
 Wi-Fi Monitor provide the radio capture; Wi-Fi NAN transport and authentication
 verification are not implemented. Aircraft-reported coordinates are retained
 in Remote ID Subject History. Observer GPS coordinates are separately opt-in.
+Mapped-camera alerts are not provided in this release; no camera-location
+dataset loader is currently included.
 
 ### LAN: `collectors/lan.yaml`
 

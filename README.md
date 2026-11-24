@@ -1,10 +1,11 @@
 # Skannr
 
-Skannr is a local monitoring dashboard for Wi-Fi, Bluetooth, optional
-RTL-433/ADS-B/APRS-IS/NOAA/USGS/SWPC/PWS situational context, and passive LAN
-observations. It runs on Linux hosts such as Raspberry Pi OS or Kali, records
-local JSONL event logs, and provides live views plus deterministic Insights,
-Subject History, Alerts, and Reports through a browser UI.
+Skannr is a local monitoring dashboard for Wi-Fi, Bluetooth, Remote ID
+aircraft, optional GPSD observer location, and situational context from
+RTL-433/ADS-B/APRS-IS/NOAA/USGS/SWPC/PWS, plus passive LAN observations. It runs
+on Linux hosts such as Raspberry Pi OS or Kali, records local JSONL event logs,
+and provides live views plus deterministic Insights, Subject History, Alerts,
+and Reports through a browser UI.
 
 Skannr is designed for local monitoring of your own environment. It does not
 perform wireless attacks, packet injection, or cloud-based analysis.
@@ -519,8 +520,12 @@ installs. `config/` is machine-specific local state.
   `filesystem`.
 - `filesystem.log_dir`: runtime log/materialized-state directory. Relative
   paths are resolved under the Skannr project root.
-- `filesystem.retention_days`: raw JSONL retention. `0` removes retained JSONL
-  at startup rotation; large values effectively disable cleanup.
+- `filesystem.retention_days`: default raw JSONL retention for collectors
+  without an override. `0` removes matching retained JSONL at startup; large
+  values effectively disable cleanup.
+- `filesystem.collector_retention_days`: per-collector overrides. BLE, Wi-Fi,
+  Wi-Fi Monitor, and LAN default to three days; other collectors use the global
+  value.
 
 `runtime`:
 
@@ -965,13 +970,27 @@ Retention is controlled by:
 persistence:
   filesystem:
     retention_days: 30
+    collector_retention_days:
+      ble: 3
+      wifi: 3
+      wifi_monitor: 3
+      lan: 3
 ```
 
-`retention_days` must be `0` or greater:
+`retention_days` and each per-collector value must be `0` or greater. A
+per-collector value overrides the global default for that collector; unlisted
+collectors keep the global value. Skannr defaults BLE, Wi-Fi, Wi-Fi Monitor,
+and LAN raw logs to three days, with 30 days for other collectors. Setting the
+global value to `0` deletes all retained JSONL logs, including overridden
+collectors. Cleanup runs at startup and uses file modification times, so daily
+files can include some events older than the configured interval. Existing
+materialized history remains, but shortened raw retention limits how much old
+data can be rebuilt if a derived summary is lost.
 
-- `0`: delete retained JSONL logs during startup rotation
-- `30`: keep roughly 30 days
-- `999999`: effectively disable cleanup
+- `0` per collector: delete that collector's retained JSONL logs during startup rotation
+- `30`: keep roughly 30 days when used as the global default
+- `999999`: effectively disable cleanup for that scope; per-collector overrides
+  continue to apply to listed collectors
 
 Insights, Reports, and Subject History use the selected dashboard View window.
 The server rebuilds derived views autonomously on a background schedule, so data
@@ -1804,6 +1823,8 @@ history appear in Subject History. A fresh GPSD fix enables the
 `alerts.remote_id_proximity` warning, which defaults to a 1 km radius. Observer
 coordinates remain volatile unless `collectors.gpsd.store_observer_track` is
 enabled. Wi-Fi NAN transport and authentication verification are not included.
+Mapped-camera warnings are not included: Skannr does not yet load a camera
+dataset, and mapped ALPR records do not by themselves confirm a camera vendor.
 
 ## APRS-IS
 

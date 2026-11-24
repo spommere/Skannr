@@ -29,6 +29,13 @@ persistence:
     log_dir: runtime/logs
     # Age-based retention for local filesystem logs.
     retention_days: 30
+    # Per-collector overrides; collectors not listed use retention_days above.
+    # These four high-volume sources keep three days of raw JSONL.
+    collector_retention_days:
+      ble: 3
+      wifi: 3
+      wifi_monitor: 3
+      lan: 3
 
 runtime:
   # Internal runtime knobs. Modify only if you know why; very small values can

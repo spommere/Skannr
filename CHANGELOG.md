@@ -5,7 +5,29 @@ pre-1.0:
 
 - `0.1.x`: bug fixes and documentation updates
 - `0.2.x`: meaningful feature additions or data format changes
+- `0.3.x`: architecture and collector data-flow changes
 - `1.0.0`: stable operator-facing behavior and config/log compatibility
+
+## 0.3.11 - 2026-11-24
+
+- **Mobile GPSD location.** Added an optional GPSD client for USB/serial GNSS
+  receivers. Skannr uses a fresh fix in memory for location-aware features and
+  keeps coordinate-free GPS status events. Observer-coordinate history is
+  disabled by default; enabling it retains bounded samples.
+- **OpenDroneID decoding.** BLE Scan now decodes OpenDroneID service data, and
+  Wi-Fi Monitor inspects beacon vendor elements. Decoded aircraft are available
+  in a dedicated Remote ID view and Subject History with aircraft-reported
+  position and bounded track history.
+- **Remote ID proximity alerts.** A fresh GPSD fix can trigger a configurable
+  warning when decoded aircraft are within the configured radius (1,000 m by
+  default).
+- **Per-collector raw-log retention.** BLE, Wi-Fi, Wi-Fi Monitor, and LAN JSONL
+  logs default to three days; other collectors use the global 30-day retention
+  unless overridden. Materialized histories remain separate from raw-log
+  cleanup.
+- **Limits.** Wi-Fi NAN transport and cryptographic authentication verification
+  are not supported. Camera-location alerts are not included; they require a
+  camera dataset and loader.
 
 ## 0.3.10 - 2026-11-20
 

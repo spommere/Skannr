@@ -1,6 +1,6 @@
 # Skannr Design Document
 
-Version: 0.3.4, 2026-06-27
+Version: 0.3.11, 2026-11-24
 
 ## 1. Overview
 
@@ -13,6 +13,8 @@ The current implementation focuses on:
 - lightweight Wi-Fi access-point scanning
 - on-demand Wi-Fi monitor-mode packet capture and channel hopping
 - BLE advertisement scanning
+- optional GPSD observer location for mobile deployments
+- OpenDroneID decoding from BLE service data and Wi-Fi beacon vendor elements
 - on-demand BLE Device Information Service reads
 - on-demand Bluetooth Classic inquiry
 - optional RTL-433 decoded ISM-band context through `rtl_433`
@@ -911,7 +913,9 @@ the aircraft position. The observer fix remains in memory unless
 `collectors.gpsd.store_observer_track` is enabled; enabled history retains at
 most 24 sampled observer points per aircraft, while raw JSONL follows the
 configured persistence retention period. Camera approach warnings still depend
-on the local camera-location dataset planned as a separate feature.
+on a camera-location dataset that Skannr does not yet load. Wi-Fi NAN transport
+and cryptographic Remote ID authentication verification are also not
+implemented.
 
 Important events:
 
@@ -1295,13 +1299,26 @@ The filesystem backend rotates JSONL files on startup according to:
 persistence:
   filesystem:
     retention_days: 30
+    collector_retention_days:
+      ble: 3
+      wifi: 3
+      wifi_monitor: 3
+      lan: 3
 ```
 
-`retention_days` must be zero or greater:
+`retention_days` and collector-specific values must be zero or greater.
+Per-collector values override the global age limit; unlisted collector folders
+use the global value. BLE, Wi-Fi, Wi-Fi Monitor, and LAN default to three days,
+while other collectors default to 30 days. Rotation runs at startup and uses
+file modification time, so daily files may contain events slightly older than
+the configured interval. Setting the global value to zero purges every raw
+JSONL file, including collectors with explicit overrides. Materialized
+summaries remain, but their raw rebuild horizon is limited by retained JSONL.
 
-- `0` deletes retained JSONL logs during startup rotation.
-- positive values keep that many days.
-- a very large value effectively disables cleanup.
+- `0` deletes retained JSONL logs in that scope during startup rotation.
+- positive values keep approximately that many days.
+- a very large value effectively disables cleanup for that scope; collector
+  overrides continue to apply to listed sources.
 
 Raw logs are deliberately kept as the base audit trail. Derived summaries use
 checkpoints to avoid rereading old raw logs during normal refresh.

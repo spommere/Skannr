@@ -27,6 +27,12 @@ DEFAULT_CONFIG = {
         "filesystem": {
             "log_dir": "runtime/logs",
             "retention_days": 30,
+            "collector_retention_days": {
+                "ble": 3,
+                "wifi": 3,
+                "wifi_monitor": 3,
+                "lan": 3,
+            },
         },
     },
     "runtime": {
@@ -467,6 +473,20 @@ def load_config(path):
         config["persistence"]["filesystem"].get("retention_days"),
         DEFAULT_CONFIG["persistence"]["filesystem"]["retention_days"],
     )
+    filesystem_config = config["persistence"]["filesystem"]
+    collector_retention = filesystem_config.get("collector_retention_days")
+    if collector_retention is None:
+        collector_retention = {}
+    if not isinstance(collector_retention, dict):
+        raise ValueError(
+            "persistence.filesystem.collector_retention_days must be a mapping"
+        )
+    filesystem_config["collector_retention_days"] = {
+        str(collector): normalize_retention_days(
+            days, filesystem_config["retention_days"]
+        )
+        for collector, days in collector_retention.items()
+    }
     # Keep the project/config location in memory only. Relative paths such as
     # runtime/logs should follow the project root, not whatever directory
     # started Python.
