@@ -25,6 +25,7 @@ from .collectors.noaa import (
 from .collectors.adsb import clean_adsb_data, distance_km
 from .collectors.aprsis import aprsis_distance_km, aprsis_float, clean_aprs_data
 from .collectors.pws import clean_pws_data
+from .collectors.remote_id import clean_remote_id_data
 from .collectors.rayhunter import clean_rayhunter_data, clean_rayhunter_field
 from .collectors.rtl433 import clean_rtl433_data
 from .collectors.swpc import (
@@ -76,6 +77,7 @@ class SubjectHistoryBuilder:
         "rayhunter",
         "rtl433",
         "adsb",
+        "remote_id",
         "noaa",
         "usgs",
         "swpc",
@@ -237,6 +239,13 @@ class SubjectHistoryBuilder:
             direct_observations.get("adsb") or [],
             None,
         )
+        remote_id_events, remote_id_records = self.build_or_keep_direct_history(
+            previous_summary,
+            "remote_id",
+            self.build_remote_id_history,
+            direct_observations.get("remote_id") or [],
+            None,
+        )
         noaa_events, noaa_records = self.build_or_keep_direct_history(
             previous_summary,
             "noaa",
@@ -299,6 +308,7 @@ class SubjectHistoryBuilder:
                 "rayhunter": rayhunter_records,
                 "rtl433": rtl433_records,
                 "adsb": adsb_records,
+                "remote_id": remote_id_records,
                 "noaa": noaa_records,
                 "usgs": usgs_records,
                 "swpc": swpc_records,
@@ -346,6 +356,7 @@ class SubjectHistoryBuilder:
             "rayhunter": rayhunter_events,
             "rtl433": rtl433_events,
             "adsb": adsb_events,
+            "remote_id": remote_id_events,
             "noaa": noaa_events,
             "usgs": usgs_events,
             "swpc": swpc_events,
@@ -383,6 +394,7 @@ class SubjectHistoryBuilder:
                 "rayhunter": rayhunter_events,
                 "rtl433": rtl433_events,
                 "adsb": adsb_events,
+                "remote_id": remote_id_events,
                 "noaa": noaa_events,
                 "usgs": usgs_events,
                 "swpc": swpc_events,
@@ -457,8 +469,12 @@ class SubjectHistoryBuilder:
 
         self.merge_direct_time_bounds(data, old_data, new_data, old_epoch, new_epoch)
         self.merge_direct_counters(data, old_data, new_data)
-        self.merge_direct_lists(data, old_data, new_data)
+        self.merge_direct_lists(collector, data, old_data, new_data)
         self.merge_direct_numeric_extremes(data, old_data, new_data)
+        position_age = self.safe_float(data.get("position_age_sec"))
+        if collector == "remote_id" and position_age is not None and position_age > 5:
+            data.pop("latitude", None)
+            data.pop("longitude", None)
         if (
             collector == "noaa"
             and latest_data is new_data
@@ -550,12 +566,24 @@ class SubjectHistoryBuilder:
             or key in ("events_in_window", "warning_events_in_window")
         )
 
-    def merge_direct_lists(self, data, old_data, new_data):
+    def merge_direct_lists(self, collector, data, old_data, new_data):
         """Merge compact sample/list fields without duplicating entries."""
         for key in set(old_data) | set(new_data):
             if not isinstance(old_data.get(key), list) and not isinstance(
                 new_data.get(key), list
             ):
+                continue
+            if collector == "remote_id" and key in ("track", "observer_track"):
+                samples = {}
+                for value in (old_data.get(key) or []) + (new_data.get(key) or []):
+                    if not isinstance(value, dict):
+                        continue
+                    try:
+                        sample_key = int(value.get("timestamp_epoch"))
+                    except (TypeError, ValueError):
+                        continue
+                    samples[sample_key] = copy.deepcopy(value)
+                data[key] = [samples[epoch] for epoch in sorted(samples)[-24:]]
                 continue
             data[key] = []
             limit = self.direct_list_limit(key)
@@ -704,6 +732,14 @@ class SubjectHistoryBuilder:
                 or data.get("flight")
                 or "adsb",
             )
+        if collector == "remote_id":
+            return (
+                event_type,
+                data.get("subject_key")
+                or data.get("uas_id")
+                or data.get("transmitter")
+                or "remote_id",
+            )
         if collector == "noaa":
             return (event_type, stable_noaa_event_key(data, event_type))
         if collector == "usgs":
@@ -838,6 +874,7 @@ class SubjectHistoryBuilder:
                 "rayhunter",
                 "rtl433",
                 "adsb",
+                "remote_id",
                 "noaa",
                 "usgs",
                 "swpc",
@@ -859,6 +896,7 @@ class SubjectHistoryBuilder:
             "rayhunter",
             "rtl433",
             "adsb",
+            "remote_id",
             "noaa",
             "usgs",
             "swpc",
@@ -1262,6 +1300,8 @@ class SubjectHistoryBuilder:
             cleaned = clean_rtl433_data(data)
         elif collector == "adsb":
             cleaned = clean_adsb_data(data)
+        elif collector == "remote_id":
+            cleaned = clean_remote_id_data(data)
         elif collector == "noaa":
             cleaned = clean_noaa_data(data)
         elif collector == "usgs":
@@ -2606,6 +2646,84 @@ class SubjectHistoryBuilder:
             record["approach_altitude_ft"] = round(altitude)
             if vertical is not None:
                 record["approach_vertical_rate_fpm"] = round(vertical)
+
+    def build_remote_id_history(self, observations, window_days):
+        """Build one bounded aircraft record per Remote ID subject."""
+        subjects = {}
+        records_read = 0
+        ordered = sorted(
+            observations or [], key=lambda item: event_time_epoch(item) or 0
+        )
+        transmitter_ids = {}
+        for event in ordered:
+            data = clean_remote_id_data((event or {}).get("data") or {})
+            if data.get("transmitter") and data.get("uas_id"):
+                transmitter_ids[data["transmitter"]] = data["uas_id"]
+        for event in ordered:
+            if not event_in_window(event, window_days):
+                continue
+            if (event.get("type") or "") != "remote_id_observation":
+                continue
+            epoch = event_time_epoch(event)
+            if epoch is None:
+                continue
+            data = clean_remote_id_data(event.get("data") or {})
+            transmitter = data.get("transmitter")
+            subject_key = (
+                data.get("uas_id")
+                or transmitter_ids.get(transmitter)
+                or data.get("subject_key")
+                or transmitter
+            )
+            if not subject_key:
+                continue
+            records_read += 1
+            record = subjects.get(subject_key)
+            if record is None:
+                record = dict(data)
+                record.update({
+                    "subject_key": subject_key,
+                    "first_seen_epoch": epoch,
+                    "first_seen": event.get("timestamp") or local_now(epoch),
+                    "last_seen_epoch": epoch,
+                    "last_seen": event.get("timestamp") or local_now(epoch),
+                    "seen_count": 0,
+                    "position_count": 0,
+                    "track": [],
+                    "observer_track": [],
+                })
+                subjects[subject_key] = record
+            record["seen_count"] += int(data.get("seen_count") or 1)
+            record["position_count"] += int(data.get("position_count") or 0)
+            if epoch < record["first_seen_epoch"]:
+                record["first_seen_epoch"] = epoch
+                record["first_seen"] = event.get("timestamp") or local_now(epoch)
+            if epoch >= record["last_seen_epoch"]:
+                record["last_seen_epoch"] = epoch
+                record["last_seen"] = event.get("timestamp") or local_now(epoch)
+                for key, value in data.items():
+                    if key not in (
+                        "track", "observer_track", "first_seen", "first_seen_epoch",
+                        "seen_count", "position_count",
+                    ):
+                        record[key] = value
+            for key in ("track", "observer_track"):
+                samples = {int(item["timestamp_epoch"]): item for item in record[key]}
+                for item in data.get(key) or []:
+                    if isinstance(item, dict) and item.get("timestamp_epoch") is not None:
+                        samples[int(item["timestamp_epoch"])] = item
+                record[key] = [samples[item] for item in sorted(samples)[-24:]]
+        output = []
+        for subject_key, data in subjects.items():
+            output.append({
+                "collector": "remote_id",
+                "type": "remote_id_aircraft_summary",
+                "timestamp": data.get("last_seen"),
+                "timestamp_epoch": data.get("last_seen_epoch"),
+                "severity": "info",
+                "data": clean_remote_id_data(data),
+            })
+        return output, records_read
 
     def build_adsb_history(self, observations, window_days):
         """Return compact per-aircraft ADS-B summaries for this view window."""
@@ -4577,6 +4695,7 @@ class SubjectHistoryBuilder:
         self.add_rayhunter_subjects(subjects, (summary or {}).get("rayhunter") or [])
         self.add_rtl433_subjects(subjects, (summary or {}).get("rtl433") or [])
         self.add_adsb_subjects(subjects, (summary or {}).get("adsb") or [])
+        self.add_remote_id_subjects(subjects, (summary or {}).get("remote_id") or [])
         self.add_noaa_subjects(subjects, (summary or {}).get("noaa") or [])
         self.add_usgs_subjects(subjects, (summary or {}).get("usgs") or [])
         self.add_swpc_subjects(subjects, (summary or {}).get("swpc") or [])
@@ -5216,6 +5335,34 @@ class SubjectHistoryBuilder:
                         "last_seen": data.get("last_seen") or event.get("timestamp"),
                         "last_seen_epoch": data.get("last_seen_epoch")
                         or event.get("timestamp_epoch"),
+                    },
+                    data,
+                )
+            )
+
+    def add_remote_id_subjects(self, subjects, events):
+        """Add decoded OpenDroneID aircraft as searchable history subjects."""
+        for event in events or []:
+            data = clean_remote_id_data((event or {}).get("data") or {})
+            if (event or {}).get("type") != "remote_id_aircraft_summary":
+                continue
+            subject_id = data.get("uas_id") or data.get("subject_key") or data.get("transmitter")
+            if not subject_id:
+                continue
+            subject = "{} ({})".format(
+                data.get("uas_id") or "Unknown UAS", data.get("transmitter") or "emitter"
+            )
+            subjects.append(
+                self.subject_record(
+                    "remote_id",
+                    "remote_id_aircraft",
+                    str(subject_id),
+                    subject,
+                    {
+                        "first_seen": data.get("first_seen") or event.get("timestamp"),
+                        "first_seen_epoch": data.get("first_seen_epoch") or event.get("timestamp_epoch"),
+                        "last_seen": data.get("last_seen") or event.get("timestamp"),
+                        "last_seen_epoch": data.get("last_seen_epoch") or event.get("timestamp_epoch"),
                     },
                     data,
                 )

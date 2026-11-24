@@ -1,8 +1,9 @@
 """Optional live observer location feed from a local GPSD service.
 
 GPSD handles the USB/serial receiver. Skannr consumes GPSD's JSON reports and
-keeps the latest valid fix in volatile process memory for future location-aware
-features. Coordinates are deliberately not emitted or persisted as events.
+keeps the latest valid fix in volatile process memory for location-aware
+features. This collector's own status events omit coordinates; downstream
+history consumers only persist observer samples when explicitly enabled.
 """
 
 import asyncio

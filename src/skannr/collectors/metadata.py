@@ -86,6 +86,14 @@ FALLBACK_COLLECTOR_DEFINITIONS = [
         "has_subject_history": False,
     },
     {
+        "key": "remote_id",
+        "order": 58,
+        "label": "Remote ID",
+        "description": "Decoded OpenDroneID broadcasts from BLE and Wi-Fi beacons",
+        "acquisition_mode": ACQUISITION_LISTEN,
+        "has_subject_history": True,
+    },
+    {
         "key": "rayhunter",
         "order": 60,
         "label": "Rayhunter",

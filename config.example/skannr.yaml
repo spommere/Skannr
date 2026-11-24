@@ -345,6 +345,12 @@ alerts:
     critical_level: critical
     nearby_radius_km: 10
     low_altitude_ft: 1500
+  remote_id_proximity:
+    # Requires a fresh GPSD fix and a decoded aircraft position. Coordinates
+    # from the observer are not persisted unless gpsd.store_observer_track is on.
+    enabled: true
+    level: warning
+    radius_m: 1000
   rtl433_signal:
     # RTL-433 decoded TPMS/security/remote/contact events can be useful but
     # noisy until the local RF environment is understood, so alerts are off by

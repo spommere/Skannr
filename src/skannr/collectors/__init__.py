@@ -61,6 +61,9 @@ def subject_history_event_contract_by_key(include_actions=True):
         event_prefixes = tuple(getattr(cls, "subject_history_event_prefixes", ()) or ())
         if event_types or event_prefixes:
             contracts[key] = {"types": event_types, "prefixes": event_prefixes}
+    # Remote ID is a derived source published by BLE and Wi-Fi monitor parsers,
+    # so it has durable history without owning a separate hardware collector.
+    contracts["remote_id"] = {"types": ("remote_id_observation",), "prefixes": ()}
     return contracts
 
 

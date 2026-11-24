@@ -10,8 +10,10 @@ import threading
 import time
 
 from ..bus import local_now
+from ..location import current_observer_location
 from ..log_utils import now_epoch, read_jsonl_events
 from ..oui_lookup import vendor_info
+from .remote_id import RemoteIDTracker, decode_wifi_vendor_payload
 from .base import (
     BaseCollector,
     STATE_OFFLINE,
@@ -112,6 +114,7 @@ class WiFiMonitorCollector(WiFiCollector):
         self._monitor_setup_warning = ""
         self._prepared_monitor_source = None
         self._created_monitor_interface = None
+        self._remote_id_tracker = RemoteIDTracker()
 
     def detect(self):
         """Report availability without starting sniffing or channel hopping."""
@@ -249,16 +252,10 @@ class WiFiMonitorCollector(WiFiCollector):
               10    Disassociation → disassoc_seen
               12    Deauthentication → deauth_seen
 
-            Subtype 8 (Beacon) is intentionally skipped.  Managed Wi-Fi Scan
-            (wifi.py) already captures every AP beacon across all supported
-            channels via ``iw scan`` on each scan cycle.  Monitor mode only
-            sees beacons on the hopper's current channel, so including them
-            would produce incomplete, channel-biased duplicates of the same
-            AP data in Subject History — an AP visible on channel 6 but not
-            channel 36 would appear and disappear depending on hopper
-            position, not on actual AP presence.  The dev Pi 4 has a separate
-            managed-scan adapter that covers all channels without the monitor
-            hopper's single-channel-at-a-time limitation.
+            Subtype 8 (Beacon) is not added to AP history because managed Wi-Fi
+            Scan already captures APs across channels. The handler inspects
+            only the OpenDroneID vendor element in beacon frames, avoiding
+            channel-biased AP duplicates while preserving aircraft broadcasts.
             """
             if not self._running:
                 return
@@ -288,8 +285,34 @@ class WiFiMonitorCollector(WiFiCollector):
                 asyncio.run_coroutine_threadsafe(
                     self.emit("probe_request", payload), loop
                 )
-            # Subtype 8 (Beacon) is intentionally skipped —
-            # see docstring above for rationale.
+            # Beacons are excluded from AP history, but an OpenDroneID vendor
+            # element is a distinct aircraft observation worth decoding.
+            elif dot11.subtype == 8:
+                try:
+                    from scapy.layers.dot11 import Dot11Elt
+
+                    element = packet.getlayer(Dot11Elt)
+                    while isinstance(element, Dot11Elt):
+                        if int(getattr(element, "ID", -1)) == 221:
+                            messages = decode_wifi_vendor_payload(
+                                getattr(element, "info", b"")
+                            )
+                            if messages:
+                                self.publish_remote_id_from_thread(
+                                    loop, dot11.addr2, messages, rssi
+                                )
+                                break
+                        payload_layer = getattr(element, "payload", None)
+                        element = (
+                            payload_layer.getlayer(Dot11Elt)
+                            if payload_layer is not None
+                            and hasattr(payload_layer, "getlayer")
+                            else None
+                        )
+                except Exception:
+                    logging.debug(
+                        "could not inspect Wi-Fi beacon for Remote ID", exc_info=True
+                    )
             elif dot11.subtype in (0, 2):
                 # Association/reassociation requests show client/AP activity but
                 # usually do not include a stable SSID.
@@ -366,6 +389,35 @@ class WiFiMonitorCollector(WiFiCollector):
                 else:
                     self.active_hardware = detail
             await asyncio.sleep(1)
+
+    def publish_remote_id_from_thread(self, loop, transmitter, messages, rssi):
+        """Queue one decoded Wi-Fi Remote ID observation from the sniff thread."""
+        global_config = self.config.get("_global_config") or {}
+        gps_config = (global_config.get("collectors") or {}).get("gpsd") or {}
+        store_observer_location = bool(gps_config.get("store_observer_track", False))
+        observer = current_observer_location() if store_observer_location else None
+        data = self._remote_id_tracker.observe(
+            transmitter,
+            messages,
+            "Wi-Fi Beacon",
+            rssi=rssi,
+            observer_location=observer,
+            store_observer_location=store_observer_location,
+        )
+        if not data:
+            return
+
+        async def publish():
+            await self.bus.publish(
+                {
+                    "collector": "remote_id",
+                    "type": "remote_id_observation",
+                    "severity": "info",
+                    "data": data,
+                }
+            )
+
+        asyncio.run_coroutine_threadsafe(publish(), loop)
 
     async def stop(self):
         """Stop sniffing and channel hopping; delete temporary monitor iface."""

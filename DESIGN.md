@@ -892,8 +892,26 @@ Implementation:
   periodic status events are excluded from durable event logs.
 - Keeps only the latest valid observer fix in the process-local location store.
   The fix expires after `stale_after_sec`; stopping GPSD collection clears it.
-- Does not persist a location track. Static observer coordinates in NOAA, USGS,
-  and ADS-B configuration remain independent options for fixed deployments.
+- Does not persist a location track by default. The GPSD `store_observer_track`
+  option explicitly enables bounded observer samples in Remote ID history.
+  Static observer coordinates in NOAA, USGS, and ADS-B configuration remain
+  independent options for fixed deployments.
+
+### Remote ID broadcasts (`remote_id`)
+
+BLE Scan decodes OpenDroneID service data (UUID `0xFFFA`); Wi-Fi Monitor
+selectively parses the OpenDroneID vendor IE in beacon frames. Decoded aircraft
+observations use a separate `remote_id` event stream and Subject History source.
+The decoder exposes supported Basic ID, Location, Self ID, System, and Operator
+ID fields. It does not authenticate messages or parse Wi-Fi NAN transport.
+
+The live Remote ID view and history retain aircraft-reported positions. When a
+fresh GPSD fix exists, the `remote_id_proximity` alert rule can compare it with
+the aircraft position. The observer fix remains in memory unless
+`collectors.gpsd.store_observer_track` is enabled; enabled history retains at
+most 24 sampled observer points per aircraft, while raw JSONL follows the
+configured persistence retention period. Camera approach warnings still depend
+on the local camera-location dataset planned as a separate feature.
 
 Important events:
 

@@ -2,6 +2,7 @@ const socket = createLocalEventSocket();
 const CLIENT_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const rows = {
   ble: new Map(),
+  remoteId: new Map(),
   btClassic: new Map(),
   bleIdentify: [],
   aprsis: [],
@@ -27,6 +28,7 @@ let COLLECTOR_SUBTABS = [
   {value: "wifi", label: "Wi-Fi Scan"},
   {value: "wifi_monitor", label: "Wi-Fi Monitor"},
   {value: "bluetooth", label: "Bluetooth"},
+  {value: "remote_id", label: "Remote ID"},
   {value: "rtl433", label: "RTL-433"},
   {value: "adsb", label: "ADS-B"},
   {value: "rayhunter", label: "Rayhunter"},
@@ -565,6 +567,7 @@ function handleEvent(event) {
   if (event.collector === "alerts") renderAlertEvent(event);
   if (event.collector === "findings") renderFindingEvent(event);
   if (event.collector === "ble") renderBleEvent(event);
+  if (event.collector === "remote_id") renderRemoteIdEvent(event);
   if (event.collector === "ble_identify") renderBleIdentifyEvent(event);
   if (event.collector === "bt_classic") renderBtClassicEvent(event);
   if (event.collector === "wifi") renderWifiEvent(event);
@@ -580,6 +583,65 @@ function handleEvent(event) {
   if (event.collector === "lan") renderLanEvent(event);
   if (event.collector === "lan_identify") renderLanIdentifyEvent(event);
   if (event.collector === "system" && event.type === "system_status") renderSystemStatus(event.data);
+}
+
+function renderRemoteIdEvent(event) {
+  if (event.type !== "remote_id_observation" || !event.data) return;
+  const data = event.data;
+  const key = String(data.uas_id || data.subject_key || data.transmitter || "unknown");
+  if (data.uas_id && data.transmitter) {
+    rows.remoteId.delete(String(data.transmitter).toUpperCase());
+  }
+  const current = rows.remoteId.get(key) || {};
+  const merged = {
+    ...current,
+    ...data,
+    uas_id: data.uas_id || current.uas_id || "",
+    transmitter: data.transmitter || current.transmitter || "",
+    last_seen: event.timestamp || current.last_seen || "",
+    last_seen_epoch: event.timestamp_epoch || current.last_seen_epoch || 0
+  };
+  if (Number(data.position_age_sec) > 5 && data.latitude === undefined) {
+    delete merged.latitude;
+    delete merged.longitude;
+  }
+  rows.remoteId.set(key, merged);
+  while (rows.remoteId.size > 200) rows.remoteId.delete(rows.remoteId.keys().next().value);
+  renderRemoteIdTable();
+  updateTabCounts();
+}
+
+function renderRemoteIdTable() {
+  const tbody = document.getElementById("remote-id-live-rows");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  const aircraft = [...rows.remoteId.values()].sort((a, b) =>
+    Number(b.last_seen_epoch || 0) - Number(a.last_seen_epoch || 0)
+  );
+  if (!aircraft.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 7;
+    td.textContent = "No decoded Remote ID broadcasts in this session";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  aircraft.forEach((item) => {
+    const tr = document.createElement("tr");
+    const position = item.latitude !== undefined && item.longitude !== undefined
+      ? `${Number(item.latitude).toFixed(6)}, ${Number(item.longitude).toFixed(6)}` : "—";
+    const altitude = item.altitude_geo_m !== undefined ? `${Math.round(Number(item.altitude_geo_m))} m` : "—";
+    const speed = item.speed_mps !== undefined ? `${Number(item.speed_mps).toFixed(1)} m/s` : "—";
+    [item.uas_id || "ID not yet received", item.transmitter || "", position, altitude,
+      speed, `${item.transport || ""}${item.rssi !== undefined ? ` (${item.rssi} dBm)` : ""}`,
+      item.last_seen || ""].forEach((value) => {
+      const td = document.createElement("td");
+      appendTableCellValue(td, value || "—");
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
 }
 
 function renderAlertsSnapshot(alerts) {
@@ -2011,7 +2073,7 @@ function derivedHistoryHasRows() {
   const bluetooth = history.bluetooth || history.ble || {};
   const directSubjects = Array.isArray(history.subjects)
     ? history.subjects.filter((item) =>
-      ["aprsis", "rayhunter", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"].includes(String(item.collector || ""))
+      ["aprsis", "rayhunter", "rtl433", "adsb", "remote_id", "noaa", "usgs", "swpc", "pws", "lan"].includes(String(item.collector || ""))
     )
     : [];
   return Boolean(
@@ -2657,6 +2719,7 @@ function updateTabCounts() {
   setTabCount("wifi", rows.aps.size);
   setTabCount("wifi_monitor", rows.monitorEvents.length);
   setTabCount("bluetooth", bluetoothTabRowCount());
+  setTabCount("remote_id", rows.remoteId.size);
   setTabCount("rtl433", rows.rtl433.length);
   setTabCount("adsb", rows.adsb.length);
   setTabCount("rayhunter", rows.rayhunter.length);
@@ -2709,9 +2772,10 @@ function subjectHistoryRowCount(source) {
   if (sourceKey === "wifi") return displayAps;
   if (sourceKey === "wifi_monitor") return displayClients;
   if (sourceKey === "bluetooth") return displayBluetooth;
+  if (sourceKey === "remote_id") return historySubjectsFor(history, "remote_id").length;
   if (sourceKey && sourceKey !== "all") return countForDirectSource(sourceKey);
   return displayAps + displayClients + displayBluetooth +
-    ["aprsis", "rayhunter", "rtl433", "adsb", "noaa", "usgs", "swpc", "pws", "lan"]
+    ["aprsis", "rayhunter", "rtl433", "adsb", "remote_id", "noaa", "usgs", "swpc", "pws", "lan"]
       .reduce((total, collector) => total + countForDirectSource(collector), 0);
 }
 
@@ -5354,6 +5418,7 @@ function renderDeviceHistory(history) {
   const rayhunterSubjects = historySubjectsFor(history, "rayhunter");
   const rtl433Subjects = historySubjectsFor(history, "rtl433");
   const adsbSubjects = historySubjectsFor(history, "adsb");
+  const remoteIdSubjects = historySubjectsFor(history, "remote_id");
   const noaaSubjects = historySubjectsFor(history, "noaa");
   const usgsSubjects = historySubjectsFor(history, "usgs");
   const swpcSubjects = historySubjectsFor(history, "swpc");
@@ -5432,6 +5497,19 @@ function renderDeviceHistory(history) {
     adsbSpeedTrackText(subjectData(item)),
     subjectData(item).seen_count || 0
   ], historySearch);
+  renderHistoryTable("history-remote-id-aircraft", remoteIdSubjects, (item) => {
+    const data = subjectData(item);
+    const position = data.latitude !== undefined && data.longitude !== undefined
+      ? `${Number(data.latitude).toFixed(6)}, ${Number(data.longitude).toFixed(6)}` : "—";
+    const altitude = data.altitude_geo_m !== undefined ? `${Math.round(Number(data.altitude_geo_m))} m` : "—";
+    const speedTrack = [
+      data.speed_mps !== undefined ? `${Number(data.speed_mps).toFixed(1)} m/s` : "",
+      data.track_deg !== undefined ? `${Math.round(Number(data.track_deg))}°` : ""
+    ].filter(Boolean).join(" / ") || "—";
+    return [data.uas_id || item.subject_id || "", data.transmitter || "", item.first_seen || "",
+      item.last_seen || "", position, altitude, speedTrack, data.seen_count || 0,
+      (data.track || []).length];
+  }, historySearch);
   renderHistoryTable("history-noaa-subjects", noaaSubjects, (item) => [
     detailLink(item.subject || "", "noaa-subject", subjectData(item).event_id || item.subject_id || ""),
     subjectTypeLabel(item),

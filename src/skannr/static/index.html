@@ -31,6 +31,7 @@
     <button class="tab" data-tab="wifi">Wi-Fi Scan <span class="tab-row-count" data-tab-count="wifi"></span><span class="tab-status-dots" data-status-tab="wifi"></span></button>
     <button class="tab" data-tab="wifi_monitor">Wi-Fi Monitor <span class="tab-row-count" data-tab-count="wifi_monitor"></span><span class="tab-status-dots" data-status-tab="wifi_monitor"></span></button>
     <button class="tab" data-tab="bluetooth">Bluetooth <span class="tab-row-count" data-tab-count="bluetooth"></span><span class="tab-status-dots" data-status-tab="bluetooth"></span></button>
+    <button class="tab" data-tab="remote_id">Remote ID <span class="tab-row-count" data-tab-count="remote_id"></span></button>
     <button class="tab" data-tab="rtl433">RTL-433 <span class="tab-row-count" data-tab-count="rtl433"></span><span class="tab-status-dots" data-status-tab="rtl433"></span></button>
     <button class="tab" data-tab="adsb">ADS-B <span class="tab-row-count" data-tab-count="adsb"></span><span class="tab-status-dots" data-status-tab="adsb"></span></button>
     <button class="tab" data-tab="rayhunter">Rayhunter <span class="tab-row-count" data-tab-count="rayhunter"></span><span class="tab-status-dots" data-status-tab="rayhunter"></span></button>
@@ -165,6 +166,14 @@
         <table class="history-bluetooth-table">
           <thead><tr><th class="history-bt-col-mac">MAC</th><th class="history-bt-col-identity">Identity</th><th class="history-bt-col-services">Services / UUIDs</th><th class="history-bt-col-model">Model</th><th class="history-bt-col-serial">Serial</th><th class="history-bt-col-firmware">Firmware</th><th class="history-bt-col-pnp">PnP ID</th><th class="history-bt-col-first-seen">First Seen</th><th class="history-bt-col-last-seen">Last Seen</th><th class="history-bt-col-signal">Signal</th><th class="history-bt-col-counts" title="BLE Seen / Updates">BLE Seen/Upd</th><th class="history-bt-col-sessions" title="Sessions">Sess.</th><th class="history-bt-col-action" title="Action">Action</th></tr></thead>
           <tbody id="history-bluetooth-devices"></tbody>
+        </table>
+      </div>
+      <div id="history-remote-id-panel" class="subpanel history-source-panel" data-source="remote_id">
+        <h3>Remote ID Aircraft</h3>
+        <div class="status-strip muted">Aircraft ID and broadcast positions received by BLE or Wi-Fi monitor. Observer tracks are retained only when enabled in GPSD settings.</div>
+        <table>
+          <thead><tr><th>UAS ID</th><th>Transmitter</th><th>First Seen</th><th>Last Seen</th><th>Latest Position</th><th>Altitude</th><th>Speed / Track</th><th>Broadcasts</th><th>Track Samples</th></tr></thead>
+          <tbody id="history-remote-id-aircraft"></tbody>
         </table>
       </div>
       <div id="history-rtl433-panel" class="subpanel history-source-panel" data-source="rtl433">
@@ -317,6 +326,15 @@
         </table>
       </div>
 
+    </section>
+
+    <section id="tab-remote_id" class="panel">
+      <div class="panel-head"><h2>Remote ID</h2></div>
+      <div class="status-strip muted">Decodes OpenDroneID broadcasts in BLE service data and Wi-Fi beacon elements when BLE Scan or Wi-Fi Monitor is running. Nearby alerts require a fresh GPS fix.</div>
+      <table>
+        <thead><tr><th>UAS ID</th><th>Transmitter</th><th>Position</th><th>Altitude</th><th>Speed</th><th>Transport / Signal</th><th>Last Seen</th></tr></thead>
+        <tbody id="remote-id-live-rows"></tbody>
+      </table>
     </section>
 
     <section id="tab-adsb" class="panel">

@@ -90,6 +90,7 @@ Alerts are the ACK/expiry-oriented layer. Each nested rule usually has `enabled`
 | `ack_memory_alert_types` | Alert types that use long-lived ACK memory. |
 | `pushover.*` | Optional Pushover notification integration and credentials. |
 | `drone_wifi.*` | Wi-Fi drone/remote-ID SSID/vendor/OUI alert patterns. |
+| `remote_id_proximity.*` | Alert radius for decoded aircraft when a fresh GPSD observer fix is available; `radius_m` defaults to 1000. |
 | `flock_camera.*` | Flock Safety ALPR camera detection via Wi-Fi probe/beacon OUI, vendor, and SSID patterns. |
 | `public_safety_equipment.*` | Candidate body-camera and Flock BLE/Wi-Fi signatures; includes BLE company IDs, UUID/name/payload patterns, and Wi-Fi OUI/SSID patterns. Alerts include matched evidence and a confidence label. A signature match is not proof of equipment identity or use. |
 | `aprs_weather.*`, `pws_weather.*` | Weather alert thresholds for APRS/PWS data. |
@@ -377,10 +378,22 @@ Protocol numbers are owned by rtl_433 and can vary by version. Use `rtl_433 -R h
 | `connect_timeout_sec`, `read_timeout_sec`, `retry_interval_sec` | Connection and retry behavior. |
 | `status_interval_sec` | Maximum cadence for coordinate-free fix-status updates. |
 | `stale_after_sec` | Maximum age of the latest fix for location-aware features to use it. |
+| `store_observer_track` | Off by default. When enabled, Remote ID event/history records can contain up to 24 observer samples per aircraft; raw JSONL follows `persistence.filesystem.retention_days`. |
 
 GPSD manages the attached USB/serial GNSS receiver. Skannr keeps only the most
 recent fix in memory and does not persist a location track by default. Existing
 static observer coordinates continue to work when this collector is disabled.
+Live Remote ID proximity alerts need GPSD. Observer coordinates are not written
+to Remote ID events/history unless `store_observer_track: true` is explicitly
+set. The ordinary GPSD status event remains coordinate-free.
+
+### Remote ID broadcasts
+
+Skannr decodes OpenDroneID Basic ID, Location, Self ID, System, and Operator ID
+messages from BLE service data and Wi-Fi beacon vendor elements. BLE Scan and
+Wi-Fi Monitor provide the radio capture; Wi-Fi NAN transport and authentication
+verification are not implemented. Aircraft-reported coordinates are retained
+in Remote ID Subject History. Observer GPS coordinates are separately opt-in.
 
 ### LAN: `collectors/lan.yaml`
 

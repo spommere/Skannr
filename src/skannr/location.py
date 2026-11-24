@@ -1,7 +1,7 @@
 """Volatile observer location shared by location-aware collectors and alerts.
 
-The current implementation keeps only the latest valid fix in memory. It does
-not write observer positions to Skannr's event logs or materialized history.
+The provider keeps only the latest valid fix in memory. Consumers may attach
+observer samples to selected derived records when a separate opt-in is enabled.
 """
 
 import threading

@@ -18,3 +18,9 @@ read_timeout_sec: 15
 retry_interval_sec: 5
 status_interval_sec: 5
 stale_after_sec: 10
+
+# Privacy default: do not write observer GPS positions into Remote ID event and
+# history logs. When enabled, each aircraft retains at most 24 observer points;
+# raw JSONL files follow persistence.retention_days. Proximity alerts still work
+# with this disabled.
+store_observer_track: false

@@ -6,9 +6,11 @@ set of live conditions that should be visible from any dashboard tab.
 
 import fnmatch
 import re
+import math
 from collections import deque
 
 from .bus import local_now
+from .location import current_observer_location
 from .collectors.lan import clean_lan_data
 from .collectors.noaa import (
     clean_noaa_data,
@@ -70,6 +72,11 @@ DEFAULT_ALERT_CONFIG = {
         "oui_prefixes": [
             "60:60:1f",
         ],
+    },
+    "remote_id_proximity": {
+        "enabled": True,
+        "level": "warning",
+        "radius_m": 1000,
     },
     "flock_camera": {
         "enabled": True,
@@ -387,6 +394,10 @@ class AlertEngine:
             )
         elif collector == "ble":
             alerts.extend(self.process_ble(event_type, data, timestamp, now, emit))
+        elif collector == "remote_id":
+            alerts.extend(
+                self.process_remote_id(event_type, data, timestamp, now, emit)
+            )
         elif collector == "aprsis":
             alerts.extend(self.process_aprsis(event_type, data, timestamp, now, emit))
         elif collector == "rayhunter":
@@ -410,6 +421,75 @@ class AlertEngine:
         elif collector == "system":
             alerts.extend(self.process_system(event_type, data, timestamp, now, emit))
         return alerts
+
+    def process_remote_id(self, event_type, data, timestamp, now, emit):
+        """Alert when a decoded aircraft position is within the configured radius."""
+        if event_type != "remote_id_observation":
+            return []
+        rule = self.rule("remote_id_proximity")
+        if not rule.get("enabled", True):
+            return []
+        try:
+            aircraft_lat = float(data.get("latitude"))
+            aircraft_lon = float(data.get("longitude"))
+        except (TypeError, ValueError):
+            return []
+        observer = current_observer_location()
+        if not observer:
+            return []
+        distance_m = self.distance_m(
+            observer.get("latitude"), observer.get("longitude"),
+            aircraft_lat, aircraft_lon,
+        )
+        try:
+            radius_m = max(0.0, float(rule.get("radius_m", 1000)))
+        except (TypeError, ValueError):
+            radius_m = 1000.0
+        if distance_m is None or distance_m > radius_m:
+            return []
+        uas_id = str(data.get("uas_id") or data.get("transmitter") or "unknown")
+        distance_label = "{:.0f} m".format(distance_m)
+        return self.emit_alert(
+            "remote_id_proximity",
+            "remote-id-proximity:{}".format(uas_id),
+            rule.get("level", "warning"),
+            "remote_id",
+            "Remote ID aircraft nearby",
+            uas_id,
+            "Decoded Remote ID aircraft position is approximately {} away.".format(
+                distance_label
+            ),
+            timestamp,
+            now,
+            emit,
+            {
+                "uas_id": uas_id,
+                "distance_m": round(distance_m, 1),
+                "radius_m": radius_m,
+                "transport": data.get("transport") or "",
+            },
+        )
+
+    @staticmethod
+    def distance_m(lat1, lon1, lat2, lon2):
+        """Return great-circle distance in meters for valid coordinates."""
+        try:
+            lat1, lon1, lat2, lon2 = map(float, (lat1, lon1, lat2, lon2))
+        except (TypeError, ValueError):
+            return None
+        if not (-90 <= lat1 <= 90 and -90 <= lat2 <= 90):
+            return None
+        if not (-180 <= lon1 <= 180 and -180 <= lon2 <= 180):
+            return None
+        radians = math.pi / 180
+        dlat = (lat2 - lat1) * radians
+        dlon = (lon2 - lon1) * radians
+        value = (
+            math.sin(dlat / 2) ** 2
+            + math.cos(lat1 * radians) * math.cos(lat2 * radians)
+            * math.sin(dlon / 2) ** 2
+        )
+        return 6371000 * 2 * math.atan2(math.sqrt(value), math.sqrt(max(0, 1 - value)))
 
     def snapshot(self):
         """Return active alerts newest/highest first for browser reconnects."""

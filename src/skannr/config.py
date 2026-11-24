@@ -253,6 +253,11 @@ DEFAULT_CONFIG = {
             "nearby_radius_km": 10,
             "low_altitude_ft": 1500,
         },
+        "remote_id_proximity": {
+            "enabled": True,
+            "level": "warning",
+            "radius_m": 1000,
+        },
         "rtl433_signal": {
             "enabled": False,
             "level": "warning",

@@ -1783,14 +1783,27 @@ stale_after_sec: 10
 
 System Status shows GPSD's endpoint and whether the latest fix is fresh,
 including horizontal accuracy when available. Skannr keeps the latest
-latitude/longitude in process memory for future proximity features; it emits
-only coordinate-free status events and does not save a location track. Set
+latitude/longitude in process memory for proximity features and emits only
+coordinate-free GPS status events. Observer coordinates are not persisted by
+default. Set `store_observer_track: true` only when you want observer samples in
+Remote ID event/history records; each materialized aircraft track keeps at most
+24 samples, and raw JSONL follows the configured retention period. Set
 `enabled: false` to stop location collection. If GPSD was installed only for
 Skannr, `sudo systemctl disable --now gpsd.socket gpsd.service` stops and
 disables the socket and service. Leave them enabled if another local program
 uses GPSD. To undo the explicit device setting, restore the prior values in
 `/etc/default/gpsd` (commonly `DEVICES=""` and `GPSD_OPTIONS=""`) and run
 `sudo systemctl restart gpsd.socket gpsd.service`.
+
+## Remote ID aircraft
+
+The Remote ID view decodes OpenDroneID messages from BLE advertisements while
+BLE Scan is running and from Wi-Fi beacon vendor elements while Wi-Fi Monitor is
+running. Aircraft-reported IDs, position, altitude, speed, and bounded position
+history appear in Subject History. A fresh GPSD fix enables the
+`alerts.remote_id_proximity` warning, which defaults to a 1 km radius. Observer
+coordinates remain volatile unless `collectors.gpsd.store_observer_track` is
+enabled. Wi-Fi NAN transport and authentication verification are not included.
 
 ## APRS-IS
 

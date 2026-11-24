@@ -1951,6 +1951,11 @@ def enabled_subject_history_collectors():
     collector_config = (runtime.get("config") or {}).get("collectors") or {}
     enabled = set()
     for collector in SubjectHistoryBuilder.COLLECTORS:
+        if collector == "remote_id":
+            # Remote ID is a derived history stream from BLE/Wi-Fi collectors,
+            # not a separately enabled hardware collector.
+            enabled.add(collector)
+            continue
         section = collector_config.get(collector)
         if section is not None and bool(section.get("enabled", True)):
             enabled.add(collector)

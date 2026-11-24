@@ -15,7 +15,9 @@ import yaml
 
 from ..identity_policy import bluetooth_property_like_name
 from ..log_utils import now_epoch
+from ..location import current_observer_location
 from ..paths import CONFIG_COLLECTORS_DIR, DATA_COLLECTORS_DIR
+from .remote_id import RemoteIDTracker, decode_ble_service_data
 from .base import (
     BaseCollector,
     STATE_OFFLINE,
@@ -52,6 +54,7 @@ class _SeenAdvertisement:
         self.rssi = None
         self.manufacturer_data = {}
         self.service_uuids = []
+        self.service_data = {}
 
 
 def adapter_operation_lock(adapter):
@@ -219,6 +222,7 @@ class BLECollector(BaseCollector):
         self._runtime_force_discover_scan = bool(
             self.config.get("force_discover_scan", False)
         )
+        self._remote_id_tracker = RemoteIDTracker()
         self._runtime_bluetoothctl_scan = bool(
             self.config.get("force_bluetoothctl_scan", False)
         )
@@ -318,6 +322,7 @@ class BLECollector(BaseCollector):
                     "service_uuids": self.service_uuids(advertisement),
                     "adv_data_hex": self.manufacturer_data_hex(advertisement),
                 }
+                await self.publish_remote_id(mac, advertisement, rssi)
                 payload.update(self.findmy_accessory_fields(advertisement))
                 previous = seen.get(mac)
                 payload = self.merge_display_payload(previous, payload)
@@ -789,6 +794,19 @@ class BLECollector(BaseCollector):
             if manufacturer_data:
                 entry["advertisement"].manufacturer_data.update(manufacturer_data)
 
+            service_data = (
+                getattr(advertisement, "service_data", None)
+                if advertisement is not None
+                else None
+            )
+            if isinstance(service_data, dict):
+                for uuid, value in service_data.items():
+                    values = entry["advertisement"].service_data.setdefault(uuid, [])
+                    encoded = bytes(value) if not isinstance(value, bytes) else value
+                    if encoded not in values:
+                        values.append(encoded)
+                    del values[:-12]
+
             for service in getattr(advertisement, "service_uuids", None) or []:
                 entry["service_uuids"].add(service)
             entry["advertisement"].service_uuids = sorted(entry["service_uuids"])
@@ -800,6 +818,35 @@ class BLECollector(BaseCollector):
         finally:
             await self.maybe_await(instance.stop())
         return [(entry["device"], entry["advertisement"]) for entry in seen.values()]
+
+    async def publish_remote_id(self, mac, advertisement, rssi):
+        """Publish rate-limited decoded Remote ID observations when present."""
+        messages = decode_ble_service_data(
+            getattr(advertisement, "service_data", None) if advertisement else None
+        )
+        if not messages:
+            return
+        global_config = self.config.get("_global_config") or {}
+        gps_config = (global_config.get("collectors") or {}).get("gpsd") or {}
+        store_observer_location = bool(gps_config.get("store_observer_track", False))
+        observer = current_observer_location() if store_observer_location else None
+        data = self._remote_id_tracker.observe(
+            mac,
+            messages,
+            "BLE",
+            rssi=rssi,
+            observer_location=observer,
+            store_observer_location=store_observer_location,
+        )
+        if data:
+            await self.bus.publish(
+                {
+                    "collector": "remote_id",
+                    "type": "remote_id_observation",
+                    "severity": "info",
+                    "data": data,
+                }
+            )
 
     def build_callback_scanner(self, scanner, callback, use_adapter):
         """Create a BleakScanner while tolerating old constructor signatures."""
