@@ -616,7 +616,9 @@ installs. `config/` is machine-specific local state.
 
   Pushover delivery is best-effort. Browser Alerts remain the source of truth;
   phone delivery runs in a background worker and is skipped when internet
-  connectivity is unavailable.
+  connectivity is unavailable. Each phone alert includes this machine's short
+  hostname after its severity, for example `WARNING | pi4 | APRS-IS severe
+  weather | ...`.
 - Every rule has `enabled` and `level`; some also have `critical_level`.
 - `drone_wifi.min_rssi`, `ssid_patterns`, `vendor_patterns`, `oui_prefixes`:
   DJI/Remote ID style Wi-Fi alert matching.

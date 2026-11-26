@@ -89,7 +89,7 @@ Alerts are the ACK/expiry-oriented layer. Each nested rule usually has `enabled`
 | `dedupe_sec` | Coalescing window for repeated active alerts. |
 | `ack_memory_ttl_sec` | How long ACK memory survives after poll-feed alert rows expire. |
 | `ack_memory_alert_types` | Alert types that use long-lived ACK memory. |
-| `pushover.*` | Optional Pushover notification integration and credentials. |
+| `pushover.*` | Optional Pushover notification integration and credentials. Outgoing messages include the sending machine's short hostname after the alert level. |
 | `drone_wifi.*` | Wi-Fi drone/remote-ID SSID/vendor/OUI alert patterns. |
 | `remote_id_proximity.*` | Alert radius for decoded aircraft when a fresh GPSD observer fix is available; `radius_m` defaults to 1000. |
 | `flock_camera.*` | Flock Safety ALPR camera detection via Wi-Fi probe/beacon OUI, vendor, and SSID patterns. |

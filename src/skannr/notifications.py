@@ -1,6 +1,7 @@
 """Optional external alert notification delivery."""
 
 import logging
+import socket
 import urllib.parse
 import urllib.request
 
@@ -30,12 +31,16 @@ def pushover_alert_message(alert):
     alert = alert or {}
     parts = []
     level = str(alert.get("level") or "").strip().upper()
+    node_name = (socket.gethostname() or "").split(".", 1)[0].strip()
+    node_name = node_name or "unknown-node"
     title = str(alert.get("title") or "").strip()
     subject = str(alert.get("subject") or "").strip()
     summary = str(alert.get("summary") or "").strip()
     source = str(alert.get("source") or "").strip()
     if level:
         parts.append(level)
+    if node_name:
+        parts.append(node_name)
     if title:
         parts.append(title)
     if subject:

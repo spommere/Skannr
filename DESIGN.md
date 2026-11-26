@@ -116,7 +116,8 @@ The normal event path is:
    to a background notification worker. Duplicate/update alert traffic is not
    pushed. Delivery is best-effort and guarded by the generic internet
    connectivity check, so unavailable internet or Pushover API failures are
-   logged without blocking collector fan-out.
+   logged without blocking collector fan-out. The notification message includes
+   the sending machine's short hostname after the alert level.
 9. `FindingsEngine.process()` may emit one or more finding events.
 10. Finding events are broadcast to browsers and may be retained under
     `runtime/logs/findings` as live/debug evidence. Retained finding logs are
